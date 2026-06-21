@@ -207,9 +207,13 @@ PublishVlog(o) ==
                   pending, stored, job_state, job_kind, job_disk, job_progress>>
 
 CrashRestart ==
+    \* plog connections and network messages are volatile. The pending pair is
+    \* a durable write intent, so RetryPlog can resend it after recovery.
+    /\ plog_ready' = {}
+    /\ pending' = [d \in Disks |-> pending[d] \cap Pairs]
     /\ last_rpc' = "crash-restart"
-    /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
-                  node_state, pending, stored, job_state, job_kind, job_disk, job_progress>>
+    /\ UNCHANGED <<file_state, object_mode, object_state, disk_state, node_state,
+                  stored, job_state, job_kind, job_disk, job_progress>>
 
 Read(o) ==
     /\ object_state[o] = "committed"
