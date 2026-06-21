@@ -18,6 +18,10 @@ vars == <<file_state, object_mode, object_state, plog_ready,
           job_state, job_kind, job_disk, job_progress, last_rpc>>
 
 Pairs == Objects \times (0..TotalShards)
+Request(d, o, s) == <<"request", d, o, s>>
+Ack(d, o, s) == <<"ack", d, o, s>>
+Messages == {Request(d, o, s) : d \in Disks, o \in Objects, s \in 0..TotalShards} \cup
+            {Ack(d, o, s) : d \in Disks, o \in Objects, s \in 0..TotalShards}
 
 \* Bounded TLC configurations select one of these relations with
 \* `DiskNodes <- ...`; every valid relation assigns exactly one node per disk.
@@ -143,23 +147,45 @@ WritePlog(d, o, s) ==
     /\ ValidShard(o, s)
     /\ PlacementAllowed(o, s, d)
     /\ <<o, s>> \notin stored[d]
-    /\ pending' = [pending EXCEPT ![d] = @ \cup {<<o, s>>}]
+    /\ pending' = [pending EXCEPT ![d] = @ \cup {<<o, s>>, Request(d, o, s)}]
     /\ last_rpc' = last_rpc
     /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
                   node_state, stored, job_state, job_kind, job_disk, job_progress>>
 
 CommitPlog(d, o, s) ==
     /\ DiskLive(d)
-    /\ <<o, s>> \in pending[d]
+    /\ Request(d, o, s) \in pending[d]
+    /\ pending' = [pending EXCEPT ![d] = @ \ {Request(d, o, s)}]
     /\ stored' = [stored EXCEPT ![d] = @ \cup {<<o, s>>}]
     /\ last_rpc' = last_rpc
     /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
-                  node_state, pending, job_state, job_kind, job_disk, job_progress>>
+                  node_state, job_state, job_kind, job_disk, job_progress>>
 
-AckPlog(d, o, s) ==
+SendPlogAck(d, o, s) ==
     /\ DiskLive(d)
     /\ <<o, s>> \in pending[d] \cap stored[d]
-    /\ pending' = [pending EXCEPT ![d] = @ \ {<<o, s>>}]
+    /\ pending' = [pending EXCEPT ![d] = @ \cup {Ack(d, o, s)}]
+    /\ last_rpc' = last_rpc
+    /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
+                  node_state, stored, job_state, job_kind, job_disk, job_progress>>
+
+ReceivePlogAck(d, o, s) ==
+    /\ Ack(d, o, s) \in pending[d]
+    /\ pending' = [pending EXCEPT ![d] = @ \ {<<o, s>>, Ack(d, o, s)}]
+    /\ last_rpc' = last_rpc
+    /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
+                  node_state, stored, job_state, job_kind, job_disk, job_progress>>
+
+RetryPlog(d, o, s) ==
+    /\ <<o, s>> \in pending[d]
+    /\ pending' = [pending EXCEPT ![d] = @ \cup {Request(d, o, s)}]
+    /\ last_rpc' = last_rpc
+    /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
+                  node_state, stored, job_state, job_kind, job_disk, job_progress>>
+
+DropPlogMessage(d, o, s) ==
+    /\ \E tag \in {"request", "ack"} : <<tag, d, o, s>> \in pending[d]
+    /\ pending' = [pending EXCEPT ![d] = @ \ {Request(d, o, s), Ack(d, o, s)}]
     /\ last_rpc' = last_rpc
     /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
                   node_state, stored, job_state, job_kind, job_disk, job_progress>>
@@ -347,7 +373,7 @@ Next ==
     \/ \E o \in Objects : WriteVlog(o)
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : WritePlog(d, o, s)
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : CommitPlog(d, o, s)
-    \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : AckPlog(d, o, s)
+    \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : SendPlogAck(d, o, s) \/ ReceivePlogAck(d, o, s) \/ RetryPlog(d, o, s) \/ DropPlogMessage(d, o, s)
     \/ \E o \in Objects : CommitVlog(o)
     \/ \E o \in Objects : Read(o) \/ ReadVlog(o)
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : ReadPlog(d, o, s)
@@ -366,7 +392,7 @@ TypeOK ==
     /\ \A d \in Disks : Cardinality({n \in Nodes : <<d, n>> \in DiskNodes}) = 1
     /\ \A d \in Disks : disk_state[d] \in {"absent", "active", "draining", "failed", "detached"}
     /\ \A n \in Nodes : node_state[n] \in {"working", "failed"}
-    /\ \A d \in Disks : pending[d] \subseteq Pairs /\ stored[d] \subseteq Pairs
+    /\ \A d \in Disks : pending[d] \subseteq Pairs \cup Messages /\ stored[d] \subseteq Pairs
     /\ \A j \in Jobs : job_state[j] \in {"idle", "running", "done"}
 
 Durability == \A o \in Objects : object_state[o] = "committed" => Readable(o)
