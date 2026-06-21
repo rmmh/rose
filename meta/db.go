@@ -45,6 +45,26 @@ func initSchema(db *sql.DB) error {
 			chunks BLOB NOT NULL DEFAULT ''
 		);
 
+		-- The current namespace points at immutable file versions.  Snapshots
+		-- retain those version IDs even after a head is replaced or removed.
+		CREATE TABLE IF NOT EXISTS file_head (
+			path TEXT PRIMARY KEY,
+			file_id INTEGER NOT NULL REFERENCES file(id)
+		);
+
+		CREATE TABLE IF NOT EXISTS snapshot (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS snapshot_file (
+			snapshot_id INTEGER NOT NULL REFERENCES snapshot(id) ON DELETE CASCADE,
+			path TEXT NOT NULL,
+			file_id INTEGER NOT NULL REFERENCES file(id),
+			PRIMARY KEY (snapshot_id, path)
+		);
+
 		CREATE TABLE IF NOT EXISTS chunk (
 			hash BLOB PRIMARY KEY,
 			refcount INTEGER NOT NULL DEFAULT 0,

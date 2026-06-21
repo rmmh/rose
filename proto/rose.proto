@@ -10,6 +10,11 @@ service Rose {
   rpc Read(ReadRequest) returns (ReadResponse);
   rpc Close(CloseRequest) returns (CloseResponse);
   rpc Getattr(GetattrRequest) returns (GetattrResponse);
+  rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
+  rpc Rename(RenameRequest) returns (RenameResponse);
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+  rpc OpenSnapshot(OpenSnapshotRequest) returns (OpenResponse);
 
   // Virtual Log operations
   rpc MakeVlog(MakeVlogRequest) returns (MakeVlogResponse);
@@ -66,6 +71,41 @@ message GetattrRequest {
 
 message GetattrResponse {
   int64 size = 1;
+}
+
+message UnlinkRequest {
+  string path = 1;
+}
+
+message UnlinkResponse {
+}
+
+message RenameRequest {
+  string old_path = 1;
+  string new_path = 2;
+}
+
+message RenameResponse {
+}
+
+message CreateSnapshotRequest {
+  string name = 1;
+}
+
+message CreateSnapshotResponse {
+  uint64 snapshot_id = 1;
+}
+
+message DeleteSnapshotRequest {
+  uint64 snapshot_id = 1;
+}
+
+message DeleteSnapshotResponse {
+}
+
+message OpenSnapshotRequest {
+  uint64 snapshot_id = 1;
+  string path = 2;
 }
 
 message CloseRequest {

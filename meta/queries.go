@@ -36,36 +36,96 @@ func (d *DB) AssignPlogToVlog(ctx context.Context, vlogID uint32, shardIdx int, 
 // OpenFile looks up the latest file ID for a path. If it does not exist, returns 0.
 func (d *DB) OpenFile(ctx context.Context, path string) (int64, error) {
 	var id int64
-	err := d.db.QueryRowContext(ctx, "SELECT id FROM file WHERE path = ? ORDER BY id DESC LIMIT 1", path).Scan(&id)
+	err := d.db.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", path).Scan(&id)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
 	return id, err
 }
 
-// AddChunk adds a chunk mapping or increments its refcount if it already exists.
+// AddChunk records immutable chunk placement. References are adjusted only when
+// a file version is published, unlinked, or captured/released by a snapshot.
 func (d *DB) AddChunk(ctx context.Context, hash []byte, vlogID uint32, vaddrOffset int64, logicalLen int, compressedLen int) error {
 	_, err := d.db.ExecContext(ctx, `
 		INSERT INTO chunk (hash, refcount, vlog_id, vaddr_offset, logical_len, compressed_len)
-		VALUES (?, 1, ?, ?, ?, ?)
-		ON CONFLICT(hash) DO UPDATE SET refcount = refcount + 1
+		VALUES (?, 0, ?, ?, ?, ?)
+		ON CONFLICT(hash) DO NOTHING
 	`, hash, vlogID, vaddrOffset, logicalLen, compressedLen)
 	return err
 }
 
-// CommitFile creates a new file entry acting as a snapshot.
+func chunkHashes(chunks []byte) [][]byte {
+	var hashes [][]byte
+	for i := 0; i+19 <= len(chunks); i += 19 {
+		hashes = append(hashes, chunks[i:i+15])
+	}
+	return hashes
+}
+
+func adjustChunkRefs(ctx context.Context, tx *sql.Tx, chunks []byte, delta int) error {
+	for _, hash := range chunkHashes(chunks) {
+		if _, err := tx.ExecContext(ctx, "UPDATE chunk SET refcount = refcount + ? WHERE hash = ?", delta, hash); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func fileChunks(ctx context.Context, tx *sql.Tx, fileID int64) ([]byte, error) {
+	var chunks []byte
+	err := tx.QueryRowContext(ctx, "SELECT chunks FROM file WHERE id = ?", fileID).Scan(&chunks)
+	return chunks, err
+}
+
+// CommitFile atomically publishes a new immutable file version and transfers
+// the namespace reference from the previous head.
 func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, chunks []byte) (int64, error) {
-	res, err := d.db.ExecContext(ctx, "INSERT INTO file (path, mtime, chunks) VALUES (?, ?, ?)", path, mtime, chunks)
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin file commit: %w", err)
+	}
+	defer tx.Rollback()
+
+	var oldID int64
+	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", path).Scan(&oldID)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, fmt.Errorf("load file head: %w", err)
+	}
+	if err == nil {
+		oldChunks, err := fileChunks(ctx, tx, oldID)
+		if err != nil {
+			return 0, fmt.Errorf("load old file chunks: %w", err)
+		}
+		if err := adjustChunkRefs(ctx, tx, oldChunks, -1); err != nil {
+			return 0, fmt.Errorf("decrement old chunk refs: %w", err)
+		}
+	}
+
+	if err := adjustChunkRefs(ctx, tx, chunks, 1); err != nil {
+		return 0, fmt.Errorf("increment new chunk refs: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, "INSERT INTO file (path, mtime, chunks) VALUES (?, ?, ?)", path, mtime, chunks)
 	if err != nil {
 		return 0, fmt.Errorf("insert file: %w", err)
 	}
 	id, err := res.LastInsertId()
-	return id, err
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id) VALUES (?, ?)
+		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id`, path, id); err != nil {
+		return 0, fmt.Errorf("publish file head: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit file version: %w", err)
+	}
+	return id, nil
 }
 
 func (d *DB) GetFileSize(ctx context.Context, path string) (int64, error) {
 	var chunks []byte
-	err := d.db.QueryRowContext(ctx, "SELECT chunks FROM file WHERE path = ? ORDER BY id DESC LIMIT 1", path).Scan(&chunks)
+	err := d.db.QueryRowContext(ctx, `SELECT file.chunks FROM file_head
+		JOIN file ON file.id = file_head.file_id WHERE file_head.path = ?`, path).Scan(&chunks)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
@@ -107,4 +167,156 @@ func (d *DB) GetFileChunks(ctx context.Context, fileID int64) ([]FileChunkInfo, 
 		chunks = append(chunks, info)
 	}
 	return chunks, nil
+}
+
+func (d *DB) CreateSnapshot(ctx context.Context, name string, createdAt int64) (uint64, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, "INSERT INTO snapshot (name, created_at) VALUES (?, ?)", name, createdAt)
+	if err != nil {
+		return 0, fmt.Errorf("create snapshot: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT path, file_id FROM file_head")
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path string
+		var fileID int64
+		if err := rows.Scan(&path, &fileID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO snapshot_file (snapshot_id, path, file_id) VALUES (?, ?, ?)", id, path, fileID); err != nil {
+			return 0, err
+		}
+		chunks, err := fileChunks(ctx, tx, fileID)
+		if err != nil {
+			return 0, err
+		}
+		if err := adjustChunkRefs(ctx, tx, chunks, 1); err != nil {
+			return 0, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return uint64(id), nil
+}
+
+func (d *DB) DeleteSnapshot(ctx context.Context, snapshotID uint64) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, "SELECT file_id FROM snapshot_file WHERE snapshot_id = ?", snapshotID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var fileID int64
+		if err := rows.Scan(&fileID); err != nil {
+			return err
+		}
+		chunks, err := fileChunks(ctx, tx, fileID)
+		if err != nil {
+			return err
+		}
+		if err := adjustChunkRefs(ctx, tx, chunks, -1); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM snapshot WHERE id = ?", snapshotID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) OpenSnapshotFile(ctx context.Context, snapshotID uint64, path string) (int64, error) {
+	var fileID int64
+	err := d.db.QueryRowContext(ctx, "SELECT file_id FROM snapshot_file WHERE snapshot_id = ? AND path = ?", snapshotID, path).Scan(&fileID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return fileID, err
+}
+
+func (d *DB) UnlinkFile(ctx context.Context, path string) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var fileID int64
+	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", path).Scan(&fileID)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	chunks, err := fileChunks(ctx, tx, fileID)
+	if err != nil {
+		return err
+	}
+	if err := adjustChunkRefs(ctx, tx, chunks, -1); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM file_head WHERE path = ?", path); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
+	if oldPath == newPath {
+		return nil
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var oldID int64
+	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", oldPath).Scan(&oldID)
+	if err != nil {
+		return err
+	}
+	var replacedID int64
+	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", newPath).Scan(&replacedID)
+	if err == nil {
+		chunks, err := fileChunks(ctx, tx, replacedID)
+		if err != nil {
+			return err
+		}
+		if err := adjustChunkRefs(ctx, tx, chunks, -1); err != nil {
+			return err
+		}
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id) VALUES (?, ?)
+		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id`, newPath, oldID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM file_head WHERE path = ?", oldPath); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

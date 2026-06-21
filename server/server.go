@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/rmmh/rose/meta"
@@ -17,14 +19,28 @@ type Server struct {
 
 	vlogMu     sync.Mutex
 	activeVlog uint32
+	dataDir    string
 }
 
 func NewServer(db *meta.DB) *Server {
 	return &Server{
-		db:    db,
-		plogs: make(map[uint32]*storage.Plog),
-		vlogs: make(map[uint32]*storage.Vlog),
+		db:      db,
+		plogs:   make(map[uint32]*storage.Plog),
+		vlogs:   make(map[uint32]*storage.Vlog),
+		dataDir: "data",
 	}
+}
+
+// NewServerWithDataDir is intended for embedding and integration tests that
+// need isolated physical-log files without relying on a FUSE mount.
+func NewServerWithDataDir(db *meta.DB, dataDir string) *Server {
+	s := NewServer(db)
+	s.dataDir = dataDir
+	return s
+}
+
+func (s *Server) plogPath(id uint32) string {
+	return filepath.Join(s.dataDir, "plog-"+fmt.Sprint(id))
 }
 
 func (s *Server) GetDB() *meta.DB {

@@ -24,6 +24,11 @@ const (
 	Rose_Read_FullMethodName              = "/rose.v1.Rose/Read"
 	Rose_Close_FullMethodName             = "/rose.v1.Rose/Close"
 	Rose_Getattr_FullMethodName           = "/rose.v1.Rose/Getattr"
+	Rose_Unlink_FullMethodName            = "/rose.v1.Rose/Unlink"
+	Rose_Rename_FullMethodName            = "/rose.v1.Rose/Rename"
+	Rose_CreateSnapshot_FullMethodName    = "/rose.v1.Rose/CreateSnapshot"
+	Rose_DeleteSnapshot_FullMethodName    = "/rose.v1.Rose/DeleteSnapshot"
+	Rose_OpenSnapshot_FullMethodName      = "/rose.v1.Rose/OpenSnapshot"
 	Rose_MakeVlog_FullMethodName          = "/rose.v1.Rose/MakeVlog"
 	Rose_WriteVlog_FullMethodName         = "/rose.v1.Rose/WriteVlog"
 	Rose_ReadVlog_FullMethodName          = "/rose.v1.Rose/ReadVlog"
@@ -50,6 +55,11 @@ type RoseClient interface {
 	Read(ctx context.Context, in *ReadRequest, opts ...grpc.CallOption) (*ReadResponse, error)
 	Close(ctx context.Context, in *CloseRequest, opts ...grpc.CallOption) (*CloseResponse, error)
 	Getattr(ctx context.Context, in *GetattrRequest, opts ...grpc.CallOption) (*GetattrResponse, error)
+	Unlink(ctx context.Context, in *UnlinkRequest, opts ...grpc.CallOption) (*UnlinkResponse, error)
+	Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*RenameResponse, error)
+	CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error)
+	DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error)
+	OpenSnapshot(ctx context.Context, in *OpenSnapshotRequest, opts ...grpc.CallOption) (*OpenResponse, error)
 	// Virtual Log operations
 	MakeVlog(ctx context.Context, in *MakeVlogRequest, opts ...grpc.CallOption) (*MakeVlogResponse, error)
 	WriteVlog(ctx context.Context, in *WriteVlogRequest, opts ...grpc.CallOption) (*WriteVlogResponse, error)
@@ -122,6 +132,56 @@ func (c *roseClient) Getattr(ctx context.Context, in *GetattrRequest, opts ...gr
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetattrResponse)
 	err := c.cc.Invoke(ctx, Rose_Getattr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *roseClient) Unlink(ctx context.Context, in *UnlinkRequest, opts ...grpc.CallOption) (*UnlinkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnlinkResponse)
+	err := c.cc.Invoke(ctx, Rose_Unlink_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *roseClient) Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*RenameResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenameResponse)
+	err := c.cc.Invoke(ctx, Rose_Rename_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *roseClient) CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateSnapshotResponse)
+	err := c.cc.Invoke(ctx, Rose_CreateSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *roseClient) DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteSnapshotResponse)
+	err := c.cc.Invoke(ctx, Rose_DeleteSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *roseClient) OpenSnapshot(ctx context.Context, in *OpenSnapshotRequest, opts ...grpc.CallOption) (*OpenResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenResponse)
+	err := c.cc.Invoke(ctx, Rose_OpenSnapshot_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -278,6 +338,11 @@ type RoseServer interface {
 	Read(context.Context, *ReadRequest) (*ReadResponse, error)
 	Close(context.Context, *CloseRequest) (*CloseResponse, error)
 	Getattr(context.Context, *GetattrRequest) (*GetattrResponse, error)
+	Unlink(context.Context, *UnlinkRequest) (*UnlinkResponse, error)
+	Rename(context.Context, *RenameRequest) (*RenameResponse, error)
+	CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error)
+	DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error)
+	OpenSnapshot(context.Context, *OpenSnapshotRequest) (*OpenResponse, error)
 	// Virtual Log operations
 	MakeVlog(context.Context, *MakeVlogRequest) (*MakeVlogResponse, error)
 	WriteVlog(context.Context, *WriteVlogRequest) (*WriteVlogResponse, error)
@@ -320,6 +385,21 @@ func (UnimplementedRoseServer) Close(context.Context, *CloseRequest) (*CloseResp
 }
 func (UnimplementedRoseServer) Getattr(context.Context, *GetattrRequest) (*GetattrResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Getattr not implemented")
+}
+func (UnimplementedRoseServer) Unlink(context.Context, *UnlinkRequest) (*UnlinkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Unlink not implemented")
+}
+func (UnimplementedRoseServer) Rename(context.Context, *RenameRequest) (*RenameResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Rename not implemented")
+}
+func (UnimplementedRoseServer) CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateSnapshot not implemented")
+}
+func (UnimplementedRoseServer) DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSnapshot not implemented")
+}
+func (UnimplementedRoseServer) OpenSnapshot(context.Context, *OpenSnapshotRequest) (*OpenResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method OpenSnapshot not implemented")
 }
 func (UnimplementedRoseServer) MakeVlog(context.Context, *MakeVlogRequest) (*MakeVlogResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MakeVlog not implemented")
@@ -470,6 +550,96 @@ func _Rose_Getattr_Handler(srv interface{}, ctx context.Context, dec func(interf
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RoseServer).Getattr(ctx, req.(*GetattrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rose_Unlink_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnlinkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoseServer).Unlink(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rose_Unlink_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoseServer).Unlink(ctx, req.(*UnlinkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rose_Rename_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenameRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoseServer).Rename(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rose_Rename_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoseServer).Rename(ctx, req.(*RenameRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rose_CreateSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoseServer).CreateSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rose_CreateSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoseServer).CreateSnapshot(ctx, req.(*CreateSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rose_DeleteSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoseServer).DeleteSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rose_DeleteSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoseServer).DeleteSnapshot(ctx, req.(*DeleteSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rose_OpenSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoseServer).OpenSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rose_OpenSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoseServer).OpenSnapshot(ctx, req.(*OpenSnapshotRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -752,6 +922,26 @@ var Rose_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Getattr",
 			Handler:    _Rose_Getattr_Handler,
+		},
+		{
+			MethodName: "Unlink",
+			Handler:    _Rose_Unlink_Handler,
+		},
+		{
+			MethodName: "Rename",
+			Handler:    _Rose_Rename_Handler,
+		},
+		{
+			MethodName: "CreateSnapshot",
+			Handler:    _Rose_CreateSnapshot_Handler,
+		},
+		{
+			MethodName: "DeleteSnapshot",
+			Handler:    _Rose_DeleteSnapshot_Handler,
+		},
+		{
+			MethodName: "OpenSnapshot",
+			Handler:    _Rose_OpenSnapshot_Handler,
 		},
 		{
 			MethodName: "MakeVlog",

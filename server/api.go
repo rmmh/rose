@@ -24,9 +24,10 @@ var (
 )
 
 type FileHandle struct {
-	id     int64
-	path   string
-	buffer []byte
+	id         int64
+	path       string
+	snapshotID uint64
+	buffer     []byte
 }
 
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
@@ -57,6 +58,66 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	return &pb.OpenResponse{Handle: hid}, nil
 }
 
+func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) (*pb.OpenResponse, error) {
+	if req.GetPath() == "" || req.GetSnapshotId() == 0 {
+		return nil, fmt.Errorf("snapshot_id and path are required")
+	}
+	id, err := s.db.OpenSnapshotFile(ctx, req.GetSnapshotId(), req.GetPath())
+	if err != nil {
+		return nil, err
+	}
+	if id == 0 {
+		return nil, fmt.Errorf("path not found in snapshot")
+	}
+	handlesMu.Lock()
+	defer handlesMu.Unlock()
+	hid := handleCounter
+	handleCounter++
+	handles[hid] = &FileHandle{id: id, path: req.GetPath(), snapshotID: req.GetSnapshotId()}
+	return &pb.OpenResponse{Handle: hid}, nil
+}
+
+func (s *Server) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.UnlinkResponse, error) {
+	if req.GetPath() == "" {
+		return nil, fmt.Errorf("path cannot be empty")
+	}
+	if err := s.db.UnlinkFile(ctx, req.GetPath()); err != nil {
+		return nil, err
+	}
+	return &pb.UnlinkResponse{}, nil
+}
+
+func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameResponse, error) {
+	if req.GetOldPath() == "" || req.GetNewPath() == "" {
+		return nil, fmt.Errorf("old_path and new_path are required")
+	}
+	if err := s.db.RenameFile(ctx, req.GetOldPath(), req.GetNewPath()); err != nil {
+		return nil, err
+	}
+	return &pb.RenameResponse{}, nil
+}
+
+func (s *Server) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequest) (*pb.CreateSnapshotResponse, error) {
+	if req.GetName() == "" {
+		return nil, fmt.Errorf("snapshot name cannot be empty")
+	}
+	id, err := s.db.CreateSnapshot(ctx, req.GetName(), time.Now().UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	return &pb.CreateSnapshotResponse{SnapshotId: id}, nil
+}
+
+func (s *Server) DeleteSnapshot(ctx context.Context, req *pb.DeleteSnapshotRequest) (*pb.DeleteSnapshotResponse, error) {
+	if req.GetSnapshotId() == 0 {
+		return nil, fmt.Errorf("snapshot_id is required")
+	}
+	if err := s.db.DeleteSnapshot(ctx, req.GetSnapshotId()); err != nil {
+		return nil, err
+	}
+	return &pb.DeleteSnapshotResponse{}, nil
+}
+
 func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 	handlesMu.Lock()
 	defer handlesMu.Unlock()
@@ -65,6 +126,9 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 	if !ok {
 		slog.Error("Write failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
+	}
+	if h.snapshotID != 0 {
+		return nil, fmt.Errorf("snapshot handles are read-only")
 	}
 
 	slog.Info("Write", "handle", req.GetHandle())
@@ -207,7 +271,7 @@ func (s *Server) getOrCreateActiveVlog(ctx context.Context) (uint32, error) {
 		return 0, err
 	}
 
-	plog, err := storage.OpenPlog(fmt.Sprintf("data/plog-%d", plogID), plogID)
+	plog, err := storage.OpenPlog(s.plogPath(plogID), plogID)
 	if err != nil {
 		return 0, fmt.Errorf("open plog %d: %w", plogID, err)
 	}
