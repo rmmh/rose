@@ -178,6 +178,16 @@
   currently OpenPlogs every catalog plog by path, so a true file loss fails
   startup before reprotect can run); reconstruct or stub the missing shard's
   client so reprotect can resume from a cold start, not just a live server.
+  This is also what limits the node-return reprotect-cancel: reverting a disk
+  failed -> active relies on its original plogs still being openable, which holds
+  for a live server (handles never closed) but not across a cold restart while
+  the offline node's files are unreachable. Until Recover tolerates absent files,
+  cancel-on-return is only sound for a running server.
+- Reclaim the orphan plog files a reprotect leaves on the returning disk when a
+  node-return cancels it: for shards regenerated before the cancel, ReplaceShardPlog
+  deleted the old plog row but the file physically remains on the returned disk
+  (catalog no longer references it). Dead space, not dead metadata; sweep it from
+  the GC/compaction pass (same class as the stray-file items below).
 - Reclaim the regenerated plog left behind when a crash re-runs a reprotect step
   whose ReplaceShardPlog had not yet committed (same duplicate-bytes-on-crash
   caveat compaction has).
