@@ -208,6 +208,18 @@ func (v *Vlog) Read(ctx context.Context, offset int64, length int) ([]byte, erro
 	return nil, fmt.Errorf("unknown protection scheme: %s", v.scheme)
 }
 
+// ReconstructECShard rebuilds the missing shards of an EC stripe in place.
+// Surviving shards must be present and of equal length; shards to regenerate
+// must be nil. It is the regeneration primitive reprotect uses to rebuild a
+// shard lost with a failed disk from the surviving data and parity shards.
+func ReconstructECShard(dataShards, parityShards int, shards [][]byte) error {
+	enc, err := reedsolomon.New(dataShards, parityShards)
+	if err != nil {
+		return fmt.Errorf("create reedsolomon encoder: %w", err)
+	}
+	return enc.Reconstruct(shards)
+}
+
 // Commit makes all physical writes issued through this virtual log durable.
 func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
 	for _, client := range v.clients {

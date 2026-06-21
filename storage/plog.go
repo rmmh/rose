@@ -354,6 +354,15 @@ func (p *Plog) Commit() error {
 // Sync is retained as the low-level durability primitive.
 func (p *Plog) Sync() error { return p.Commit() }
 
+// LogicalLength reports the total logical bytes stored, including the open
+// trailing sector. Reprotect reads a shard's whole stream by this length to
+// regenerate a sibling shard lost to a failed disk.
+func (p *Plog) LogicalLength() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.logicalLength
+}
+
 // Close closes the underlying file.
 func (p *Plog) Close() error {
 	p.mu.Lock()

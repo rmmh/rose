@@ -189,6 +189,10 @@ func (s *Server) Recover(ctx context.Context) error {
 			if err := s.DrainDisk(ctx, job.TargetDisk); err != nil {
 				return fmt.Errorf("resume drain of disk %d: %w", job.TargetDisk, err)
 			}
+		case meta.JobReprotect:
+			if err := s.ReprotectDisk(ctx, job.TargetDisk); err != nil {
+				return fmt.Errorf("resume reprotect of disk %d: %w", job.TargetDisk, err)
+			}
 		}
 	}
 	return nil

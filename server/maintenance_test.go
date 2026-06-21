@@ -130,6 +130,171 @@ func TestDrainWithoutPlacementRoomFails(t *testing.T) {
 	}
 }
 
+func TestReprotectECReconstructsLostShard(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 4) // one spare beyond the 3 EC shards
+	vlogID := provision(t, s, "EC", 2, 1)
+
+	payload := bytes.Repeat([]byte("reprotect-ec-payload!"), 1000)
+	offset := writeVlog(t, s, vlogID, payload)
+	want, err := s.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	victim := diskOf(t, s, vlogID, 0)
+	if err := s.SetDiskState(ctx, victim, meta.DiskFailed); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.ReprotectDisk(ctx, victim); err != nil {
+		t.Fatalf("reprotect disk %d: %v", victim, err)
+	}
+
+	// The vlog has three shards again, none of them on the failed disk.
+	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shards) != 3 {
+		t.Fatalf("vlog has %d shards after reprotect, want 3", len(shards))
+	}
+	for _, sh := range shards {
+		if sh.DiskID == victim {
+			t.Fatalf("shard %d still on failed disk %d after reprotect", sh.ShardIndex, victim)
+		}
+	}
+
+	// The reprotected vlog is durably committable again (all shards live).
+	ready, err := s.CommitReady(ctx, vlogID)
+	if err != nil || !ready {
+		t.Fatalf("CommitReady after reprotect = %v, %v; want true", ready, err)
+	}
+
+	// Data reads back unchanged from the regenerated shard set.
+	got, err := s.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatalf("read after reprotect: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("payload changed across reprotect")
+	}
+
+	jobs, err := s.db.RunningJobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("reprotect left %d running jobs", len(jobs))
+	}
+}
+
+func TestReprotectDuplicateRegeneratesCopy(t *testing.T) {
+	ctx := context.Background()
+	// Three disks, a DUPLICATE vlog with one copy per disk, plus a spare.
+	s := newControlPlaneServer(t, 4)
+	if err := s.SetDiskState(ctx, 4, meta.DiskDraining); err != nil {
+		t.Fatal(err) // keep disk 4 out of the initial 3-copy placement
+	}
+	vlogID := provision(t, s, "DUPLICATE", 1, 0)
+	if err := s.SetDiskState(ctx, 4, meta.DiskActive); err != nil {
+		t.Fatal(err) // re-admit it as the reprotect destination
+	}
+
+	payload := bytes.Repeat([]byte("dup-copy"), 700)
+	offset := writeVlog(t, s, vlogID, payload)
+
+	victim := diskOf(t, s, vlogID, 0)
+	if err := s.SetDiskState(ctx, victim, meta.DiskFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReprotectDisk(ctx, victim); err != nil {
+		t.Fatalf("reprotect disk %d: %v", victim, err)
+	}
+
+	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shards) != 3 {
+		t.Fatalf("vlog has %d copies after reprotect, want 3", len(shards))
+	}
+	for _, sh := range shards {
+		if sh.DiskID == victim {
+			t.Fatalf("copy still on failed disk %d after reprotect", victim)
+		}
+	}
+	got, err := s.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatalf("read after reprotect: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("payload changed across reprotect")
+	}
+}
+
+func TestReprotectResumesAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	roots := map[uint32]string{}
+	for i := uint32(1); i <= 4; i++ {
+		roots[i] = filepath.Join(dir, "disk", string(rune('0'+i)))
+	}
+
+	s1 := NewServerWithDiskRoots(db, roots)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	vlogID := provision(t, s1, "EC", 2, 1)
+	payload := bytes.Repeat([]byte("resume-reprotect"), 400)
+	offset := writeVlog(t, s1, vlogID, payload)
+	victim := diskOf(t, s1, vlogID, 0)
+
+	// Simulate a crash right after StartReprotect: the disk is failed and a
+	// reprotect job exists, but no shard has been regenerated yet.
+	if _, err := db.GetOrCreateReprotectJob(ctx, victim); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetDiskState(ctx, victim, meta.DiskFailed); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh server resumes the reprotect from the running job during Recover.
+	s2 := NewServerWithDiskRoots(db, roots)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatalf("recover should complete the reprotect: %v", err)
+	}
+	shards, err := s2.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sh := range shards {
+		if sh.DiskID == victim {
+			t.Fatalf("shard %d still on failed disk %d after resumed reprotect", sh.ShardIndex, victim)
+		}
+	}
+	got, err := s2.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatalf("read after resumed reprotect: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("payload changed across resumed reprotect")
+	}
+	jobs, err := db.RunningJobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("resumed reprotect left %d running jobs", len(jobs))
+	}
+}
+
 func TestDrainResumesAfterRestart(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

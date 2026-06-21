@@ -18,10 +18,11 @@ type Job struct {
 }
 
 const (
-	JobCompact = "compact"
-	JobDrain   = "drain"
-	JobRunning = "running"
-	JobDone    = "done"
+	JobCompact   = "compact"
+	JobDrain     = "drain"
+	JobReprotect = "reprotect"
+	JobRunning   = "running"
+	JobDone      = "done"
 )
 
 // GetOrCreateCompactionJob returns the running compaction job for a vlog,
@@ -77,6 +78,34 @@ func (d *DB) GetOrCreateDrainJob(ctx context.Context, targetDisk uint32) (Job, e
 		return Job{}, err
 	}
 	return Job{ID: id, Kind: JobDrain, State: JobRunning, TargetDisk: targetDisk}, nil
+}
+
+// GetOrCreateReprotectJob returns the running reprotect job for a failed disk,
+// creating one if none exists. Like drain it is keyed by target_disk, so a crash
+// mid-reprotect resumes from the shards still mapped to the failed disk's plogs
+// rather than restarting or stranding the vlogs degraded.
+func (d *DB) GetOrCreateReprotectJob(ctx context.Context, targetDisk uint32) (Job, error) {
+	var j Job
+	err := d.db.QueryRowContext(ctx,
+		"SELECT id, kind, state, target_vlog, dest_vlog, target_disk FROM job WHERE kind = ? AND state = ? AND target_disk = ?",
+		JobReprotect, JobRunning, targetDisk).Scan(&j.ID, &j.Kind, &j.State, &j.TargetVlog, &j.DestVlog, &j.TargetDisk)
+	if err == nil {
+		return j, nil
+	}
+	if err != sql.ErrNoRows {
+		return Job{}, err
+	}
+	res, err := d.db.ExecContext(ctx,
+		"INSERT INTO job (kind, state, target_disk, created_at) VALUES (?, ?, ?, ?)",
+		JobReprotect, JobRunning, targetDisk, time.Now().UnixNano())
+	if err != nil {
+		return Job{}, fmt.Errorf("create reprotect job: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Job{}, err
+	}
+	return Job{ID: id, Kind: JobReprotect, State: JobRunning, TargetDisk: targetDisk}, nil
 }
 
 func (d *DB) SetJobDest(ctx context.Context, jobID int64, destVlog uint32) error {
