@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"log/slog"
@@ -46,10 +47,12 @@ func main() {
 
 	// Parse Data Directories
 	dirs := strings.Split(*dataDirs, ",")
-	for _, dir := range dirs {
+	diskRoots := make(map[uint32]string, len(dirs))
+	for index, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			log.Fatalf("Failed to create data directory %s: %v", dir, err)
 		}
+		diskRoots[uint32(index+1)] = dir
 	}
 
 	// Initialize gRPC Server
@@ -59,7 +62,10 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer()
-	roseServer := server.NewServer(db)
+	roseServer := server.NewServerWithDiskRoots(db, diskRoots)
+	if err := roseServer.Recover(context.Background()); err != nil {
+		log.Fatal("recover storage:", err)
+	}
 	pb.RegisterRoseServer(grpcServer, roseServer)
 
 	go func() {

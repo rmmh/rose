@@ -27,6 +27,81 @@ func (d *DB) MakePlog(ctx context.Context, diskID uint32) (uint32, error) {
 	return uint32(id), err
 }
 
+type PlogInfo struct {
+	ID     uint32
+	DiskID uint32
+	Length int64
+}
+
+type VlogInfo struct {
+	ID               uint32
+	Length           int64
+	ProtectionScheme string
+	DataShards       int32
+	ParityShards     int32
+}
+
+type VlogPlogInfo struct {
+	ShardIndex int
+	PlogID     uint32
+}
+
+func (d *DB) ListPlogs(ctx context.Context) ([]PlogInfo, error) {
+	rows, err := d.db.QueryContext(ctx, "SELECT id, disk_id, length FROM plog ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PlogInfo
+	for rows.Next() {
+		var info PlogInfo
+		if err := rows.Scan(&info.ID, &info.DiskID, &info.Length); err != nil {
+			return nil, err
+		}
+		out = append(out, info)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) ListVlogs(ctx context.Context) ([]VlogInfo, error) {
+	rows, err := d.db.QueryContext(ctx, "SELECT id, length, protection_scheme, data_shards, parity_shards FROM vlog ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []VlogInfo
+	for rows.Next() {
+		var info VlogInfo
+		if err := rows.Scan(&info.ID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards); err != nil {
+			return nil, err
+		}
+		out = append(out, info)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) ListVlogPlogs(ctx context.Context, vlogID uint32) ([]VlogPlogInfo, error) {
+	rows, err := d.db.QueryContext(ctx, "SELECT shard_idx, plog_id FROM vlog_plog WHERE vlog_id = ? ORDER BY shard_idx", vlogID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []VlogPlogInfo
+	for rows.Next() {
+		var info VlogPlogInfo
+		if err := rows.Scan(&info.ShardIndex, &info.PlogID); err != nil {
+			return nil, err
+		}
+		out = append(out, info)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) SetVlogLength(ctx context.Context, vlogID uint32, length int64) error {
+	_, err := d.db.ExecContext(ctx, "UPDATE vlog SET length = ? WHERE id = ?", length, vlogID)
+	return err
+}
+
 // AssignPlogToVlog maps a plog to a shard of a vlog.
 func (d *DB) AssignPlogToVlog(ctx context.Context, vlogID uint32, shardIdx int, plogID uint32) error {
 	_, err := d.db.ExecContext(ctx, "INSERT INTO vlog_plog (vlog_id, shard_idx, plog_id) VALUES (?, ?, ?)", vlogID, shardIdx, plogID)

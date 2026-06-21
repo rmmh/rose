@@ -36,7 +36,7 @@ func initSchema(db *sql.DB) error {
 	_, err := db.Exec(`
 		-- Enable write-ahead logging for better concurrency and durability
 		PRAGMA journal_mode = WAL;
-		PRAGMA synchronous = NORMAL;
+		PRAGMA synchronous = FULL;
 
 		CREATE TABLE IF NOT EXISTS file (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

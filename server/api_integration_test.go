@@ -167,3 +167,40 @@ func TestVlogCommitOverGRPC(t *testing.T) {
 		t.Fatalf("vlog read = %q, want %q", read.GetBuffer(), data)
 	}
 }
+
+func TestRecoverReopensPersistedVlogs(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	first := server.NewServerWithDataDir(db, filepath.Join(dir, "disk1"))
+	opened, err := first.Open(ctx, &pb.OpenRequest{Path: "/recovered"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Write(ctx, &pb.WriteRequest{Handle: opened.GetHandle(), Buffer: []byte("survives restart")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Close(ctx, &pb.CloseRequest{Handle: opened.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := server.NewServerWithDataDir(db, filepath.Join(dir, "disk1"))
+	if err := restarted.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := restarted.Open(ctx, &pb.OpenRequest{Path: "/recovered"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := restarted.Read(ctx, &pb.ReadRequest{Handle: reopened.GetHandle(), Offset: 0, Length: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := read.GetBuffer(); !bytes.Equal(got, []byte("survives restart")) {
+		t.Fatalf("recovered read = %q", got)
+	}
+}

@@ -211,3 +211,5 @@ func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
 	}
 	return nil
 }
+
+func (v *Vlog) Length() int64 { return atomic.LoadInt64(&v.length) }

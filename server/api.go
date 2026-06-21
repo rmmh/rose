@@ -264,7 +264,7 @@ func (s *Server) getOrCreateActiveVlog(ctx context.Context) (uint32, error) {
 		return 0, err
 	}
 
-	plog, err := storage.OpenPlog(s.plogPath(plogID), plogID)
+	plog, err := storage.OpenPlog(s.plogPath(diskID, plogID), plogID)
 	if err != nil {
 		return 0, fmt.Errorf("open plog %d: %w", plogID, err)
 	}
@@ -347,6 +347,9 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 		if err := v.Commit(ctx, 0); err != nil {
 			return nil, fmt.Errorf("commit vlog: %w", err)
 		}
+		if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
+			return nil, fmt.Errorf("persist vlog cursor: %w", err)
+		}
 
 		if _, err := s.db.CommitFile(ctx, h.path, time.Now().UnixNano(), chunksBlob); err != nil {
 			return nil, fmt.Errorf("publish file metadata: %w", err)
@@ -378,7 +381,7 @@ func (s *Server) MakeVlog(ctx context.Context, req *pb.MakeVlogRequest) (*pb.Mak
 		if err := s.db.AssignPlogToVlog(ctx, id, shard, plogID); err != nil {
 			return nil, err
 		}
-		plog, err := storage.OpenPlog(s.plogPath(plogID), plogID)
+		plog, err := storage.OpenPlog(s.plogPath(1, plogID), plogID)
 		if err != nil {
 			return nil, err
 		}
@@ -399,7 +402,7 @@ func (s *Server) MakePlog(ctx context.Context, req *pb.MakePlogRequest) (*pb.Mak
 	if err != nil {
 		return nil, err
 	}
-	plog, err := storage.OpenPlog(s.plogPath(id), id)
+	plog, err := storage.OpenPlog(s.plogPath(req.GetDiskId(), id), id)
 	if err != nil {
 		return nil, err
 	}
@@ -461,6 +464,9 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 
 	offset, err := v.Write(ctx, req.GetTxnId(), req.GetBuffer())
 	if err != nil {
+		return nil, err
+	}
+	if err := s.db.SetVlogLength(ctx, req.GetVlogId(), v.Length()); err != nil {
 		return nil, err
 	}
 	return &pb.WriteVlogResponse{Offset: uint32(offset)}, nil
