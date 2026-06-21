@@ -16,15 +16,19 @@ type PlogClient interface {
 	Read(ctx context.Context, offset int64, length int) ([]byte, error)
 }
 
+type committingPlogClient interface {
+	Commit(ctx context.Context, txnID int64) error
+}
+
 // Vlog represents a Virtual Log that implements protection schemes on top of physical logs.
 type Vlog struct {
 	id     uint32
 	length int64 // Atomic tracker of logical length
 
-	scheme      string
-	dataShards  int
+	scheme       string
+	dataShards   int
 	parityShards int
-	clients     []PlogClient // Index corresponds to shard index (0 for duplicate)
+	clients      []PlogClient // Index corresponds to shard index (0 for duplicate)
 
 	encoder reedsolomon.Encoder // Only initialized if scheme == "EC"
 }
@@ -192,4 +196,18 @@ func (v *Vlog) Read(ctx context.Context, offset int64, length int) ([]byte, erro
 	}
 
 	return nil, fmt.Errorf("unknown protection scheme: %s", v.scheme)
+}
+
+// Commit makes all physical writes issued through this virtual log durable.
+func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
+	for _, client := range v.clients {
+		committer, ok := client.(committingPlogClient)
+		if !ok {
+			return fmt.Errorf("plog client does not support commit")
+		}
+		if err := committer.Commit(ctx, txnID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -19,15 +19,15 @@ type Plog struct {
 	physicalSize  int64
 
 	// Buffering for bitrot detection
-	buf         []byte // Up to 4096 bytes
-	hashes      []byte // Up to 255 * 16 bytes
-	hashSector  [4096]byte
+	buf        []byte // Up to 4096 bytes
+	hashes     []byte // Up to 255 * 16 bytes
+	hashSector [4096]byte
 }
 
 const (
-	SectorSize    = 4096
+	SectorSize     = 4096
 	HashesPerBlock = 255
-	HashSize      = 16
+	HashSize       = 16
 )
 
 func OpenPlog(path string, id uint32) (*Plog, error) {
@@ -224,12 +224,19 @@ func (p *Plog) Read(offset int64, length int) ([]byte, error) {
 	return buf, nil
 }
 
-// Sync flushes the file to disk.
-func (p *Plog) Sync() error {
+// Commit flushes buffered data, including its integrity metadata, and makes it
+// durable before metadata may publish references to the written range.
+func (p *Plog) Commit() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.flushSector(); err != nil {
+		return err
+	}
 	return p.file.Sync()
 }
+
+// Sync is retained as the low-level durability primitive.
+func (p *Plog) Sync() error { return p.Commit() }
 
 // Close closes the underlying file.
 func (p *Plog) Close() error {

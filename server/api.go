@@ -8,19 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"sync"
 	"time"
 
 	chunkers "github.com/PlakarKorp/go-cdc-chunkers"
 	_ "github.com/PlakarKorp/go-cdc-chunkers/chunkers/fastcdc"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/storage"
-)
-
-var (
-	handlesMu     sync.Mutex
-	handles       = make(map[int64]*FileHandle)
-	handleCounter int64
 )
 
 type FileHandle struct {
@@ -42,12 +35,12 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 		return nil, err
 	}
 
-	handlesMu.Lock()
-	defer handlesMu.Unlock()
-	hid := handleCounter
-	handleCounter++
+	s.handlesMu.Lock()
+	defer s.handlesMu.Unlock()
+	hid := s.handleCounter
+	s.handleCounter++
 
-	handles[hid] = &FileHandle{
+	s.handles[hid] = &FileHandle{
 		id:     id,
 		path:   path,
 		buffer: make([]byte, 0),
@@ -69,11 +62,11 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 	if id == 0 {
 		return nil, fmt.Errorf("path not found in snapshot")
 	}
-	handlesMu.Lock()
-	defer handlesMu.Unlock()
-	hid := handleCounter
-	handleCounter++
-	handles[hid] = &FileHandle{id: id, path: req.GetPath(), snapshotID: req.GetSnapshotId()}
+	s.handlesMu.Lock()
+	defer s.handlesMu.Unlock()
+	hid := s.handleCounter
+	s.handleCounter++
+	s.handles[hid] = &FileHandle{id: id, path: req.GetPath(), snapshotID: req.GetSnapshotId()}
 	return &pb.OpenResponse{Handle: hid}, nil
 }
 
@@ -119,10 +112,10 @@ func (s *Server) DeleteSnapshot(ctx context.Context, req *pb.DeleteSnapshotReque
 }
 
 func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
-	handlesMu.Lock()
-	defer handlesMu.Unlock()
+	s.handlesMu.Lock()
+	defer s.handlesMu.Unlock()
 
-	h, ok := handles[req.GetHandle()]
+	h, ok := s.handles[req.GetHandle()]
 	if !ok {
 		slog.Error("Write failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
@@ -138,12 +131,12 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 }
 
 func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
-	handlesMu.Lock()
-	defer handlesMu.Unlock()
+	s.handlesMu.Lock()
+	defer s.handlesMu.Unlock()
 
 	slog.Info("Read", "handle", req.GetHandle(), "offset", req.GetOffset(), "length", req.GetLength())
 
-	h, ok := handles[req.GetHandle()]
+	h, ok := s.handles[req.GetHandle()]
 	if !ok {
 		slog.Error("Read failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
@@ -227,15 +220,15 @@ func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRespons
 }
 func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.GetattrResponse, error) {
 	// First check memory buffers for un-closed handles
-	handlesMu.Lock()
-	for _, h := range handles {
+	s.handlesMu.Lock()
+	for _, h := range s.handles {
 		if h.path == req.GetPath() {
 			size := int64(len(h.buffer))
-			handlesMu.Unlock()
+			s.handlesMu.Unlock()
 			return &pb.GetattrResponse{Size: size}, nil
 		}
 	}
-	handlesMu.Unlock()
+	s.handlesMu.Unlock()
 
 	size, err := s.db.GetFileSize(ctx, req.GetPath())
 	if err != nil {
@@ -289,16 +282,16 @@ func (s *Server) getOrCreateActiveVlog(ctx context.Context) (uint32, error) {
 }
 
 func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResponse, error) {
-	handlesMu.Lock()
-	h, ok := handles[req.GetHandle()]
+	s.handlesMu.Lock()
+	h, ok := s.handles[req.GetHandle()]
 	if !ok {
-		handlesMu.Unlock()
+		s.handlesMu.Unlock()
 		return nil, fmt.Errorf("invalid handle")
 	}
 
 	slog.Info("Close", "handle", req.GetHandle(), "path", h.path)
-	delete(handles, req.GetHandle())
-	handlesMu.Unlock()
+	delete(s.handles, req.GetHandle())
+	s.handlesMu.Unlock()
 
 	if len(h.buffer) > 0 {
 		vlogID, err := s.getOrCreateActiveVlog(ctx)
@@ -351,8 +344,12 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 			}
 		}
 
+		if err := v.Commit(ctx, 0); err != nil {
+			return nil, fmt.Errorf("commit vlog: %w", err)
+		}
+
 		if _, err := s.db.CommitFile(ctx, h.path, time.Now().UnixNano(), chunksBlob); err != nil {
-			slog.Error("Failed to commit file", "error", err)
+			return nil, fmt.Errorf("publish file metadata: %w", err)
 		}
 	}
 
@@ -365,6 +362,34 @@ func (s *Server) MakeVlog(ctx context.Context, req *pb.MakeVlogRequest) (*pb.Mak
 	if err != nil {
 		return nil, err
 	}
+	clientCount := 1
+	if req.GetProtectionScheme() == "EC" {
+		clientCount = int(req.GetDataShards() + req.GetParityShards())
+		if clientCount == 0 {
+			return nil, fmt.Errorf("EC vlog requires data or parity shards")
+		}
+	}
+	clients := make([]storage.PlogClient, 0, clientCount)
+	for shard := 0; shard < clientCount; shard++ {
+		plogID, err := s.db.MakePlog(ctx, 1)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.db.AssignPlogToVlog(ctx, id, shard, plogID); err != nil {
+			return nil, err
+		}
+		plog, err := storage.OpenPlog(s.plogPath(plogID), plogID)
+		if err != nil {
+			return nil, err
+		}
+		s.plogs[plogID] = plog
+		clients = append(clients, &localPlogClient{plog: plog})
+	}
+	vlog, err := storage.NewVlog(id, req.GetProtectionScheme(), int(req.GetDataShards()), int(req.GetParityShards()), clients, 0)
+	if err != nil {
+		return nil, err
+	}
+	s.vlogs[id] = vlog
 	return &pb.MakeVlogResponse{VlogId: id}, nil
 }
 
@@ -374,7 +399,45 @@ func (s *Server) MakePlog(ctx context.Context, req *pb.MakePlogRequest) (*pb.Mak
 	if err != nil {
 		return nil, err
 	}
+	plog, err := storage.OpenPlog(s.plogPath(id), id)
+	if err != nil {
+		return nil, err
+	}
+	s.plogs[id] = plog
 	return &pb.MakePlogResponse{PlogId: id}, nil
+}
+
+func (s *Server) WritePlog(ctx context.Context, req *pb.WritePlogRequest) (*pb.WritePlogResponse, error) {
+	plog, ok := s.plogs[req.GetPlogId()]
+	if !ok {
+		return nil, fmt.Errorf("plog not found")
+	}
+	offset, err := plog.Write(req.GetTxnId(), req.GetBuffer())
+	if err != nil {
+		return nil, err
+	}
+	return &pb.WritePlogResponse{Offset: uint32(offset)}, nil
+}
+
+func (s *Server) ReadPlog(ctx context.Context, req *pb.ReadPlogRequest) (*pb.ReadPlogResponse, error) {
+	plog, ok := s.plogs[req.GetPlogId()]
+	if !ok {
+		return nil, fmt.Errorf("plog not found")
+	}
+	data, err := plog.Read(int64(req.GetOffset()), int(req.GetLength()))
+	if err != nil {
+		return nil, err
+	}
+	return &pb.ReadPlogResponse{Buffer: data}, nil
+}
+
+func (s *Server) CommitPlog(ctx context.Context, req *pb.CommitPlogRequest) (*pb.CommitPlogResponse, error) {
+	for _, plog := range s.plogs {
+		if err := plog.Commit(); err != nil {
+			return nil, err
+		}
+	}
+	return &pb.CommitPlogResponse{}, nil
 }
 
 func (s *Server) ReadVlog(ctx context.Context, req *pb.ReadVlogRequest) (*pb.ReadVlogResponse, error) {
@@ -401,6 +464,15 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 		return nil, err
 	}
 	return &pb.WriteVlogResponse{Offset: uint32(offset)}, nil
+}
+
+func (s *Server) CommitVlog(ctx context.Context, req *pb.CommitVlogRequest) (*pb.CommitVlogResponse, error) {
+	for _, vlog := range s.vlogs {
+		if err := vlog.Commit(ctx, req.GetTxnId()); err != nil {
+			return nil, err
+		}
+	}
+	return &pb.CommitVlogResponse{}, nil
 }
 
 // Ensure the server implements pb.RoseServer

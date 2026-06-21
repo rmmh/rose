@@ -17,9 +17,12 @@ type Server struct {
 	plogs map[uint32]*storage.Plog
 	vlogs map[uint32]*storage.Vlog
 
-	vlogMu     sync.Mutex
-	activeVlog uint32
-	dataDir    string
+	vlogMu        sync.Mutex
+	activeVlog    uint32
+	dataDir       string
+	handlesMu     sync.Mutex
+	handles       map[int64]*FileHandle
+	handleCounter int64
 }
 
 func NewServer(db *meta.DB) *Server {
@@ -28,6 +31,7 @@ func NewServer(db *meta.DB) *Server {
 		plogs:   make(map[uint32]*storage.Plog),
 		vlogs:   make(map[uint32]*storage.Vlog),
 		dataDir: "data",
+		handles: make(map[int64]*FileHandle),
 	}
 }
 
@@ -57,6 +61,10 @@ func (c *localPlogClient) Write(ctx context.Context, txnID int64, data []byte) (
 
 func (c *localPlogClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
 	return c.plog.Read(offset, length)
+}
+
+func (c *localPlogClient) Commit(ctx context.Context, txnID int64) error {
+	return c.plog.Commit()
 }
 
 // Ensure localPlogClient implements storage.PlogClient

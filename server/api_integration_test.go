@@ -119,3 +119,51 @@ func TestFileSnapshotNamespaceLifecycleOverGRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPlogCommitOverGRPC(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+	plog, err := client.MakePlog(ctx, &pb.MakePlogRequest{DiskId: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("durable plog payload")
+	write, err := client.WritePlog(ctx, &pb.WritePlogRequest{PlogId: plog.GetPlogId(), TxnId: 7, Buffer: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CommitPlog(ctx, &pb.CommitPlogRequest{TxnId: 7}); err != nil {
+		t.Fatal(err)
+	}
+	read, err := client.ReadPlog(ctx, &pb.ReadPlogRequest{PlogId: plog.GetPlogId(), Offset: write.GetOffset(), Length: uint32(len(data))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), data) {
+		t.Fatalf("plog read = %q, want %q", read.GetBuffer(), data)
+	}
+}
+
+func TestVlogCommitOverGRPC(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+	vlog, err := client.MakeVlog(ctx, &pb.MakeVlogRequest{ProtectionScheme: "DUPLICATE", DataShards: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("durable vlog payload")
+	write, err := client.WriteVlog(ctx, &pb.WriteVlogRequest{VlogId: vlog.GetVlogId(), TxnId: 8, Buffer: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 8}); err != nil {
+		t.Fatal(err)
+	}
+	read, err := client.ReadVlog(ctx, &pb.ReadVlogRequest{VlogId: vlog.GetVlogId(), Offset: write.GetOffset(), Length: uint32(len(data))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), data) {
+		t.Fatalf("vlog read = %q, want %q", read.GetBuffer(), data)
+	}
+}
