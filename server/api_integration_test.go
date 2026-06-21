@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -202,5 +203,52 @@ func TestRecoverReopensPersistedVlogs(t *testing.T) {
 	}
 	if got := read.GetBuffer(); !bytes.Equal(got, []byte("survives restart")) {
 		t.Fatalf("recovered read = %q", got)
+	}
+}
+
+func TestDuplicatePlacementUsesEveryConfiguredDisk(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	disk1 := filepath.Join(dir, "disk1")
+	disk2 := filepath.Join(dir, "disk2")
+	s := server.NewServerWithDiskRoots(db, map[uint32]string{1: disk1, 2: disk2})
+	ctx := context.Background()
+	opened, err := s.Open(ctx, &pb.OpenRequest{Path: "/replicated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: opened.GetHandle(), Buffer: []byte("replicated across disks")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: opened.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{disk1, disk2} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatalf("read disk root %s: %v", root, err)
+		}
+		if len(entries) == 0 {
+			t.Fatalf("disk root %s has no replica plog", root)
+		}
+	}
+	restarted := server.NewServerWithDiskRoots(db, map[uint32]string{1: disk1, 2: disk2})
+	if err := restarted.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	opened, err = restarted.Open(ctx, &pb.OpenRequest{Path: "/replicated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := restarted.Read(ctx, &pb.ReadRequest{Handle: opened.GetHandle(), Offset: 0, Length: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), []byte("replicated across disks")) {
+		t.Fatalf("recovered replicated read = %q", read.GetBuffer())
 	}
 }

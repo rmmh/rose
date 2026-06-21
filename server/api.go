@@ -252,26 +252,28 @@ func (s *Server) getOrCreateActiveVlog(ctx context.Context) (uint32, error) {
 		return 0, err
 	}
 
-	// Make a plog and assign it to this vlog
-	diskID := uint32(1) // stub
-	plogID, err := s.db.MakePlog(ctx, diskID)
-	if err != nil {
-		return 0, err
+	diskIDs := s.activeDiskIDs()
+	if len(diskIDs) == 0 {
+		return 0, fmt.Errorf("no active disks configured")
+	}
+	clients := make([]storage.PlogClient, 0, len(diskIDs))
+	for shard, diskID := range diskIDs {
+		plogID, err := s.db.MakePlog(ctx, diskID)
+		if err != nil {
+			return 0, err
+		}
+		if err := s.db.AssignPlogToVlog(ctx, id, shard, plogID); err != nil {
+			return 0, err
+		}
+		plog, err := storage.OpenPlog(s.plogPath(diskID, plogID), plogID)
+		if err != nil {
+			return 0, fmt.Errorf("open plog %d: %w", plogID, err)
+		}
+		s.plogs[plogID] = plog
+		clients = append(clients, &localPlogClient{plog: plog})
 	}
 
-	err = s.db.AssignPlogToVlog(ctx, id, 0, plogID)
-	if err != nil {
-		return 0, err
-	}
-
-	plog, err := storage.OpenPlog(s.plogPath(diskID, plogID), plogID)
-	if err != nil {
-		return 0, fmt.Errorf("open plog %d: %w", plogID, err)
-	}
-
-	s.plogs[plogID] = plog
-
-	vlog, err := storage.NewVlog(id, "DUPLICATE", 1, 0, []storage.PlogClient{&localPlogClient{plog: plog}}, 0)
+	vlog, err := storage.NewVlog(id, "DUPLICATE", 1, 0, clients, 0)
 	if err != nil {
 		return 0, fmt.Errorf("create vlog in memory: %w", err)
 	}
@@ -365,23 +367,30 @@ func (s *Server) MakeVlog(ctx context.Context, req *pb.MakeVlogRequest) (*pb.Mak
 	if err != nil {
 		return nil, err
 	}
+	diskIDs := s.activeDiskIDs()
+	if len(diskIDs) == 0 {
+		return nil, fmt.Errorf("no active disks configured")
+	}
 	clientCount := 1
-	if req.GetProtectionScheme() == "EC" {
+	if req.GetProtectionScheme() == "DUPLICATE" {
+		clientCount = len(diskIDs)
+	} else if req.GetProtectionScheme() == "EC" {
 		clientCount = int(req.GetDataShards() + req.GetParityShards())
-		if clientCount == 0 {
+		if clientCount == 0 || clientCount > len(diskIDs) {
 			return nil, fmt.Errorf("EC vlog requires data or parity shards")
 		}
 	}
 	clients := make([]storage.PlogClient, 0, clientCount)
 	for shard := 0; shard < clientCount; shard++ {
-		plogID, err := s.db.MakePlog(ctx, 1)
+		diskID := diskIDs[shard]
+		plogID, err := s.db.MakePlog(ctx, diskID)
 		if err != nil {
 			return nil, err
 		}
 		if err := s.db.AssignPlogToVlog(ctx, id, shard, plogID); err != nil {
 			return nil, err
 		}
-		plog, err := storage.OpenPlog(s.plogPath(1, plogID), plogID)
+		plog, err := storage.OpenPlog(s.plogPath(diskID, plogID), plogID)
 		if err != nil {
 			return nil, err
 		}

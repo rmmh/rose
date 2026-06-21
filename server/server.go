@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/rmmh/rose/meta"
@@ -63,6 +64,15 @@ func (s *Server) plogPath(diskID, plogID uint32) string {
 		root = filepath.Join(s.dataDir, "disk-"+fmt.Sprint(diskID))
 	}
 	return filepath.Join(root, "plog-"+fmt.Sprint(plogID))
+}
+
+func (s *Server) activeDiskIDs() []uint32 {
+	ids := make([]uint32, 0, len(s.diskRoots))
+	for id := range s.diskRoots {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
 }
 
 func (s *Server) GetDB() *meta.DB {
