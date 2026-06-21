@@ -200,8 +200,26 @@ CommitVlog(o) ==
                   pending, stored, job_state, job_kind, job_disk, job_progress>>
 
 PublishVlog(o) ==
-    /\ object_state[o] = "commit-durable"
+    /\ object_state[o] \in {"commit-durable", "committed"}
+    /\ (object_state[o] = "commit-durable" => CommitReady(o))
     /\ object_state' = [object_state EXCEPT ![o] = "committed"]
+    /\ last_rpc' = last_rpc
+    /\ UNCHANGED <<file_state, object_mode, plog_ready, disk_state, node_state,
+                  pending, stored, job_state, job_kind, job_disk, job_progress>>
+
+AbortVlog(o) ==
+    /\ object_state[o] \in {"vlog-ready", "writing", "commit-durable"}
+    /\ object_state' = [object_state EXCEPT ![o] = "aborted"]
+    /\ last_rpc' = last_rpc
+    /\ UNCHANGED <<file_state, object_mode, plog_ready, disk_state, node_state,
+                  pending, stored, job_state, job_kind, job_disk, job_progress>>
+
+\* A restart reconciles an unpublished durable commit: publish it if its
+\* placement still meets the commit policy, otherwise return it for repair.
+ReconcileVlog(o) ==
+    /\ object_state[o] = "commit-durable"
+    /\ object_state' = [object_state EXCEPT ![o] =
+          IF CommitReady(o) THEN "committed" ELSE "writing"]
     /\ last_rpc' = last_rpc
     /\ UNCHANGED <<file_state, object_mode, plog_ready, disk_state, node_state,
                   pending, stored, job_state, job_kind, job_disk, job_progress>>
@@ -392,6 +410,7 @@ Next ==
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : SendPlogAck(d, o, s) \/ ReceivePlogAck(d, o, s) \/ RetryPlog(d, o, s) \/ DropPlogMessage(d, o, s)
     \/ \E o \in Objects : CommitVlog(o)
     \/ \E o \in Objects : PublishVlog(o)
+    \/ \E o \in Objects : AbortVlog(o) \/ ReconcileVlog(o)
     \/ CrashRestart
     \/ \E o \in Objects : Read(o) \/ ReadVlog(o)
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : ReadPlog(d, o, s)
@@ -410,6 +429,7 @@ TypeOK ==
     /\ \A d \in Disks : Cardinality({n \in Nodes : <<d, n>> \in DiskNodes}) = 1
     /\ \A d \in Disks : disk_state[d] \in {"absent", "active", "draining", "failed", "detached"}
     /\ \A n \in Nodes : node_state[n] \in {"working", "failed"}
+    /\ \A o \in Objects : object_state[o] \in {"new", "vlog-ready", "writing", "commit-durable", "committed", "aborted"}
     /\ \A d \in Disks : pending[d] \subseteq Pairs \cup Messages /\ stored[d] \subseteq Pairs
     /\ \A j \in Jobs : job_state[j] \in {"idle", "running", "done"}
 
