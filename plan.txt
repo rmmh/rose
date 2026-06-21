@@ -1,0 +1,56 @@
+Rose -- Reduced Operational Storage Engine
+
+- snapshots
+- deduplication
+- bitrot detection & correction
+- bucket-level configurable protection schemes
+- fast directory renames (log rename operation, )
+- fast directory listings ()
+
+
+Vaguely S3 compatible
+
+append-only block structure
+
+beta(-epsilon?) metadata structure
+
+4GB vlog size allows 64bit byte-addressable storage
+
+vlog (virtual log)
+
+corruption detection: after every 255 4K sectors there is a 4K hash entry with the 16B hash of each block and a keyed HMAC over the hashes themselves (256 16B hashes = 4KB). Potentially also have a 4K checksum as the 255th sector, for 0.8% hash+protection overhead. This may or may not actually help with bitrot.
+
+crypto: XTS ? chacha20 ? (overlap attack only happens on replay, hrm)
+
+chunk-based dedupe 1MB
+
+KV needs atomic incr/decr operations
+
+RWlock: 
+- read lock on chunk id = upload will increment chunk refcount
+- write lock on chunk id = GC is about to delete this key
+
+
+vlog -> plog 
+
+full directory path -> inode
+(num slashes, full path) -> inode
+(num slashes, dir path) -> refcount
+inode -> [(chunk, len), ...]
+chunk -> addr, len, refcount
+
+
+interrupt RPCs only on _node_ loss, not on _disk_ loss ?
+
+libs:
+    https://github.com/klauspost/reedsolomon
+
+FIRST CUT:
+
+single metadata master node, with sqlite3 backing
+multiple possible data nodes
+
+multiple-master is a problem for later, possibly with a new KV store or simply replicated sqlite
+
+
+RAID write hole: have to store ragged edges while overwriting parity blocks to avoid data loss

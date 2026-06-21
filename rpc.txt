@@ -1,0 +1,41 @@
+
+
+Open(path string) (int, error)
+    allocate file handle and return id
+Write(handle int, buf []byte) error
+    write buffer to file buf
+    maybe flush
+Close(handle int)
+    flush file buffer
+        if no vlog:
+            for each vlog in bucket:
+                try acquiring lock; break
+            else:
+                make new vlog, acquire lock
+        for chunk in buffer:
+            write to vlog under lock
+
+MakeVlog(params) vlogid
+Write(vlog, txnid, buf []byte) (offset, error)
+Read(vlog, offset, length) ([]byte, error)
+Commit(txnid int) error
+
+MakePlog(params) plogid
+Write(plog, txnid, lockid int, buf []byte) (offset, error)
+Read(plog, offset, length) ([]byte, error)
+Commit(txnid int) error
+
+tables:
+
+chunks: list of 120b hashes + 32b lengths. ~19kB/GB overhead
+vaddr: 32b vlogid + 32b offset
+paddr: 32b plogid + 32b offset
+
+file(path, mtime, meta, chunks)
+chunk(hash, refcount, vaddr, dlen, clen, meta)
+vlog(vlogid, length, meta) -- meta includes protection scheme, plog ids, and extra plogs for ragged (underprotected) writes
+plog(plogid, disk, length)
+sectormetahash(paddr, hashes)
+
+node(nodeid, mac, hostname)
+disk(diskid, nodeid, total, used)
