@@ -180,9 +180,14 @@ func (s *Server) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, job := range jobs {
-		if job.Kind == meta.JobCompact {
+		switch job.Kind {
+		case meta.JobCompact:
 			if err := s.CompactVlog(ctx, job.TargetVlog); err != nil {
 				return fmt.Errorf("resume compaction of vlog %d: %w", job.TargetVlog, err)
+			}
+		case meta.JobDrain:
+			if err := s.DrainDisk(ctx, job.TargetDisk); err != nil {
+				return fmt.Errorf("resume drain of disk %d: %w", job.TargetDisk, err)
 			}
 		}
 	}

@@ -22,11 +22,7 @@ func (s *Server) SetDiskState(ctx context.Context, diskID uint32, state string) 
 	if _, ok := s.diskRoots[diskID]; !ok {
 		return fmt.Errorf("disk %d is not configured", diskID)
 	}
-	if err := s.db.SetDiskState(ctx, diskID, state); err != nil {
-		return err
-	}
-	s.diskState[diskID] = state
-	return nil
+	return s.setDiskStateLocked(ctx, diskID, state)
 }
 
 // DiskStates returns a snapshot of every configured disk's lifecycle state.

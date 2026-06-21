@@ -78,16 +78,32 @@
   readThreshold: data_shards for EC, 1 otherwise). Close refuses to acknowledge a
   write when its vlog lacks enough live shards (strict read-only degradation).
 
+## Disk drain/remove job (done)
+
+- Server.DrainDisk evacuates every shard off a disk and detaches it
+  (StartRemove -> DrainStep* -> FinishJob), run under a durable `job` row
+  (kind=drain, target_disk) so a crash mid-drain is resumed from Recover off the
+  shards still on the disk. The disk moves to draining immediately (out of
+  placement) and to detached only once empty (NoDetachedData).
+- Each shard is relocated with compaction's copy-then-repoint discipline: copy
+  the plog file to the destination disk and fsync, atomically flip plog.disk_id
+  (MovePlogToDisk), remove the source, then re-mount the owning vlog so in-memory
+  clients resolve to the relocated file.
+- pickDrainDestination enforces PlacementAllowed: the destination must be an
+  active disk not already holding another shard/copy of the same vlog, so a move
+  never collapses two shards onto one disk. A drain with no legal destination
+  fails and leaves the disk draining (stuck until capacity is added).
+
 ## Storage control plane follow-ups (from RoseStorage.tla, not yet implemented)
 
+- Implement the remaining maintenance jobs on the same durable `job` machinery:
+  replace (drain old onto a freshly added disk), reprotect (regenerate shards
+  lost to a failed disk from surviving redundancy: DUPLICATE copy / EC
+  reconstruct), and rebalance (RebalanceStep across live disks).
 - Model node failure (node_state working/failed) and the one-disk-per-node fault
-  domain; fold node liveness into DiskLive so a failed node's disks drop out.
-- Implement the remaining maintenance jobs as durable work-stream entries
-  (reusing the meta `job` machinery): drain/remove, replace, reprotect, rebalance
-  (DrainStep/ReprotectStep/RebalanceStep), driving disks to detached only once
-  empty (NoDetachedData) and never writing to a draining disk (NoWritesToDraining).
-- Enforce the full PlacementAllowed for EC during maintenance moves: never
-  collapse two distinct EC shards (or duplicate copies) onto one disk/node;
-  honor NodeLevelDurability fault domains.
+  domain; fold node liveness into DiskLive so a failed node's disks drop out, and
+  honor NodeLevelDurability fault domains in PlacementAllowed.
 - Automatic repair that re-admits writes once every published object is fully
   protected again, plus an RPC/background driver for disk add/drain/replace.
+- Retire a drained disk's stray source files on resume (a crash after the
+  metadata flip can leave a copied-from file on the disk being removed).

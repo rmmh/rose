@@ -125,6 +125,7 @@ func initSchema(db *sql.DB) error {
 			state TEXT NOT NULL,         -- 'running' | 'done'
 			target_vlog INTEGER NOT NULL DEFAULT 0,
 			dest_vlog INTEGER NOT NULL DEFAULT 0,
+			target_disk INTEGER NOT NULL DEFAULT 0, -- disk-maintenance jobs (drain)
 			created_at INTEGER NOT NULL
 		);
 	`)
@@ -145,6 +146,13 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(`ALTER TABLE disk ADD COLUMN state TEXT NOT NULL DEFAULT 'active'`); err != nil {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("add disk.state column: %w", err)
+		}
+	}
+	// Disk-maintenance jobs (drain) target a disk rather than a vlog; older job
+	// streams default the column to 0.
+	if _, err := db.Exec(`ALTER TABLE job ADD COLUMN target_disk INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("add job.target_disk column: %w", err)
 		}
 	}
 	return nil

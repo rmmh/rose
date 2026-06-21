@@ -76,6 +76,43 @@ type VlogShardDisk struct {
 	DiskID     uint32
 }
 
+// PlogOnDisk is one plog stored on a disk, with the vlog shard it backs.
+type PlogOnDisk struct {
+	PlogID     uint32
+	VlogID     uint32
+	ShardIndex int
+}
+
+// PlogsOnDisk lists the plogs physically stored on a disk together with the vlog
+// shard each one backs. Draining a disk migrates exactly these plogs elsewhere.
+func (d *DB) PlogsOnDisk(ctx context.Context, diskID uint32) ([]PlogOnDisk, error) {
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT p.id, vp.vlog_id, vp.shard_idx
+		FROM plog p JOIN vlog_plog vp ON vp.plog_id = p.id
+		WHERE p.disk_id = ? ORDER BY p.id`, diskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PlogOnDisk
+	for rows.Next() {
+		var p PlogOnDisk
+		if err := rows.Scan(&p.PlogID, &p.VlogID, &p.ShardIndex); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// MovePlogToDisk repoints a plog at a new disk. The bytes must already be durable
+// at the destination path; this atomic metadata flip is what makes the plog
+// resolve to its new home, so a crash before it leaves the old copy authoritative.
+func (d *DB) MovePlogToDisk(ctx context.Context, plogID, newDiskID uint32) error {
+	_, err := d.db.ExecContext(ctx, "UPDATE plog SET disk_id = ? WHERE id = ?", newDiskID, plogID)
+	return err
+}
+
 // VlogShardDisks lists, per shard index, the disk that stores that shard's plog.
 // Live-shard accounting for commit/read durability gating cross-references these
 // disk IDs against the disk catalog's lifecycle states.
