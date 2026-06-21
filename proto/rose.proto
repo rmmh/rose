@@ -22,6 +22,15 @@ service Rose {
   rpc WritePlog(WritePlogRequest) returns (WritePlogResponse);
   rpc ReadPlog(ReadPlogRequest) returns (ReadPlogResponse);
   rpc CommitPlog(CommitPlogRequest) returns (CommitPlogResponse);
+
+  // Disk management operations. Long-running operations return a job that
+  // reports progress while data movement continues concurrently with I/O.
+  rpc AddDisk(AddDiskRequest) returns (AddDiskResponse);
+  rpc RemoveDisk(RemoveDiskRequest) returns (MaintenanceJobResponse);
+  rpc ReplaceDisk(ReplaceDiskRequest) returns (MaintenanceJobResponse);
+  rpc StartReprotect(StartReprotectRequest) returns (MaintenanceJobResponse);
+  rpc StartRebalance(StartRebalanceRequest) returns (MaintenanceJobResponse);
+  rpc GetMaintenanceJob(GetMaintenanceJobRequest) returns (GetMaintenanceJobResponse);
 }
 
 // File requests
@@ -139,4 +148,54 @@ message CommitPlogRequest {
 }
 
 message CommitPlogResponse {
+}
+
+// Disk management requests
+message AddDiskRequest {
+  uint32 disk_id = 1;
+  uint32 node_id = 2;
+  uint64 total_bytes = 3;
+}
+
+message AddDiskResponse {
+}
+
+message RemoveDiskRequest {
+  uint32 disk_id = 1;
+}
+
+message ReplaceDiskRequest {
+  uint32 old_disk_id = 1;
+  uint32 new_disk_id = 2;
+  uint32 node_id = 3;
+  uint64 total_bytes = 4;
+}
+
+message StartReprotectRequest {
+  uint32 disk_id = 1;
+}
+
+message StartRebalanceRequest {
+}
+
+message MaintenanceJobResponse {
+  uint64 job_id = 1;
+}
+
+message GetMaintenanceJobRequest {
+  uint64 job_id = 1;
+}
+
+enum MaintenanceJobState {
+  MAINTENANCE_JOB_STATE_UNSPECIFIED = 0;
+  MAINTENANCE_JOB_STATE_RUNNING = 1;
+  MAINTENANCE_JOB_STATE_COMPLETED = 2;
+  MAINTENANCE_JOB_STATE_FAILED = 3;
+}
+
+message GetMaintenanceJobResponse {
+  uint64 job_id = 1;
+  MaintenanceJobState state = 2;
+  uint64 completed_bytes = 3;
+  uint64 total_bytes = 4;
 }
