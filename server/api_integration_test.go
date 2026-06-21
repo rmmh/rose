@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -203,6 +204,102 @@ func TestRecoverReopensPersistedVlogs(t *testing.T) {
 	}
 	if got := read.GetBuffer(); !bytes.Equal(got, []byte("survives restart")) {
 		t.Fatalf("recovered read = %q", got)
+	}
+}
+
+func TestScrubFlagsCorruptionAndReplicaServesGoodData(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	disk1 := filepath.Join(dir, "disk1")
+	disk2 := filepath.Join(dir, "disk2")
+	s := server.NewServerWithDiskRoots(db, map[uint32]string{1: disk1, 2: disk2})
+	ctx := context.Background()
+
+	// A payload larger than one hash-protected block (>1MB) so its first sectors
+	// are sealed with durable on-disk hashes that scrub can validate.
+	payload := make([]byte, 1<<20+128*1024)
+	rng := rand.New(rand.NewSource(7))
+	rng.Read(payload)
+
+	opened, err := s.Open(ctx, &pb.OpenRequest{Path: "/big"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: opened.GetHandle(), Buffer: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: opened.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A clean scrub before corruption.
+	clean, err := s.Scrub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range clean {
+		for _, shard := range v.Shards {
+			if !shard.Result.Healthy() {
+				t.Fatalf("pre-corruption scrub unhealthy: %+v", shard)
+			}
+		}
+	}
+
+	// Corrupt the first replica's plog on disk.
+	entries, err := os.ReadDir(disk1)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("read disk1: %v", err)
+	}
+	corruptFileByte(t, filepath.Join(disk1, entries[0].Name()), 100)
+
+	scrubbed, err := s.Scrub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawCorruption bool
+	for _, v := range scrubbed {
+		for _, shard := range v.Shards {
+			if len(shard.Result.CorruptSectors) > 0 {
+				sawCorruption = true
+			}
+		}
+	}
+	if !sawCorruption {
+		t.Fatal("scrub did not detect injected corruption")
+	}
+
+	// The duplicate replica still serves correct data despite the corruption.
+	reopened, err := s.Open(ctx, &pb.OpenRequest{Path: "/big"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.Read(ctx, &pb.ReadRequest{Handle: reopened.GetHandle(), Offset: 0, Length: 256})
+	if err != nil {
+		t.Fatalf("read after corruption: %v", err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload[:256]) {
+		t.Fatal("read after corruption returned wrong data")
+	}
+}
+
+func corruptFileByte(t *testing.T, path string, off int64) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	b := make([]byte, 1)
+	if _, err := f.ReadAt(b, off); err != nil {
+		t.Fatal(err)
+	}
+	b[0] ^= 0xff
+	if _, err := f.WriteAt(b, off); err != nil {
+		t.Fatal(err)
 	}
 }
 

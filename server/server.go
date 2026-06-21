@@ -143,5 +143,31 @@ func (c *localPlogClient) Commit(ctx context.Context, txnID int64) error {
 	return c.plog.Commit()
 }
 
+func (c *localPlogClient) Scrub() (storage.ScrubResult, error) {
+	return c.plog.Scrub()
+}
+
+// VlogScrub reports a scrub of one mounted virtual log.
+type VlogScrub struct {
+	VlogID uint32
+	Shards []storage.ShardScrub
+}
+
+// Scrub validates every mounted vlog's backing shards in order. It is the bulk
+// sequential integrity pass the README describes; callers can use the reported
+// corrupt shards to schedule repair from surviving redundancy.
+func (s *Server) Scrub() ([]VlogScrub, error) {
+	out := make([]VlogScrub, 0, len(s.vlogs))
+	for id, vlog := range s.vlogs {
+		shards, err := vlog.Scrub()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, VlogScrub{VlogID: id, Shards: shards})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].VlogID < out[j].VlogID })
+	return out, nil
+}
+
 // Ensure localPlogClient implements storage.PlogClient
 var _ storage.PlogClient = &localPlogClient{}

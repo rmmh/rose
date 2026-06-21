@@ -20,6 +20,16 @@ type committingPlogClient interface {
 	Commit(ctx context.Context, txnID int64) error
 }
 
+type scrubbablePlogClient interface {
+	Scrub() (ScrubResult, error)
+}
+
+// ShardScrub pairs a vlog shard index with its plog scrub result.
+type ShardScrub struct {
+	Shard  int
+	Result ScrubResult
+}
+
 // Vlog represents a Virtual Log that implements protection schemes on top of physical logs.
 type Vlog struct {
 	id     uint32
@@ -213,3 +223,24 @@ func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
 }
 
 func (v *Vlog) Length() int64 { return atomic.LoadInt64(&v.length) }
+
+func (v *Vlog) ID() uint32 { return v.id }
+
+// Scrub validates every shard that backs the vlog, returning per-shard results.
+// For DUPLICATE and EC schemes a corrupt shard reported here is recoverable from
+// the surviving shards; the caller decides whether to schedule repair.
+func (v *Vlog) Scrub() ([]ShardScrub, error) {
+	out := make([]ShardScrub, 0, len(v.clients))
+	for shard, c := range v.clients {
+		scrubber, ok := c.(scrubbablePlogClient)
+		if !ok {
+			continue
+		}
+		res, err := scrubber.Scrub()
+		if err != nil {
+			return nil, fmt.Errorf("scrub vlog %d shard %d: %w", v.id, shard, err)
+		}
+		out = append(out, ShardScrub{Shard: shard, Result: res})
+	}
+	return out, nil
+}
