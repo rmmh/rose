@@ -52,6 +52,10 @@ ValidShard(o, s) ==
 
 LiveDisks(o, s) == {d \in Disks : DiskReadable(d) /\ <<o, s>> \in stored[d]}
 LiveECShards(o) == {s \in 1..TotalShards : \E d \in Disks : d \in LiveDisks(o, s)}
+AcknowledgedDisks(o, s) ==
+    {d \in Disks : DiskReadable(d) /\ <<o, s>> \in stored[d] /\ <<o, s>> \notin pending[d]}
+AcknowledgedECShards(o) ==
+    {s \in 1..TotalShards : \E d \in Disks : d \in AcknowledgedDisks(o, s)}
 
 Readable(o) ==
     \/ object_mode[o] \in {"NONE", "DUPLICATE"} /\ Cardinality(LiveDisks(o, 0)) >= 1
@@ -61,6 +65,11 @@ CommitReady(o) ==
     \/ object_mode[o] = "NONE" /\ Cardinality(LiveDisks(o, 0)) >= 1
     \/ object_mode[o] = "DUPLICATE" /\ Cardinality(LiveDisks(o, 0)) >= MinCopies
     \/ object_mode[o] = "EC" /\ Cardinality(LiveECShards(o)) >= MinCommitShards
+
+AcknowledgedForCommit(o) ==
+    \/ object_mode[o] = "NONE" /\ Cardinality(AcknowledgedDisks(o, 0)) >= 1
+    \/ object_mode[o] = "DUPLICATE" /\ Cardinality(AcknowledgedDisks(o, 0)) >= MinCopies
+    \/ object_mode[o] = "EC" /\ Cardinality(AcknowledgedECShards(o)) >= MinCommitShards
 
 \* The destination may temporarily hold the same EC shard during a move, but
 \* it may not collapse distinct EC shards (or duplicate copies) onto a node.
@@ -142,15 +151,23 @@ WritePlog(d, o, s) ==
 CommitPlog(d, o, s) ==
     /\ DiskLive(d)
     /\ <<o, s>> \in pending[d]
-    /\ pending' = [pending EXCEPT ![d] = @ \ {<<o, s>>}]
     /\ stored' = [stored EXCEPT ![d] = @ \cup {<<o, s>>}]
     /\ last_rpc' = last_rpc
     /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
-                  node_state, job_state, job_kind, job_disk, job_progress>>
+                  node_state, pending, job_state, job_kind, job_disk, job_progress>>
+
+AckPlog(d, o, s) ==
+    /\ DiskLive(d)
+    /\ <<o, s>> \in pending[d] \cap stored[d]
+    /\ pending' = [pending EXCEPT ![d] = @ \ {<<o, s>>}]
+    /\ last_rpc' = last_rpc
+    /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
+                  node_state, stored, job_state, job_kind, job_disk, job_progress>>
 
 CommitVlog(o) ==
     /\ object_state[o] = "writing"
     /\ CommitReady(o)
+    /\ AcknowledgedForCommit(o)
     /\ object_state' = [object_state EXCEPT ![o] = "committed"]
     /\ last_rpc' = last_rpc
     /\ UNCHANGED <<file_state, object_mode, plog_ready, disk_state, node_state,
@@ -263,6 +280,7 @@ RebalanceStep(j, from, to, o, s) ==
     /\ job_kind[j] = "rebalance"
     /\ DiskLive(from)
     /\ <<o, s>> \in stored[from]
+    /\ <<o, s>> \notin pending[from]
     /\ PlacementAllowed(o, s, to)
     /\ <<o, s>> \notin stored[to]
     /\ to # from
@@ -329,6 +347,7 @@ Next ==
     \/ \E o \in Objects : WriteVlog(o)
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : WritePlog(d, o, s)
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : CommitPlog(d, o, s)
+    \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : AckPlog(d, o, s)
     \/ \E o \in Objects : CommitVlog(o)
     \/ \E o \in Objects : Read(o) \/ ReadVlog(o)
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : ReadPlog(d, o, s)
