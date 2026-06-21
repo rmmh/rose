@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -452,52 +453,66 @@ func TestAttachDiskBringsCapacityOnline(t *testing.T) {
 	}
 }
 
-// diskShardCounts reports how many plogs sit on each given disk.
-func diskShardCounts(t *testing.T, s *Server, disks ...uint32) map[uint32]int {
+// diskUsage reports the physical bytes stored on each given disk, the unit
+// rebalance equalizes.
+func diskUsage(t *testing.T, s *Server, disks ...uint32) map[uint32]int64 {
 	t.Helper()
-	out := make(map[uint32]int, len(disks))
+	out := make(map[uint32]int64, len(disks))
 	for _, d := range disks {
 		ps, err := s.db.PlogsOnDisk(context.Background(), d)
 		if err != nil {
 			t.Fatal(err)
 		}
-		out[d] = len(ps)
+		for _, p := range ps {
+			fi, err := os.Stat(s.plogPath(d, p.PlogID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out[d] += fi.Size()
+		}
 	}
 	return out
 }
 
-func spread(counts map[uint32]int) int {
-	min, max := 1<<30, -1
-	for _, c := range counts {
-		if c < min {
-			min = c
+func usageSpread(usage map[uint32]int64) int64 {
+	min, max := int64(1)<<62, int64(-1)
+	for _, u := range usage {
+		if u < min {
+			min = u
 		}
-		if c > max {
-			max = c
+		if u > max {
+			max = u
 		}
 	}
 	return max - min
 }
 
-// pileVlogsOnDisk1 provisions n NONE vlogs, each a single shard that placement
-// always lands on the lowest active disk, manufacturing a lopsided cluster.
-func pileVlogsOnDisk1(t *testing.T, s *Server, n int) {
+// provisionSizedNone provisions a NONE vlog and writes size bytes to it. A NONE
+// vlog is a single shard that placement always lands on the lowest active disk,
+// so repeated calls pile differently-sized shards onto disk 1.
+func provisionSizedNone(t *testing.T, s *Server, size int) uint32 {
 	t.Helper()
-	for i := 0; i < n; i++ {
-		id := provision(t, s, "NONE", 1, 0)
-		writeVlog(t, s, id, []byte("payload"))
-	}
+	id := provision(t, s, "NONE", 1, 0)
+	writeVlog(t, s, id, bytes.Repeat([]byte("x"), size))
+	return id
 }
 
-func TestRebalanceEvensOutWithinHysteresis(t *testing.T) {
+func TestRebalanceEvensDiskBytes(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 2)
-	s.SetRebalancePolicy(RebalancePolicy{MinSkew: 1, MaxMovesPerPass: 100})
+	band := int64(2 << 20)
+	s.SetRebalancePolicy(RebalancePolicy{MinSkewBytes: band, MaxMovesPerPass: 100})
 
-	pileVlogsOnDisk1(t, s, 6) // disk 1: 6 shards, disk 2: 0
-	before := diskShardCounts(t, s, 1, 2)
-	if before[1] != 6 || before[2] != 0 {
-		t.Fatalf("setup skew = %v, want disk1=6 disk2=0", before)
+	// One dominant shard plus four small ones, all on disk 1. Balancing by bytes
+	// must relocate the big shard; balancing by count would instead shuffle the
+	// small ones and leave the disks lopsided.
+	provisionSizedNone(t, s, 8<<20)
+	for i := 0; i < 4; i++ {
+		provisionSizedNone(t, s, 2<<20)
+	}
+	before := diskUsage(t, s, 1, 2)
+	if before[2] != 0 {
+		t.Fatalf("setup put %d bytes on disk 2, want 0", before[2])
 	}
 
 	moved, err := s.Rebalance(ctx)
@@ -505,14 +520,18 @@ func TestRebalanceEvensOutWithinHysteresis(t *testing.T) {
 		t.Fatal(err)
 	}
 	if moved == 0 {
-		t.Fatal("rebalance moved nothing on a 6/0 cluster")
+		t.Fatal("rebalance moved nothing on a fully lopsided cluster")
 	}
-	after := diskShardCounts(t, s, 1, 2)
-	if got := spread(after); got > 1 {
-		t.Fatalf("after rebalance spread = %d (%v), want <= MinSkew(1)", got, after)
+	after := diskUsage(t, s, 1, 2)
+	if got := usageSpread(after); got > band {
+		t.Fatalf("after rebalance byte spread = %d (%v), want <= band %d", got, after, band)
+	}
+	// The dominant ~8 MiB shard is what moved, evening the bytes in few moves.
+	if after[2] < 7<<20 {
+		t.Fatalf("disk 2 received only %d bytes; byte rebalance should have moved the dominant shard", after[2])
 	}
 
-	// A second pass on the now-even cluster is a no-op (already within the band).
+	// A second pass on the now-even cluster is a no-op (within the band).
 	moved, err = s.Rebalance(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -525,10 +544,12 @@ func TestRebalanceEvensOutWithinHysteresis(t *testing.T) {
 func TestRebalanceHysteresisToleratesMinorImbalance(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 2)
-	// A wide band: a 3/0 spread is below it, so nothing should move.
-	s.SetRebalancePolicy(RebalancePolicy{MinSkew: 5, MaxMovesPerPass: 100})
+	// A band far larger than the data: the whole imbalance is within it.
+	s.SetRebalancePolicy(RebalancePolicy{MinSkewBytes: 1 << 30, MaxMovesPerPass: 100})
 
-	pileVlogsOnDisk1(t, s, 3)
+	for i := 0; i < 3; i++ {
+		provisionSizedNone(t, s, 2<<20)
+	}
 	moved, err := s.Rebalance(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -542,9 +563,13 @@ func TestRebalanceCooldownBacksOff(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 2)
 	// Move one shard per pass, then refuse to start another pass for an hour.
-	s.SetRebalancePolicy(RebalancePolicy{MinSkew: 1, MaxMovesPerPass: 1, Cooldown: time.Hour})
+	s.SetRebalancePolicy(RebalancePolicy{MinSkewBytes: 1 << 20, MaxMovesPerPass: 1, Cooldown: time.Hour})
 
-	pileVlogsOnDisk1(t, s, 6)
+	// Four equal shards: a single capped move (12->9 / 0->3 MiB) leaves the disks
+	// still imbalanced beyond the band.
+	for i := 0; i < 4; i++ {
+		provisionSizedNone(t, s, 3<<20)
+	}
 	moved, err := s.Rebalance(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -553,9 +578,8 @@ func TestRebalanceCooldownBacksOff(t *testing.T) {
 		t.Fatalf("first pass moved %d shards, want 1 (per-pass cap)", moved)
 	}
 
-	// Still imbalanced (5/1), but the cooldown blocks the next pass.
-	if got := spread(diskShardCounts(t, s, 1, 2)); got <= 1 {
-		t.Fatalf("cluster already balanced (%d) after one capped move; cannot test cooldown", got)
+	if got := usageSpread(diskUsage(t, s, 1, 2)); got <= 1<<20 {
+		t.Fatalf("cluster already balanced (spread %d) after one capped move; cannot test cooldown", got)
 	}
 	moved, err = s.Rebalance(ctx)
 	if err != nil {

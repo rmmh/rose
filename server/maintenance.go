@@ -6,22 +6,24 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/rmmh/rose/meta"
 	"github.com/rmmh/rose/storage"
 )
 
-// RebalancePolicy bounds how aggressively rebalance evens shard counts across
-// active disks. The point is deliberately not to reach perfect balance: shards
-// are expensive to move, so a little skew is tolerated and passes are rate
-// limited.
+// RebalancePolicy bounds how aggressively rebalance evens disk-space usage across
+// active disks. Balance is measured in bytes, not shard count: shards vary widely
+// in size, so an even shard count can still leave very uneven disks. The point is
+// deliberately not to reach perfect balance: shards are expensive to move, so some
+// skew is tolerated and passes are rate limited.
 type RebalancePolicy struct {
-	// MinSkew is the hysteresis band. A pass is a no-op unless the busiest active
-	// disk holds at least MinSkew more shards than the idlest, and it stops moving
-	// once the spread falls back within the band. This is what keeps the system
-	// from thrashing shards to flatten a one- or two-shard difference.
-	MinSkew int
+	// MinSkewBytes is the hysteresis band. A pass is a no-op unless the busiest
+	// active disk holds at least MinSkewBytes more bytes than the idlest, and it
+	// stops moving once the spread falls back within the band. This is what keeps
+	// the system from thrashing shards to flatten a small byte difference.
+	MinSkewBytes int64
 	// MaxMovesPerPass caps how many shards a single pass relocates, bounding the
 	// IO one rebalance triggers. Zero means unbounded within a pass.
 	MaxMovesPerPass int
@@ -31,10 +33,11 @@ type RebalancePolicy struct {
 	Cooldown time.Duration
 }
 
-// DefaultRebalancePolicy tolerates a two-shard spread, moves at most eight shards
-// per pass, and waits five minutes between passes.
+// DefaultRebalancePolicy tolerates a 10 GiB spread (roughly an order of magnitude
+// over a single shard, so a handful of large shards never trips it), moves at
+// most eight shards per pass, and waits five minutes between passes.
 func DefaultRebalancePolicy() RebalancePolicy {
-	return RebalancePolicy{MinSkew: 2, MaxMovesPerPass: 8, Cooldown: 5 * time.Minute}
+	return RebalancePolicy{MinSkewBytes: 10 << 30, MaxMovesPerPass: 8, Cooldown: 5 * time.Minute}
 }
 
 // SetRebalancePolicy replaces the rebalance tuning. It is the operator knob for
@@ -357,11 +360,13 @@ func (s *Server) ensurePlacementAllowedLocked(ctx context.Context, vlogID, toDis
 	return nil
 }
 
-// Rebalance evens shard counts across active disks, implementing the RoseStorage
-// RebalanceStep as a bounded, best-effort pass. It moves shards off the busiest
-// disks onto the idlest, but only while the spread exceeds the hysteresis band
-// and only up to the per-pass move cap, and it skips entirely inside the cooldown
-// window after a prior pass moved something. It returns how many shards it moved.
+// Rebalance evens disk-space usage across active disks, implementing the
+// RoseStorage RebalanceStep as a bounded, best-effort pass. Balance is measured
+// in bytes, not shard count: shards vary widely in size, so an even count can
+// still leave very uneven disks. It moves shards off the busiest disk onto the
+// idlest, but only while the byte spread exceeds the hysteresis band and only up
+// to the per-pass move cap, and it skips entirely inside the cooldown window after
+// a prior pass moved something. It returns how many shards it moved.
 //
 // Unlike drain/reprotect/replace, rebalance has no must-finish obligation: every
 // move is individually crash-safe (copy-then-repoint via migratePlogLocked) and a
@@ -381,24 +386,33 @@ func (s *Server) Rebalance(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	counts := make(map[uint32]int, len(active))
+	usage := make(map[uint32]int64, len(active))
 	plogsByDisk := make(map[uint32][]meta.PlogOnDisk, len(active))
+	sizeByPlog := make(map[uint32]int64)
 	for _, d := range active {
+		usage[d] = 0 // ensure empty disks are still candidate destinations
 		ps, err := s.db.PlogsOnDisk(ctx, d)
 		if err != nil {
 			return 0, err
 		}
-		counts[d] = len(ps)
+		for _, p := range ps {
+			sz, err := s.plogSizeLocked(d, p.PlogID)
+			if err != nil {
+				return 0, err
+			}
+			sizeByPlog[p.PlogID] = sz
+			usage[d] += sz
+		}
 		plogsByDisk[d] = ps
 	}
 
 	moves := 0
 	for pol.MaxMovesPerPass <= 0 || moves < pol.MaxMovesPerPass {
-		src, dst := diskExtremes(active, counts)
-		if counts[src]-counts[dst] <= pol.MinSkew {
+		src, dst := diskExtremes(active, usage)
+		if usage[src]-usage[dst] <= pol.MinSkewBytes {
 			break // spread is within the hysteresis band; minor imbalance is fine
 		}
-		moved, err := s.rebalanceOneLocked(ctx, src, pol.MinSkew, counts, plogsByDisk)
+		moved, err := s.rebalanceOneLocked(ctx, src, pol.MinSkewBytes, usage, sizeByPlog, plogsByDisk)
 		if err != nil {
 			return moves, err
 		}
@@ -413,28 +427,47 @@ func (s *Server) Rebalance(ctx context.Context) (int, error) {
 	return moves, nil
 }
 
-// diskExtremes returns the busiest and idlest disk by shard count, scanning in
-// the (sorted) active order so ties break deterministically.
-func diskExtremes(active []uint32, counts map[uint32]int) (busiest, idlest uint32) {
+// plogSizeLocked reports a plog's physical size on disk, the unit rebalance
+// equalizes. The caller must hold vlogMu.
+func (s *Server) plogSizeLocked(diskID, plogID uint32) (int64, error) {
+	fi, err := os.Stat(s.plogPath(diskID, plogID))
+	if err != nil {
+		return 0, fmt.Errorf("rebalance: stat plog %d on disk %d: %w", plogID, diskID, err)
+	}
+	return fi.Size(), nil
+}
+
+// diskExtremes returns the busiest and idlest disk by byte usage, scanning in the
+// (sorted) active order so ties break deterministically.
+func diskExtremes(active []uint32, usage map[uint32]int64) (busiest, idlest uint32) {
 	busiest, idlest = active[0], active[0]
 	for _, d := range active {
-		if counts[d] > counts[busiest] {
+		if usage[d] > usage[busiest] {
 			busiest = d
 		}
-		if counts[d] < counts[idlest] {
+		if usage[d] < usage[idlest] {
 			idlest = d
 		}
 	}
 	return busiest, idlest
 }
 
-// rebalanceOneLocked relocates a single shard off src onto the lightest active
-// disk that does not already hold a shard of the same vlog (PlacementAllowed) and
-// is at least minSkew+1 shards lighter than src, so the move actually improves
-// balance beyond the hysteresis band. It updates counts and plogsByDisk in place
-// and reports whether it moved anything. The caller must hold vlogMu.
-func (s *Server) rebalanceOneLocked(ctx context.Context, src uint32, minSkew int, counts map[uint32]int, plogsByDisk map[uint32][]meta.PlogOnDisk) (bool, error) {
-	for _, p := range plogsByDisk[src] {
+// rebalanceOneLocked relocates a single shard off src onto a lighter active disk.
+// It picks the largest shard on src that fits the gap to a placement-allowed
+// destination (one not already holding a shard of the same vlog) without
+// overshooting it past the source, so each move shrinks the spread and cannot
+// immediately bounce back. It only moves when the gap still exceeds the
+// hysteresis band. It updates usage and plogsByDisk in place and reports whether
+// it moved anything. The caller must hold vlogMu.
+func (s *Server) rebalanceOneLocked(ctx context.Context, src uint32, minSkewBytes int64, usage map[uint32]int64, sizeByPlog map[uint32]int64, plogsByDisk map[uint32][]meta.PlogOnDisk) (bool, error) {
+	// Largest shard first, so a pass makes the most progress per move.
+	candidates := append([]meta.PlogOnDisk(nil), plogsByDisk[src]...)
+	sort.Slice(candidates, func(i, j int) bool {
+		return sizeByPlog[candidates[i].PlogID] > sizeByPlog[candidates[j].PlogID]
+	})
+
+	for _, p := range candidates {
+		sz := sizeByPlog[p.PlogID]
 		shards, err := s.db.VlogShardDisks(ctx, p.VlogID)
 		if err != nil {
 			return false, err
@@ -444,24 +477,30 @@ func (s *Server) rebalanceOneLocked(ctx context.Context, src uint32, minSkew int
 			occupied[sh.DiskID] = true
 		}
 
-		dst, dstCount := uint32(0), -1
-		for d, c := range counts {
+		dst, dstUsage := uint32(0), int64(-1)
+		for d, u := range usage {
 			if d == src || occupied[d] {
 				continue
 			}
-			if dstCount == -1 || c < dstCount {
-				dst, dstCount = d, c
+			if dstUsage == -1 || u < dstUsage {
+				dst, dstUsage = d, u
 			}
 		}
-		if dstCount == -1 || counts[src]-dstCount <= minSkew {
-			continue // no legal destination, or moving there would not help
+		if dstUsage == -1 {
+			continue // no placement-allowed destination for this vlog
+		}
+		gap := usage[src] - dstUsage
+		if gap <= minSkewBytes || sz > gap {
+			// Either the pair is within the band, or moving this shard would
+			// overshoot the destination past the source and could bounce back.
+			continue
 		}
 
 		if err := s.migratePlogLocked(ctx, p.PlogID, p.VlogID, src, dst); err != nil {
 			return false, err
 		}
-		counts[src]--
-		counts[dst]++
+		usage[src] -= sz
+		usage[dst] += sz
 		plogsByDisk[src] = removePlog(plogsByDisk[src], p.PlogID)
 		plogsByDisk[dst] = append(plogsByDisk[dst], p)
 		return true, nil

@@ -130,18 +130,20 @@
 
 ## Disk rebalance job (done)
 
-- Server.Rebalance evens shard counts across active disks (RoseStorage
-  RebalanceStep) as a bounded, best-effort pass: it moves shards off the busiest
-  disk onto the lightest PlacementAllowed disk, reusing drain's copy-then-repoint
-  migratePlog. Unlike drain/reprotect/replace it carries no durable job row -
-  every move is individually crash-safe and a partial pass just leaves a
-  less-even (but valid) cluster the next pass continues from.
+- Server.Rebalance evens disk-space usage (bytes, not shard count -- shards vary
+  widely in size) across active disks (RoseStorage RebalanceStep) as a bounded,
+  best-effort pass: it moves the largest fitting shard off the busiest disk onto
+  the lightest PlacementAllowed disk, reusing drain's copy-then-repoint
+  migratePlog. Each move picks a shard no larger than the byte gap so it shrinks
+  the spread without overshooting/bouncing. Unlike drain/reprotect/replace it
+  carries no durable job row - every move is individually crash-safe and a partial
+  pass just leaves a less-even (but valid) cluster the next pass continues from.
 - RebalancePolicy makes the aggressiveness configurable so it does not chase
-  perfect balance: MinSkew is a hysteresis band (no move unless the busiest disk
-  is more than MinSkew shards over the idlest, and it stops once the spread falls
-  back within the band), MaxMovesPerPass caps the IO per pass, and Cooldown is
-  the backoff between passes that actually moved something. Defaults: tolerate a
-  two-shard spread, eight moves/pass, five-minute cooldown.
+  perfect balance: MinSkewBytes is a hysteresis band (no move unless the busiest
+  disk holds more than MinSkewBytes over the idlest, and it stops once the byte
+  spread falls back within the band), MaxMovesPerPass caps the IO per pass, and
+  Cooldown is the backoff between passes that actually moved something. Defaults:
+  tolerate a 10 GiB spread, eight moves/pass, five-minute cooldown.
 
 ## Storage control plane follow-ups (from RoseStorage.tla, not yet implemented)
 
