@@ -39,12 +39,14 @@ The first explorer exhaustively checks every crash barrier and every
 permutation of disk preparation/sync order for one strict EC transaction. It
 also checks the ambiguous post-publish/pre-ack crash: metadata may be
 published, but the caller receives an error and must retry with the same
-idempotency key.
+idempotency key. The coordinator is step-driven, and the current suite also
+enumerates all 184,756 interleavings of two strict three-shard transactions.
 
 ## Expansion path
 
-1. Add cloneable coordinator, disk, and metadata state; explore runnable
-   steps from two concurrent transactions with state hashing.
+1. Add cloneable disk and metadata state with state hashing, so a crash can
+   branch from every concurrent transaction schedule without replaying each
+   complete prefix.
 2. Add disk failure, repair, and compaction decisions at every yield point.
 3. Apply symmetry reduction to equivalent disks and partial-order reduction to
    independent operations.

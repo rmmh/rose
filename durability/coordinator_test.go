@@ -138,3 +138,56 @@ func TestStrictCommitExhaustsCrashBarriersAndDiskOrders(t *testing.T) {
 		}
 	}
 }
+
+func TestStrictCommitExhaustsTwoTransactionInterleavings(t *testing.T) {
+	// Each transaction has ten coordinator boundaries.  Execute every one of
+	// C(20, 10) scheduler choices against fresh virtual disks and metadata.
+	var schedules int
+	var explore func([]int, int, int)
+	explore = func(schedule []int, remainingA, remainingB int) {
+		if remainingA == 0 && remainingB == 0 {
+			schedules++
+			disks := []*simulatedDisk{newSimulatedDisk("d1"), newSimulatedDisk("d2"), newSimulatedDisk("d3")}
+			metadata := newSimulatedMetadata(disks)
+			writes := []ShardWrite{
+				{Disk: disks[0], Shard: 1, Data: []byte("a")},
+				{Disk: disks[1], Shard: 2, Data: []byte("b")},
+				{Disk: disks[2], Shard: 3, Data: []byte("c")},
+			}
+			coordinator := Coordinator{Metadata: metadata}
+			txnA, err := coordinator.Start("txn-a", writes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			txnB, err := coordinator.Start("txn-b", writes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, choice := range schedule {
+				txn := txnA
+				if choice == 1 {
+					txn = txnB
+				}
+				if err := coordinator.Step(context.Background(), txn); err != nil {
+					t.Fatalf("schedule %v step txn %d: %v", schedule, choice, err)
+				}
+			}
+			if !txnA.Done() || !txnB.Done() || !metadata.IsPublished("txn-a") || !metadata.IsPublished("txn-b") {
+				t.Fatalf("incomplete schedule %v", schedule)
+			}
+			return
+		}
+		if remainingA > 0 {
+			next := append(append([]int(nil), schedule...), 0)
+			explore(next, remainingA-1, remainingB)
+		}
+		if remainingB > 0 {
+			next := append(append([]int(nil), schedule...), 1)
+			explore(next, remainingA, remainingB-1)
+		}
+	}
+	explore(nil, 10, 10)
+	if schedules != 184756 {
+		t.Fatalf("explored %d schedules, want 184756", schedules)
+	}
+}
