@@ -64,13 +64,30 @@
 - Track per-vlog logical vs compressed bytes once compression lands, so dead-space
   accounting stays correct under EC overhead and compression ratios.
 
-## Storage control plane (from RoseStorage.tla, not yet implemented)
+## Storage control plane (disk lifecycle + commit gating: done)
 
-- Model disk lifecycle states (active/draining/failed/detached) and node failure
-  in the server; gate CommitReady on MinCopies / MinCommitShards live shards.
-- Implement the remaining maintenance jobs as durable work-stream entries:
-  drain/remove, replace, reprotect, rebalance (DrainStep/ReprotectStep/RebalanceStep).
-- Enforce PlacementAllowed: never collapse two EC shards (or duplicate copies)
-  onto one disk/node; honor NodeLevelDurability fault domains.
-- Strict read-only degradation (StrictModeIsReadOnlyWhenDegraded) and automatic
-  repair that re-admits writes once every published object is fully protected.
+- Disk lifecycle (active/draining/failed/detached) is now a durable catalog
+  column (`disk.state`), mirroring RoseStorage's disk_state. Configured disks are
+  registered active on Recover, which re-adopts any persisted non-active state so
+  a disk that was draining/failed before a restart stays out of placement.
+- Server.SetDiskState transitions a disk and persists it under vlogMu;
+  activeDiskIDs (the placement source) now returns only active disks, so new
+  shards never land on a draining/failed/detached disk.
+- CommitReady/Readable gate on live shard counts per protection scheme
+  (commitThreshold: NONE=1, DUPLICATE=min(MinCopies, copies), EC=all shards;
+  readThreshold: data_shards for EC, 1 otherwise). Close refuses to acknowledge a
+  write when its vlog lacks enough live shards (strict read-only degradation).
+
+## Storage control plane follow-ups (from RoseStorage.tla, not yet implemented)
+
+- Model node failure (node_state working/failed) and the one-disk-per-node fault
+  domain; fold node liveness into DiskLive so a failed node's disks drop out.
+- Implement the remaining maintenance jobs as durable work-stream entries
+  (reusing the meta `job` machinery): drain/remove, replace, reprotect, rebalance
+  (DrainStep/ReprotectStep/RebalanceStep), driving disks to detached only once
+  empty (NoDetachedData) and never writing to a draining disk (NoWritesToDraining).
+- Enforce the full PlacementAllowed for EC during maintenance moves: never
+  collapse two distinct EC shards (or duplicate copies) onto one disk/node;
+  honor NodeLevelDurability fault domains.
+- Automatic repair that re-admits writes once every published object is fully
+  protected again, plus an RPC/background driver for disk add/drain/replace.

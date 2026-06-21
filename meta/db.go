@@ -3,6 +3,7 @@ package meta
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -108,6 +109,10 @@ func initSchema(db *sql.DB) error {
 			node_id INTEGER NOT NULL,
 			total_bytes INTEGER NOT NULL,
 			used_bytes INTEGER NOT NULL,
+			-- Lifecycle state mirrors RoseStorage's disk_state: a disk moves
+			-- active -> draining -> detached as it is removed, or -> failed on
+			-- loss.  It gates placement (active only) and commit durability.
+			state TEXT NOT NULL DEFAULT 'active',
 			FOREIGN KEY (node_id) REFERENCES node(id) ON DELETE CASCADE
 		);
 
@@ -134,6 +139,13 @@ func initSchema(db *sql.DB) error {
 		WHERE f.id = (SELECT MAX(latest.id) FROM file AS latest WHERE latest.path = f.path)
 	`); err != nil {
 		return fmt.Errorf("backfill file heads: %w", err)
+	}
+	// Disk catalogs predating the lifecycle column default their existing rows to
+	// active; a duplicate-column error just means the column already exists.
+	if _, err := db.Exec(`ALTER TABLE disk ADD COLUMN state TEXT NOT NULL DEFAULT 'active'`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("add disk.state column: %w", err)
+		}
 	}
 	return nil
 }

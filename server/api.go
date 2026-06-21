@@ -316,6 +316,17 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 			}
 		}
 
+		// Refuse to acknowledge the write unless the vlog still has enough live
+		// shards to hold it durably. With too many backing disks down the server
+		// degrades to read-only instead of claiming durability it cannot provide.
+		ready, err := s.CommitReady(ctx, vlogID)
+		if err != nil {
+			return nil, fmt.Errorf("check commit readiness: %w", err)
+		}
+		if !ready {
+			return nil, fmt.Errorf("vlog %d degraded: too few live shards to durably commit", vlogID)
+		}
+
 		if err := v.Commit(ctx, 0); err != nil {
 			return nil, fmt.Errorf("commit vlog: %w", err)
 		}

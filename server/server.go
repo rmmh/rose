@@ -18,23 +18,45 @@ type Server struct {
 	plogs map[uint32]*storage.Plog
 	vlogs map[uint32]*storage.Vlog
 
-	vlogMu        sync.Mutex
-	activeVlog    uint32
-	dataDir       string
-	diskRoots     map[uint32]string
+	// vlogMu guards the vlog/plog maps, the active-vlog pointer, and the disk
+	// lifecycle cache below, so placement and commit-durability decisions see a
+	// consistent view of which disks are live.
+	vlogMu     sync.Mutex
+	activeVlog uint32
+	dataDir    string
+	diskRoots  map[uint32]string
+	// diskState caches the lifecycle state of every configured disk, kept in sync
+	// with the durable disk catalog. Configured disks start active.
+	diskState map[uint32]string
+	// minCopies is the DUPLICATE commit gate: how many live copies a write must
+	// land on before it is acknowledged durable (capped at the copies provisioned).
+	minCopies     int
 	handlesMu     sync.Mutex
 	handles       map[int64]*FileHandle
 	handleCounter int64
 }
 
 func NewServer(db *meta.DB) *Server {
-	return &Server{
+	s := &Server{
 		db:        db,
 		plogs:     make(map[uint32]*storage.Plog),
 		vlogs:     make(map[uint32]*storage.Vlog),
 		dataDir:   "data",
 		diskRoots: map[uint32]string{1: "data"},
+		diskState: make(map[uint32]string),
+		minCopies: 2,
 		handles:   make(map[int64]*FileHandle),
+	}
+	s.resetDiskStates()
+	return s
+}
+
+// resetDiskStates marks every configured disk active. It is the in-memory
+// default before the durable catalog is consulted during Recover.
+func (s *Server) resetDiskStates() {
+	s.diskState = make(map[uint32]string, len(s.diskRoots))
+	for id := range s.diskRoots {
+		s.diskState[id] = meta.DiskActive
 	}
 }
 
@@ -44,6 +66,7 @@ func NewServerWithDataDir(db *meta.DB, dataDir string) *Server {
 	s := NewServer(db)
 	s.dataDir = dataDir
 	s.diskRoots = map[uint32]string{1: dataDir}
+	s.resetDiskStates()
 	return s
 }
 
@@ -55,6 +78,7 @@ func NewServerWithDiskRoots(db *meta.DB, diskRoots map[uint32]string) *Server {
 	for diskID, root := range diskRoots {
 		s.diskRoots[diskID] = root
 	}
+	s.resetDiskStates()
 	return s
 }
 
@@ -66,10 +90,16 @@ func (s *Server) plogPath(diskID, plogID uint32) string {
 	return filepath.Join(root, "plog-"+fmt.Sprint(plogID))
 }
 
+// activeDiskIDs returns the configured disks currently eligible to receive new
+// shards: only those in the active lifecycle state. Draining, failed, and
+// detached disks are excluded so placement never lands fresh data on a disk that
+// is leaving the cluster. The caller must hold vlogMu.
 func (s *Server) activeDiskIDs() []uint32 {
 	ids := make([]uint32, 0, len(s.diskRoots))
 	for id := range s.diskRoots {
-		ids = append(ids, id)
+		if s.diskState[id] == meta.DiskActive {
+			ids = append(ids, id)
+		}
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return ids
@@ -83,6 +113,25 @@ func (s *Server) GetDB() *meta.DB {
 // missing locally configured disk fails startup rather than silently exposing
 // metadata that cannot be read.
 func (s *Server) Recover(ctx context.Context) error {
+	// Declare configured disks in the durable catalog (idempotent) and adopt any
+	// non-active lifecycle state a prior run persisted, so a disk that was
+	// draining or failed before the crash stays out of placement after restart.
+	for id := range s.diskRoots {
+		if err := s.db.RegisterDisk(ctx, id, id); err != nil {
+			return err
+		}
+	}
+	disks, err := s.db.ListDisks(ctx)
+	if err != nil {
+		return err
+	}
+	s.resetDiskStates()
+	for _, d := range disks {
+		if _, ok := s.diskRoots[d.ID]; ok {
+			s.diskState[d.ID] = d.State
+		}
+	}
+
 	plogInfos, err := s.db.ListPlogs(ctx)
 	if err != nil {
 		return err
