@@ -295,6 +295,171 @@ func TestReprotectResumesAfterRestart(t *testing.T) {
 	}
 }
 
+func TestReplaceDiskMovesShardsOntoNewDisk(t *testing.T) {
+	ctx := context.Background()
+	// Three disks fully occupied by an EC 2+1 vlog; the fourth is the replacement.
+	s := newControlPlaneServer(t, 4)
+	if err := s.SetDiskState(ctx, 4, meta.DiskDraining); err != nil {
+		t.Fatal(err) // hold disk 4 out of the initial placement
+	}
+	vlogID := provision(t, s, "EC", 2, 1)
+	if err := s.SetDiskState(ctx, 4, meta.DiskActive); err != nil {
+		t.Fatal(err) // bring it back as the replacement target
+	}
+
+	payload := bytes.Repeat([]byte("replace-onto-new!"), 1000)
+	offset := writeVlog(t, s, vlogID, payload)
+	want, err := s.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	old := diskOf(t, s, vlogID, 0)
+	shardIdx := -1
+	for _, sh := range mustShards(t, s, vlogID) {
+		if sh.DiskID == old {
+			shardIdx = sh.ShardIndex
+		}
+	}
+
+	if err := s.ReplaceDiskWith(ctx, old, 4); err != nil {
+		t.Fatalf("replace disk %d with 4: %v", old, err)
+	}
+
+	// The old disk is detached and empty; its shard now lives on disk 4.
+	if got := s.DiskStates()[old]; got != meta.DiskDetached {
+		t.Fatalf("replaced disk %d state = %q, want detached", old, got)
+	}
+	if dest := diskOf(t, s, vlogID, shardIdx); dest != 4 {
+		t.Fatalf("shard %d landed on disk %d, want the replacement disk 4", shardIdx, dest)
+	}
+	left, err := s.db.PlogsOnDisk(ctx, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("replaced disk %d still holds %d plogs", old, len(left))
+	}
+
+	got, err := s.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatalf("read after replace: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("payload changed across replace")
+	}
+
+	jobs, err := s.db.RunningJobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("replace left %d running jobs", len(jobs))
+	}
+}
+
+func TestReplaceResumesAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	roots := map[uint32]string{}
+	for i := uint32(1); i <= 4; i++ {
+		roots[i] = filepath.Join(dir, "disk", string(rune('0'+i)))
+	}
+
+	s1 := NewServerWithDiskRoots(db, roots)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Disk 4 is the replacement: keep it out of the initial EC placement.
+	if err := s1.SetDiskState(ctx, 4, meta.DiskDraining); err != nil {
+		t.Fatal(err)
+	}
+	vlogID := provision(t, s1, "EC", 2, 1)
+	if err := s1.SetDiskState(ctx, 4, meta.DiskActive); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("resume-replace"), 400)
+	offset := writeVlog(t, s1, vlogID, payload)
+	old := diskOf(t, s1, vlogID, 0)
+
+	// Simulate a crash right after the replace started: a pinned-destination job
+	// exists and the old disk is draining, but no shard has moved yet.
+	if _, err := db.GetOrCreateReplaceJob(ctx, old, 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetDiskState(ctx, old, meta.DiskDraining); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh server resumes the replace onto the same pinned destination.
+	s2 := NewServerWithDiskRoots(db, roots)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatalf("recover should complete the replace: %v", err)
+	}
+	if got := s2.DiskStates()[old]; got != meta.DiskDetached {
+		t.Fatalf("resumed disk %d state = %q, want detached", old, got)
+	}
+	for _, sh := range mustShards(t, s2, vlogID) {
+		if sh.DiskID == old {
+			t.Fatalf("shard %d still on replaced disk %d after resume", sh.ShardIndex, old)
+		}
+	}
+	got, err := s2.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatalf("read after resumed replace: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("payload changed across resumed replace")
+	}
+}
+
+func TestAttachDiskBringsCapacityOnline(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 2)
+
+	root := t.TempDir()
+	if err := s.AttachDisk(ctx, 3, root); err != nil {
+		t.Fatalf("attach disk: %v", err)
+	}
+	if got := s.DiskStates()[3]; got != meta.DiskActive {
+		t.Fatalf("attached disk 3 state = %q, want active", got)
+	}
+	// Re-attaching a configured disk is rejected.
+	if err := s.AttachDisk(ctx, 3, root); err == nil {
+		t.Fatal("re-attaching disk 3 succeeded, want error")
+	}
+	// New capacity is eligible for placement: a 3-copy DUPLICATE vlog uses it.
+	vlogID := provision(t, s, "DUPLICATE", 1, 0)
+	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onNew := false
+	for _, sh := range shards {
+		if sh.DiskID == 3 {
+			onNew = true
+		}
+	}
+	if !onNew {
+		t.Fatalf("attached disk 3 not used for placement: %+v", shards)
+	}
+}
+
+func mustShards(t *testing.T, s *Server, vlogID uint32) []meta.VlogShardDisk {
+	t.Helper()
+	shards, err := s.db.VlogShardDisks(context.Background(), vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return shards
+}
+
 func TestDrainResumesAfterRestart(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

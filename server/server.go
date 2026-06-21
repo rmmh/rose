@@ -193,6 +193,10 @@ func (s *Server) Recover(ctx context.Context) error {
 			if err := s.ReprotectDisk(ctx, job.TargetDisk); err != nil {
 				return fmt.Errorf("resume reprotect of disk %d: %w", job.TargetDisk, err)
 			}
+		case meta.JobReplace:
+			if err := s.ReplaceDiskWith(ctx, job.TargetDisk, job.DestDisk); err != nil {
+				return fmt.Errorf("resume replace of disk %d: %w", job.TargetDisk, err)
+			}
 		}
 	}
 	return nil

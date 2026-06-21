@@ -225,6 +225,104 @@ func (s *Server) reconstructECShardLocked(ctx context.Context, info meta.VlogInf
 	return shards[lostShard], nil
 }
 
+// AttachDisk configures a new local disk and registers it active in the durable
+// catalog, making it eligible for placement and as a replace destination. It is
+// the operator action that brings fresh capacity online. (AddDisk is reserved by
+// the gRPC surface for the future RPC driver.)
+func (s *Server) AttachDisk(ctx context.Context, diskID uint32, root string) error {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	if _, ok := s.diskRoots[diskID]; ok {
+		return fmt.Errorf("attach disk: disk %d already configured", diskID)
+	}
+	if err := s.db.RegisterDisk(ctx, diskID, diskID); err != nil {
+		return err
+	}
+	s.diskRoots[diskID] = root
+	s.diskState[diskID] = meta.DiskActive
+	return nil
+}
+
+// ReplaceDisk evacuates every shard off oldDisk onto a freshly added newDisk and
+// detaches oldDisk, implementing the RoseStorage replace flow (ReplaceDisk ->
+// DrainStep* onto the pinned destination -> FinishJob). It is drain with the
+// destination pinned: rather than scattering shards across whatever active disks
+// have room, every shard lands on the one new disk, the swap-in-place an operator
+// expects when retiring a disk for a replacement.
+//
+// It runs under a durable `job` row (kind=replace, target_disk=old,
+// dest_disk=new) so a crash mid-replace resumes onto the same destination from
+// the shards still on the old disk. Each shard is relocated with the same
+// copy-then-repoint discipline as drain. (ReplaceDisk is reserved by the gRPC
+// surface for the future RPC driver.)
+func (s *Server) ReplaceDiskWith(ctx context.Context, oldDisk, newDisk uint32) error {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+
+	if _, ok := s.diskRoots[oldDisk]; !ok {
+		return fmt.Errorf("replace: disk %d is not configured", oldDisk)
+	}
+	if _, ok := s.diskRoots[newDisk]; !ok {
+		return fmt.Errorf("replace: destination disk %d is not configured (add it first)", newDisk)
+	}
+	if oldDisk == newDisk {
+		return fmt.Errorf("replace: source and destination are the same disk %d", oldDisk)
+	}
+	switch s.diskState[oldDisk] {
+	case meta.DiskActive, meta.DiskDraining: // startable, or resuming a started replace
+	default:
+		return fmt.Errorf("replace: disk %d is %s, cannot replace", oldDisk, s.diskState[oldDisk])
+	}
+	if s.diskState[newDisk] != meta.DiskActive {
+		return fmt.Errorf("replace: destination disk %d is %s, must be active", newDisk, s.diskState[newDisk])
+	}
+
+	job, err := s.db.GetOrCreateReplaceJob(ctx, oldDisk, newDisk)
+	if err != nil {
+		return err
+	}
+	newDisk = job.DestDisk // honor a resumed job's pinned destination over the argument
+	if s.diskState[oldDisk] != meta.DiskDraining {
+		if err := s.setDiskStateLocked(ctx, oldDisk, meta.DiskDraining); err != nil {
+			return err
+		}
+	}
+
+	plogs, err := s.db.PlogsOnDisk(ctx, oldDisk)
+	if err != nil {
+		return err
+	}
+	for _, p := range plogs {
+		if err := s.ensurePlacementAllowedLocked(ctx, p.VlogID, newDisk); err != nil {
+			return err
+		}
+		if err := s.migratePlogLocked(ctx, p.PlogID, p.VlogID, oldDisk, newDisk); err != nil {
+			return err
+		}
+	}
+
+	if err := s.setDiskStateLocked(ctx, oldDisk, meta.DiskDetached); err != nil {
+		return err
+	}
+	return s.db.MarkJobDone(ctx, job.ID)
+}
+
+// ensurePlacementAllowedLocked verifies a vlog has no shard already on toDisk, so
+// relocating a shard there does not collapse two shards/copies onto one disk
+// (PlacementAllowed). The caller must hold vlogMu.
+func (s *Server) ensurePlacementAllowedLocked(ctx context.Context, vlogID, toDisk uint32) error {
+	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		return err
+	}
+	for _, sh := range shards {
+		if sh.DiskID == toDisk {
+			return fmt.Errorf("replace: disk %d already holds a shard of vlog %d, would collapse redundancy", toDisk, vlogID)
+		}
+	}
+	return nil
+}
+
 // setDiskStateLocked persists a disk transition and updates the cache. The
 // caller must hold vlogMu.
 func (s *Server) setDiskStateLocked(ctx context.Context, diskID uint32, state string) error {

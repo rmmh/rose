@@ -113,11 +113,25 @@
   leaves the shard referencing the failed disk and the step re-runs; the
   guard-on-old-plog in ReplaceShardPlog makes the repoint idempotent.
 
+## Disk replace job (done)
+
+- Server.AttachDisk brings fresh local capacity online: it configures a new disk
+  root and registers it active in the catalog, making it eligible for placement
+  and as a replace destination. (AddDisk/ReplaceDisk are reserved by the gRPC
+  surface for the future RPC driver, so the control-plane verbs are AttachDisk
+  and ReplaceDiskWith.)
+- Server.ReplaceDiskWith is drain with a pinned destination: every shard on the
+  old disk is relocated onto one freshly added disk (the swap-in-place an operator
+  expects when retiring a disk), then the old disk is detached. It runs under a
+  durable `job` row (kind=replace, target_disk=old, dest_disk=new) so a crash
+  mid-replace resumes onto the same destination; the pinned dest_disk is a new
+  job column. Each shard reuses drain's copy-then-repoint discipline and is
+  PlacementAllowed-checked against the destination first.
+
 ## Storage control plane follow-ups (from RoseStorage.tla, not yet implemented)
 
-- Implement the remaining maintenance jobs on the same durable `job` machinery:
-  replace (drain old onto a freshly added disk) and rebalance (RebalanceStep
-  across live disks).
+- Implement the last maintenance job on the same durable `job` machinery:
+  rebalance (RebalanceStep across live disks to even out shard distribution).
 - Make Recover tolerate a failed disk whose plog files are actually gone (it
   currently OpenPlogs every catalog plog by path, so a true file loss fails
   startup before reprotect can run); reconstruct or stub the missing shard's

@@ -15,24 +15,33 @@ type Job struct {
 	TargetVlog uint32
 	DestVlog   uint32
 	TargetDisk uint32
+	DestDisk   uint32
 }
 
 const (
 	JobCompact   = "compact"
 	JobDrain     = "drain"
 	JobReprotect = "reprotect"
+	JobReplace   = "replace"
 	JobRunning   = "running"
 	JobDone      = "done"
 )
+
+const jobColumns = "id, kind, state, target_vlog, dest_vlog, target_disk, dest_disk"
+
+func scanJob(row interface{ Scan(...any) error }) (Job, error) {
+	var j Job
+	err := row.Scan(&j.ID, &j.Kind, &j.State, &j.TargetVlog, &j.DestVlog, &j.TargetDisk, &j.DestDisk)
+	return j, err
+}
 
 // GetOrCreateCompactionJob returns the running compaction job for a vlog,
 // creating one if none exists. Reusing an in-flight job is what lets a crashed
 // rewrite resume against the same destination vlog instead of orphaning it.
 func (d *DB) GetOrCreateCompactionJob(ctx context.Context, targetVlog uint32) (Job, error) {
-	var j Job
-	err := d.db.QueryRowContext(ctx,
-		"SELECT id, kind, state, target_vlog, dest_vlog, target_disk FROM job WHERE kind = ? AND state = ? AND target_vlog = ?",
-		JobCompact, JobRunning, targetVlog).Scan(&j.ID, &j.Kind, &j.State, &j.TargetVlog, &j.DestVlog, &j.TargetDisk)
+	j, err := scanJob(d.db.QueryRowContext(ctx,
+		"SELECT "+jobColumns+" FROM job WHERE kind = ? AND state = ? AND target_vlog = ?",
+		JobCompact, JobRunning, targetVlog))
 	if err == nil {
 		return j, nil
 	}
@@ -40,7 +49,7 @@ func (d *DB) GetOrCreateCompactionJob(ctx context.Context, targetVlog uint32) (J
 		return Job{}, err
 	}
 	res, err := d.db.ExecContext(ctx,
-		"INSERT INTO job (kind, state, target_vlog, dest_vlog, created_at) VALUES (?, ?, ?, 0, ?)",
+		"INSERT INTO job (kind, state, target_vlog, created_at) VALUES (?, ?, ?, ?)",
 		JobCompact, JobRunning, targetVlog, time.Now().UnixNano())
 	if err != nil {
 		return Job{}, fmt.Errorf("create compaction job: %w", err)
@@ -57,27 +66,7 @@ func (d *DB) GetOrCreateCompactionJob(ctx context.Context, targetVlog uint32) (J
 // drain resume rather than restart: the disk is already draining and its
 // not-yet-migrated plogs are still listed on it.
 func (d *DB) GetOrCreateDrainJob(ctx context.Context, targetDisk uint32) (Job, error) {
-	var j Job
-	err := d.db.QueryRowContext(ctx,
-		"SELECT id, kind, state, target_vlog, dest_vlog, target_disk FROM job WHERE kind = ? AND state = ? AND target_disk = ?",
-		JobDrain, JobRunning, targetDisk).Scan(&j.ID, &j.Kind, &j.State, &j.TargetVlog, &j.DestVlog, &j.TargetDisk)
-	if err == nil {
-		return j, nil
-	}
-	if err != sql.ErrNoRows {
-		return Job{}, err
-	}
-	res, err := d.db.ExecContext(ctx,
-		"INSERT INTO job (kind, state, target_disk, created_at) VALUES (?, ?, ?, ?)",
-		JobDrain, JobRunning, targetDisk, time.Now().UnixNano())
-	if err != nil {
-		return Job{}, fmt.Errorf("create drain job: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Job{}, err
-	}
-	return Job{ID: id, Kind: JobDrain, State: JobRunning, TargetDisk: targetDisk}, nil
+	return d.getOrCreateDiskJob(ctx, JobDrain, targetDisk, 0)
 }
 
 // GetOrCreateReprotectJob returns the running reprotect job for a failed disk,
@@ -85,10 +74,23 @@ func (d *DB) GetOrCreateDrainJob(ctx context.Context, targetDisk uint32) (Job, e
 // mid-reprotect resumes from the shards still mapped to the failed disk's plogs
 // rather than restarting or stranding the vlogs degraded.
 func (d *DB) GetOrCreateReprotectJob(ctx context.Context, targetDisk uint32) (Job, error) {
-	var j Job
-	err := d.db.QueryRowContext(ctx,
-		"SELECT id, kind, state, target_vlog, dest_vlog, target_disk FROM job WHERE kind = ? AND state = ? AND target_disk = ?",
-		JobReprotect, JobRunning, targetDisk).Scan(&j.ID, &j.Kind, &j.State, &j.TargetVlog, &j.DestVlog, &j.TargetDisk)
+	return d.getOrCreateDiskJob(ctx, JobReprotect, targetDisk, 0)
+}
+
+// GetOrCreateReplaceJob returns the running replace job moving targetDisk's
+// shards onto destDisk, creating one if none exists. The pinned destination is
+// persisted so a crash mid-replace resumes onto the same freshly added disk.
+func (d *DB) GetOrCreateReplaceJob(ctx context.Context, targetDisk, destDisk uint32) (Job, error) {
+	return d.getOrCreateDiskJob(ctx, JobReplace, targetDisk, destDisk)
+}
+
+// getOrCreateDiskJob is the shared get-or-create for disk-maintenance jobs keyed
+// by target_disk. destDisk is 0 for jobs that pick destinations dynamically
+// (drain, reprotect) and the pinned destination for replace.
+func (d *DB) getOrCreateDiskJob(ctx context.Context, kind string, targetDisk, destDisk uint32) (Job, error) {
+	j, err := scanJob(d.db.QueryRowContext(ctx,
+		"SELECT "+jobColumns+" FROM job WHERE kind = ? AND state = ? AND target_disk = ?",
+		kind, JobRunning, targetDisk))
 	if err == nil {
 		return j, nil
 	}
@@ -96,16 +98,16 @@ func (d *DB) GetOrCreateReprotectJob(ctx context.Context, targetDisk uint32) (Jo
 		return Job{}, err
 	}
 	res, err := d.db.ExecContext(ctx,
-		"INSERT INTO job (kind, state, target_disk, created_at) VALUES (?, ?, ?, ?)",
-		JobReprotect, JobRunning, targetDisk, time.Now().UnixNano())
+		"INSERT INTO job (kind, state, target_disk, dest_disk, created_at) VALUES (?, ?, ?, ?, ?)",
+		kind, JobRunning, targetDisk, destDisk, time.Now().UnixNano())
 	if err != nil {
-		return Job{}, fmt.Errorf("create reprotect job: %w", err)
+		return Job{}, fmt.Errorf("create %s job: %w", kind, err)
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
 		return Job{}, err
 	}
-	return Job{ID: id, Kind: JobReprotect, State: JobRunning, TargetDisk: targetDisk}, nil
+	return Job{ID: id, Kind: kind, State: JobRunning, TargetDisk: targetDisk, DestDisk: destDisk}, nil
 }
 
 func (d *DB) SetJobDest(ctx context.Context, jobID int64, destVlog uint32) error {
@@ -121,15 +123,15 @@ func (d *DB) MarkJobDone(ctx context.Context, jobID int64) error {
 // RunningJobs lists jobs to resume after a restart.
 func (d *DB) RunningJobs(ctx context.Context) ([]Job, error) {
 	rows, err := d.db.QueryContext(ctx,
-		"SELECT id, kind, state, target_vlog, dest_vlog, target_disk FROM job WHERE state = ? ORDER BY id", JobRunning)
+		"SELECT "+jobColumns+" FROM job WHERE state = ? ORDER BY id", JobRunning)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Job
 	for rows.Next() {
-		var j Job
-		if err := rows.Scan(&j.ID, &j.Kind, &j.State, &j.TargetVlog, &j.DestVlog, &j.TargetDisk); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, j)

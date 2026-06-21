@@ -126,6 +126,7 @@ func initSchema(db *sql.DB) error {
 			target_vlog INTEGER NOT NULL DEFAULT 0,
 			dest_vlog INTEGER NOT NULL DEFAULT 0,
 			target_disk INTEGER NOT NULL DEFAULT 0, -- disk-maintenance jobs (drain)
+			dest_disk INTEGER NOT NULL DEFAULT 0,   -- replace: the disk to move onto
 			created_at INTEGER NOT NULL
 		);
 	`)
@@ -153,6 +154,13 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(`ALTER TABLE job ADD COLUMN target_disk INTEGER NOT NULL DEFAULT 0`); err != nil {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("add job.target_disk column: %w", err)
+		}
+	}
+	// Replace jobs pin a destination disk so the evacuated shards land on the
+	// freshly added disk; older job streams default the column to 0.
+	if _, err := db.Exec(`ALTER TABLE job ADD COLUMN dest_disk INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("add job.dest_disk column: %w", err)
 		}
 	}
 	return nil
