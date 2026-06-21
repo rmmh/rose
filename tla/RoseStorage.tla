@@ -140,6 +140,7 @@ WritePlog(d, o, s) ==
                   node_state, stored, job_state, job_kind, job_disk, job_progress>>
 
 CommitPlog(d, o, s) ==
+    /\ DiskLive(d)
     /\ <<o, s>> \in pending[d]
     /\ pending' = [pending EXCEPT ![d] = @ \ {<<o, s>>}]
     /\ stored' = [stored EXCEPT ![d] = @ \cup {<<o, s>>}]
@@ -231,6 +232,7 @@ StartRebalance(j) ==
 DrainStep(j, to, o, s) ==
     /\ job_state[j] = "running"
     /\ job_kind[j] \in {"remove", "replace"}
+    /\ DiskReadable(job_disk[j])
     /\ <<o, s>> \in stored[job_disk[j]]
     /\ PlacementAllowed(o, s, to)
     /\ <<o, s>> \notin stored[to]
