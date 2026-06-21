@@ -6,7 +6,7 @@ EXTENDS Integers, FiniteSets
 \* Physical records may be orphaned after a crash, but published metadata is
 \* created only from fsynced shard records.
 
-CONSTANTS Txns, Disks, TotalShards, MinReadShards, MinCommitShards,
+CONSTANTS Txns, Disks, TotalShards, MinVerifiedShards, MinCommitShards,
           MaxDiskFailures, AllowDegradedWrites
 
 Shards == 1..TotalShards
@@ -31,7 +31,9 @@ Init ==
 ActiveDisks == {d \in Disks : disk_state[d] = "active"}
 DurableShards(t) == {s \in Shards : \E d \in ActiveDisks : <<t, s>> \in durable_records[d]}
 LivePlacementShards(t) == {s \in Shards : \E d \in ActiveDisks : <<d, s>> \in placement[t] /\ <<t, s>> \in durable_records[d]}
-Readable(t) == Cardinality(LivePlacementShards(t)) >= MinReadShards
+\* This is not a consensus quorum.  Immutable chunk hashes make one verified
+\* duplicate sufficient; EC needs N verified, distinct fragments to decode.
+Readable(t) == Cardinality(LivePlacementShards(t)) >= MinVerifiedShards
 FullyProtected(t) == Cardinality(LivePlacementShards(t)) = TotalShards
 RequiredCommitShards == IF AllowDegradedWrites THEN MinCommitShards ELSE TotalShards
 HasDegradedPublishedData == \E t \in published : ~FullyProtected(t)

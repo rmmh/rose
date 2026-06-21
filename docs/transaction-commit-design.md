@@ -29,7 +29,8 @@ shard to be durable before publication. If a published object is degraded, or
 the active disk set cannot satisfy full placement, the server admits reads but
 becomes read-only until repair restores full protection.
 
-An explicit future `AllowDegradedWrites` policy may publish at a lower quorum.
+An explicit future `AllowDegradedWrites` policy may publish with fewer durable
+fragments.
 That policy must persist achieved protection and schedule reprotection; it is
 not the default for personal deployments.
 
@@ -37,5 +38,7 @@ not the default for personal deployments.
 
 `tla/RoseTxnCommit.tla` verifies that only fsynced records are published,
 every published transaction has an automatic snapshot, crashes discard only
-volatile records, published data remains readable after the configured loss,
-and strict mode disables write admission while data is degraded.
+volatile records, published data retains its required verified fragments after
+the configured loss, and strict mode disables write admission while data is
+degraded. These fragments are not a consensus read quorum: replication reads
+one hash-verified copy; EC reads `N` hash-verified distinct shards.

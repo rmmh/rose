@@ -21,7 +21,7 @@ and then retires the old segment.
    only that tail.
 3. Load `PUBLISHED` shard placement from SQLite and validate each referenced
    record's transaction ID, length, and checksum.
-4. If a published placement lacks a readable quorum, start in degraded
+4. If a published placement lacks the required verified fragments, start in degraded
    read-only mode (or fail startup if it is unreadable).
 5. Mark `OPEN` and `PREPARED` transactions abandoned unless an idempotent
    caller resumes them. Their complete durable records are orphan holes.
