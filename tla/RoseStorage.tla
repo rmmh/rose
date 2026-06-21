@@ -5,7 +5,7 @@ EXTENDS Integers, FiniteSets
 \* disk-maintenance control planes.  A maintenance job is public; its copy
 \* steps are worker RPCs that may interleave with all normal I/O actions.
 
-CONSTANTS Nodes, Disks, ActiveDisks, Objects, Jobs,
+CONSTANTS Nodes, Disks, DiskNodes, ActiveDisks, Objects, Jobs,
           Modes, TotalShards, MinCopies, MinCommitShards, MinRequiredShards,
           MaxDiskFailures, MaxNodeFailures, MaxFailures, NodeLevelDurability
 
@@ -18,6 +18,12 @@ vars == <<file_state, object_mode, object_state, plog_ready,
           job_state, job_kind, job_disk, job_progress, last_rpc>>
 
 Pairs == Objects \times (0..TotalShards)
+
+\* Bounded TLC configurations select one of these relations with
+\* `DiskNodes <- ...`; every valid relation assigns exactly one node per disk.
+IdentityDiskNodes == {<<d, d>> : d \in Disks}
+TwoDisksOnN1 == {<<"d1", "n1">>, <<"d2", "n1">>,
+                  <<"d3", "n2">>, <<"d4", "n3">>}
 
 Init ==
     /\ file_state = [o \in Objects |-> "new"]
@@ -34,10 +40,11 @@ Init ==
     /\ job_progress = [j \in Jobs |-> FALSE]
     /\ last_rpc = "init"
 
-\* The bounded model uses one disk identifier per node identifier.  This keeps
-\* the node-failure domain explicit without a second, unbounded mapping value.
-DiskLive(d) == disk_state[d] = "active" /\ node_state[d] = "working"
-DiskReadable(d) == disk_state[d] \in {"active", "draining"} /\ node_state[d] = "working"
+\* DiskNodes assigns each disk to its node fault domain. A node outage makes all
+\* of its disks unavailable without changing their lifecycle state or contents.
+DiskNode(d) == CHOOSE n \in Nodes : <<d, n>> \in DiskNodes
+DiskLive(d) == disk_state[d] = "active" /\ node_state[DiskNode(d)] = "working"
+DiskReadable(d) == disk_state[d] \in {"active", "draining"} /\ node_state[DiskNode(d)] = "working"
 
 ValidShard(o, s) ==
     \/ object_mode[o] \in {"NONE", "DUPLICATE"} /\ s = 0
@@ -64,7 +71,9 @@ PlacementAllowed(o, s, d) ==
           \A s2 \in 1..TotalShards : s2 # s =>
              <<o, s2>> \notin stored[d] /\ <<o, s2>> \notin pending[d])
     /\ IF NodeLevelDurability
-       THEN TRUE \* each bounded disk is its own node fault domain
+       THEN \A d2 \in Disks : DiskNode(d2) = DiskNode(d) =>
+              \A s2 \in 0..TotalShards :
+                  <<o, s2>> \notin stored[d2] /\ <<o, s2>> \notin pending[d2]
        ELSE TRUE
 
 Open(o) ==
@@ -169,7 +178,7 @@ ReadPlog(d, o, s) ==
 
 AddDisk(d) ==
     /\ disk_state[d] = "absent"
-    /\ node_state[d] = "working"
+    /\ node_state[DiskNode(d)] = "working"
     /\ disk_state' = [disk_state EXCEPT ![d] = "active"]
     /\ last_rpc' = last_rpc
     /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, node_state,
@@ -192,7 +201,7 @@ ReplaceDisk(j, old, new) ==
     /\ disk_state[old] = "active"
     /\ pending[old] = {}
     /\ disk_state[new] = "absent"
-    /\ node_state[new] = "working"
+    /\ node_state[DiskNode(new)] = "working"
     /\ disk_state' = [disk_state EXCEPT ![old] = "draining", ![new] = "active"]
     /\ job_state' = [job_state EXCEPT ![j] = "running"]
     /\ job_kind' = [job_kind EXCEPT ![j] = "replace"]
@@ -299,6 +308,15 @@ FailNode(n) ==
     /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
                   pending, stored, job_state, job_kind, job_disk, job_progress>>
 
+\* Node failure is transient: its disks and their contents are available again
+\* when the node returns.
+RecoverNode(n) ==
+    /\ node_state[n] = "failed"
+    /\ node_state' = [node_state EXCEPT ![n] = "working"]
+    /\ last_rpc' = last_rpc
+    /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
+                  pending, stored, job_state, job_kind, job_disk, job_progress>>
+
 Next ==
     \/ \E o \in Objects : Open(o)
     \/ \E o \in Objects : Write(o)
@@ -318,11 +336,13 @@ Next ==
     \/ \E j \in Jobs : StartRebalance(j) \/ FinishJob(j)
     \/ \E j \in Jobs, to \in Disks, o \in Objects, s \in 0..TotalShards : DrainStep(j, to, o, s) \/ ReprotectStep(j, to, o, s)
     \/ \E j \in Jobs, from \in Disks, to \in Disks, o \in Objects, s \in 0..TotalShards : RebalanceStep(j, from, to, o, s)
-    \/ \E n \in Nodes : FailNode(n)
+    \/ \E n \in Nodes : FailNode(n) \/ RecoverNode(n)
 
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
+    /\ DiskNodes \subseteq Disks \times Nodes
+    /\ \A d \in Disks : Cardinality({n \in Nodes : <<d, n>> \in DiskNodes}) = 1
     /\ \A d \in Disks : disk_state[d] \in {"absent", "active", "draining", "failed", "detached"}
     /\ \A n \in Nodes : node_state[n] \in {"working", "failed"}
     /\ \A d \in Disks : pending[d] \subseteq Pairs /\ stored[d] \subseteq Pairs
@@ -331,5 +351,13 @@ TypeOK ==
 Durability == \A o \in Objects : object_state[o] = "committed" => Readable(o)
 NoDetachedData == \A d \in Disks : disk_state[d] = "detached" => stored[d] = {} /\ pending[d] = {}
 NoWritesToDraining == \A d \in Disks : disk_state[d] = "draining" => \A p \in pending[d] : FALSE
+
+NodeObjectPlacements(o, n) ==
+    {<<d, s>> \in Disks \times (0..TotalShards) :
+        DiskNode(d) = n /\ <<o, s>> \in stored[d]}
+
+NoNodeColocation ==
+    NodeLevelDurability =>
+        \A o \in Objects, n \in Nodes : Cardinality(NodeObjectPlacements(o, n)) <= 1
 
 =============================================================================
