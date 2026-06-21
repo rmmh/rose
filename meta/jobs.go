@@ -25,6 +25,7 @@ const (
 	JobReplace   = "replace"
 	JobRunning   = "running"
 	JobDone      = "done"
+	JobCancelled = "cancelled"
 )
 
 const jobColumns = "id, kind, state, target_vlog, dest_vlog, target_disk, dest_disk"
@@ -118,6 +119,26 @@ func (d *DB) SetJobDest(ctx context.Context, jobID int64, destVlog uint32) error
 func (d *DB) MarkJobDone(ctx context.Context, jobID int64) error {
 	_, err := d.db.ExecContext(ctx, "UPDATE job SET state = ? WHERE id = ?", JobDone, jobID)
 	return err
+}
+
+// CancelRunningReprotect cancels the running reprotect job for a disk, if any,
+// and reports whether one was cancelled. A node returning to working calls this
+// to abandon a reprotect that the (now transient) loss made unnecessary: the
+// disk's bytes are intact again, so the not-yet-regenerated shards still resolve
+// to it. A cancelled job is excluded from RunningJobs, so a later restart does
+// not resume it.
+func (d *DB) CancelRunningReprotect(ctx context.Context, targetDisk uint32) (bool, error) {
+	res, err := d.db.ExecContext(ctx,
+		"UPDATE job SET state = ? WHERE kind = ? AND state = ? AND target_disk = ?",
+		JobCancelled, JobReprotect, JobRunning, targetDisk)
+	if err != nil {
+		return false, fmt.Errorf("cancel reprotect of disk %d: %w", targetDisk, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // RunningJobs lists jobs to resume after a restart.

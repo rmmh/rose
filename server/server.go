@@ -29,6 +29,14 @@ type Server struct {
 	// diskState caches the lifecycle state of every configured disk, kept in sync
 	// with the durable disk catalog. Configured disks start active.
 	diskState map[uint32]string
+	// diskNodes maps each configured disk to its node fault domain. A disk with no
+	// entry is its own node (disk id == node id), the local one-disk-per-node shape
+	// the bounded model uses; SetDiskNode groups several disks onto one node.
+	diskNodes map[uint32]uint32
+	// nodeState caches node liveness, kept in sync with the durable node catalog.
+	// A node absent from the map is treated as working; only failed nodes are
+	// recorded. A failed node's disks drop out of the live set (diskLiveLocked).
+	nodeState map[uint32]string
 	// minCopies is the DUPLICATE commit gate: how many live copies a write must
 	// land on before it is acknowledged durable (capped at the copies provisioned).
 	minCopies int
@@ -51,6 +59,8 @@ func NewServer(db *meta.DB) *Server {
 		dataDir:   "data",
 		diskRoots: map[uint32]string{1: "data"},
 		diskState: make(map[uint32]string),
+		diskNodes: make(map[uint32]uint32),
+		nodeState: make(map[uint32]string),
 		minCopies: 2,
 		rebalance: DefaultRebalancePolicy(),
 		handles:   make(map[int64]*FileHandle),
@@ -98,19 +108,68 @@ func (s *Server) plogPath(diskID, plogID uint32) string {
 	return filepath.Join(root, "plog-"+fmt.Sprint(plogID))
 }
 
+// nodeOf returns the node fault domain a disk belongs to. A disk without an
+// explicit mapping is its own node (disk id == node id).
+func (s *Server) nodeOf(diskID uint32) uint32 {
+	if n, ok := s.diskNodes[diskID]; ok {
+		return n
+	}
+	return diskID
+}
+
+// SetDiskNode assigns a disk to a node fault domain, grouping it with the other
+// disks on that node. It must be called before Recover; disks default to their
+// own node. It is the local stand-in for cluster topology: the one-shard-per-node
+// fault domain in PlacementAllowed keys off these assignments.
+func (s *Server) SetDiskNode(diskID, nodeID uint32) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	s.diskNodes[diskID] = nodeID
+}
+
+// diskLiveLocked reports whether a disk can currently hold live shards: its disk
+// lifecycle state is active and its node is not failed. This is RoseStorage's
+// DiskLive (disk_state = active /\ node_state = working): a failed node's disks
+// drop out without any disk_state change, so the loss reverses when it returns.
+// The caller must hold vlogMu.
+func (s *Server) diskLiveLocked(diskID uint32) bool {
+	return s.diskState[diskID] == meta.DiskActive && s.nodeState[s.nodeOf(diskID)] != meta.NodeFailed
+}
+
 // activeDiskIDs returns the configured disks currently eligible to receive new
-// shards: only those in the active lifecycle state. Draining, failed, and
-// detached disks are excluded so placement never lands fresh data on a disk that
-// is leaving the cluster. The caller must hold vlogMu.
+// shards: those that are live (active lifecycle state on a working node).
+// Draining, failed, and detached disks, and disks on a failed node, are excluded
+// so placement never lands fresh data on a disk that is leaving the cluster or
+// temporarily offline. The caller must hold vlogMu.
 func (s *Server) activeDiskIDs() []uint32 {
 	ids := make([]uint32, 0, len(s.diskRoots))
 	for id := range s.diskRoots {
-		if s.diskState[id] == meta.DiskActive {
+		if s.diskLiveLocked(id) {
 			ids = append(ids, id)
 		}
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return ids
+}
+
+// distinctNodeDisksLocked returns live disks, at most one per node fault domain,
+// so a vlog's shards each land on a different node. With max <= 0 it returns one
+// disk for every distinct node. The caller must hold vlogMu.
+func (s *Server) distinctNodeDisksLocked(max int) []uint32 {
+	seen := make(map[uint32]bool)
+	var out []uint32
+	for _, id := range s.activeDiskIDs() {
+		n := s.nodeOf(id)
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, id)
+		if max > 0 && len(out) >= max {
+			break
+		}
+	}
+	return out
 }
 
 func (s *Server) GetDB() *meta.DB {
@@ -125,7 +184,11 @@ func (s *Server) Recover(ctx context.Context) error {
 	// non-active lifecycle state a prior run persisted, so a disk that was
 	// draining or failed before the crash stays out of placement after restart.
 	for id := range s.diskRoots {
-		if err := s.db.RegisterDisk(ctx, id, id); err != nil {
+		node := s.nodeOf(id)
+		if err := s.db.RegisterNode(ctx, node); err != nil {
+			return err
+		}
+		if err := s.db.RegisterDisk(ctx, id, node); err != nil {
 			return err
 		}
 	}
@@ -137,6 +200,18 @@ func (s *Server) Recover(ctx context.Context) error {
 	for _, d := range disks {
 		if _, ok := s.diskRoots[d.ID]; ok {
 			s.diskState[d.ID] = d.State
+		}
+	}
+	// Adopt any persisted node-liveness state so a node that was failed before a
+	// restart keeps its disks out of the live set until it is marked working.
+	nodes, err := s.db.ListNodes(ctx)
+	if err != nil {
+		return err
+	}
+	s.nodeState = make(map[uint32]string)
+	for _, n := range nodes {
+		if n.State != meta.NodeWorking {
+			s.nodeState[n.ID] = n.State
 		}
 	}
 
@@ -218,7 +293,9 @@ func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataSha
 	if err != nil {
 		return 0, nil, err
 	}
-	diskIDs := s.activeDiskIDs()
+	// One disk per node fault domain, so no two shards/copies of this vlog share
+	// a node (PlacementAllowed's NodeLevelDurability).
+	diskIDs := s.distinctNodeDisksLocked(0)
 	if len(diskIDs) == 0 {
 		return 0, nil, fmt.Errorf("no active disks configured")
 	}
@@ -229,7 +306,7 @@ func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataSha
 	case "EC":
 		clientCount = dataShards + parityShards
 		if clientCount == 0 || clientCount > len(diskIDs) {
-			return 0, nil, fmt.Errorf("EC vlog needs 1..%d shards, got %d", len(diskIDs), clientCount)
+			return 0, nil, fmt.Errorf("EC vlog needs 1..%d distinct-node disks, got %d", len(diskIDs), clientCount)
 		}
 	}
 	clients := make([]storage.PlogClient, 0, clientCount)

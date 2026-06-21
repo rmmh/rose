@@ -101,7 +101,11 @@ func initSchema(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS node (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			mac TEXT UNIQUE NOT NULL,
-			hostname TEXT NOT NULL
+			hostname TEXT NOT NULL,
+			-- Liveness mirrors RoseStorage's node_state: a working node's disks are
+			-- live, a failed (offline) node's disks drop out of placement and commit
+			-- durability even though their disk_state is still active.
+			state TEXT NOT NULL DEFAULT 'working'
 		);
 
 		CREATE TABLE IF NOT EXISTS disk (
@@ -161,6 +165,13 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(`ALTER TABLE job ADD COLUMN dest_disk INTEGER NOT NULL DEFAULT 0`); err != nil {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("add job.dest_disk column: %w", err)
+		}
+	}
+	// Node catalogs predating the liveness column default their existing rows to
+	// working; a duplicate-column error just means the column already exists.
+	if _, err := db.Exec(`ALTER TABLE node ADD COLUMN state TEXT NOT NULL DEFAULT 'working'`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("add node.state column: %w", err)
 		}
 	}
 	return nil

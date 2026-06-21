@@ -145,11 +145,30 @@
   Cooldown is the backoff between passes that actually moved something. Defaults:
   tolerate a 10 GiB spread, eight moves/pass, five-minute cooldown.
 
+## Node failure and fault domains (done)
+
+- Node liveness mirrors RoseStorage's node_state (working/failed) as a durable
+  catalog column (`node.state`), loaded on Recover. SetNodeState transitions a
+  node under vlogMu; a failed node's disks drop out of the live set via
+  diskLiveLocked (DiskLive = disk active /\ node working) without changing their
+  disk_state, so commit/read gating and placement react to a node going offline
+  and the loss reverses when it returns. Disks map to node fault domains via
+  diskNodes (default: each disk its own node, the bounded model's shape;
+  SetDiskNode groups several disks onto one node).
+- PlacementAllowed now enforces NodeLevelDurability: provisionVlogLocked places
+  one shard per distinct node (distinctNodeDisksLocked), and every relocation
+  destination check (drain/reprotect pickDrainDestination, replace
+  ensurePlacementAllowed, rebalanceOne) is keyed by node via occupiedNodesLocked,
+  so no two shards/copies of a vlog ever share a node. EC/DUPLICATE provisioning
+  fails loudly when there are too few distinct nodes for the scheme.
+- A node returning to working cancels any reprotect its outage triggered: SetNodeState
+  marks running reprotect jobs for the node's failed disks cancelled (a new job
+  state excluded from RunningJobs, so a later restart won't resume them) and
+  restores those disks to active, since their bytes survived and the
+  not-yet-regenerated shards resolve to them again.
+
 ## Storage control plane follow-ups (from RoseStorage.tla, not yet implemented)
 
-- Model node failure (node_state working/failed) and the one-disk-per-node fault
-  domain; fold node liveness into DiskLive so a failed node's disks drop out, and
-  honor NodeLevelDurability fault domains in PlacementAllowed.
 - Automatic repair/driver: a background scheduler that detects failed disks and
   drives reprotect, runs rebalance on the cooldown tick, and re-admits writes once
   every published object is fully protected again; plus the gRPC handlers

@@ -272,7 +272,11 @@ func (s *Server) AttachDisk(ctx context.Context, diskID uint32, root string) err
 	if _, ok := s.diskRoots[diskID]; ok {
 		return fmt.Errorf("attach disk: disk %d already configured", diskID)
 	}
-	if err := s.db.RegisterDisk(ctx, diskID, diskID); err != nil {
+	node := s.nodeOf(diskID)
+	if err := s.db.RegisterNode(ctx, node); err != nil {
+		return err
+	}
+	if err := s.db.RegisterDisk(ctx, diskID, node); err != nil {
 		return err
 	}
 	s.diskRoots[diskID] = root
@@ -330,7 +334,7 @@ func (s *Server) ReplaceDiskWith(ctx context.Context, oldDisk, newDisk uint32) e
 		return err
 	}
 	for _, p := range plogs {
-		if err := s.ensurePlacementAllowedLocked(ctx, p.VlogID, newDisk); err != nil {
+		if err := s.ensurePlacementAllowedLocked(ctx, p.VlogID, newDisk, oldDisk); err != nil {
 			return err
 		}
 		if err := s.migratePlogLocked(ctx, p.PlogID, p.VlogID, oldDisk, newDisk); err != nil {
@@ -344,18 +348,37 @@ func (s *Server) ReplaceDiskWith(ctx context.Context, oldDisk, newDisk uint32) e
 	return s.db.MarkJobDone(ctx, job.ID)
 }
 
-// ensurePlacementAllowedLocked verifies a vlog has no shard already on toDisk, so
-// relocating a shard there does not collapse two shards/copies onto one disk
-// (PlacementAllowed). The caller must hold vlogMu.
-func (s *Server) ensurePlacementAllowedLocked(ctx context.Context, vlogID, toDisk uint32) error {
+// occupiedNodesLocked returns the set of node fault domains already holding a
+// shard of vlogID, excluding any shard on excludeDisk (the shard being
+// relocated, which is leaving that node). A destination on an occupied node would
+// collapse two shards/copies of the vlog onto one node, violating
+// PlacementAllowed's NodeLevelDurability. The caller must hold vlogMu.
+func (s *Server) occupiedNodesLocked(ctx context.Context, vlogID, excludeDisk uint32) (map[uint32]bool, error) {
 	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		return nil, err
+	}
+	occ := make(map[uint32]bool, len(shards))
+	for _, sh := range shards {
+		if sh.DiskID == excludeDisk {
+			continue
+		}
+		occ[s.nodeOf(sh.DiskID)] = true
+	}
+	return occ, nil
+}
+
+// ensurePlacementAllowedLocked verifies relocating vlogID's shard from fromDisk
+// to toDisk does not collapse two shards/copies onto one node: toDisk's node must
+// not already hold another shard of the vlog (the shard being moved, still on
+// fromDisk, is excluded). The caller must hold vlogMu.
+func (s *Server) ensurePlacementAllowedLocked(ctx context.Context, vlogID, toDisk, fromDisk uint32) error {
+	occ, err := s.occupiedNodesLocked(ctx, vlogID, fromDisk)
 	if err != nil {
 		return err
 	}
-	for _, sh := range shards {
-		if sh.DiskID == toDisk {
-			return fmt.Errorf("replace: disk %d already holds a shard of vlog %d, would collapse redundancy", toDisk, vlogID)
-		}
+	if occ[s.nodeOf(toDisk)] {
+		return fmt.Errorf("replace: node %d already holds a shard of vlog %d, would collapse redundancy", s.nodeOf(toDisk), vlogID)
 	}
 	return nil
 }
@@ -468,18 +491,14 @@ func (s *Server) rebalanceOneLocked(ctx context.Context, src uint32, minSkewByte
 
 	for _, p := range candidates {
 		sz := sizeByPlog[p.PlogID]
-		shards, err := s.db.VlogShardDisks(ctx, p.VlogID)
+		occupied, err := s.occupiedNodesLocked(ctx, p.VlogID, src)
 		if err != nil {
 			return false, err
-		}
-		occupied := make(map[uint32]bool, len(shards))
-		for _, sh := range shards {
-			occupied[sh.DiskID] = true
 		}
 
 		dst, dstUsage := uint32(0), int64(-1)
 		for d, u := range usage {
-			if d == src || occupied[d] {
+			if d == src || occupied[s.nodeOf(d)] {
 				continue
 			}
 			if dstUsage == -1 || u < dstUsage {
@@ -527,27 +546,23 @@ func (s *Server) setDiskStateLocked(ctx context.Context, diskID uint32, state st
 	return nil
 }
 
-// pickDrainDestinationLocked selects an active disk that can legally host a
-// shard of vlogID being moved off fromDisk. It enforces PlacementAllowed: the
-// destination must not already hold another shard (EC) or copy (DUPLICATE) of
-// the same vlog, so a relocation never collapses two shards onto one disk. The
-// caller must hold vlogMu.
+// pickDrainDestinationLocked selects a live disk that can legally host a shard of
+// vlogID being moved off fromDisk. It enforces PlacementAllowed's node fault
+// domain: the destination must be on a node that does not already hold another
+// shard (EC) or copy (DUPLICATE) of the same vlog, so a relocation never
+// collapses two shards onto one node. The caller must hold vlogMu.
 func (s *Server) pickDrainDestinationLocked(ctx context.Context, vlogID, fromDisk uint32) (uint32, error) {
-	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	occupied, err := s.occupiedNodesLocked(ctx, vlogID, fromDisk)
 	if err != nil {
 		return 0, err
 	}
-	occupied := make(map[uint32]bool, len(shards))
-	for _, sh := range shards {
-		occupied[sh.DiskID] = true
-	}
-	for _, id := range s.activeDiskIDs() { // active disks only; excludes fromDisk (now draining)
-		if id == fromDisk || occupied[id] {
+	for _, id := range s.activeDiskIDs() { // live disks only; excludes fromDisk (draining/failed)
+		if id == fromDisk || occupied[s.nodeOf(id)] {
 			continue
 		}
 		return id, nil
 	}
-	return 0, fmt.Errorf("drain: no placement-allowed destination for vlog %d shard (need an active disk not already holding a shard)", vlogID)
+	return 0, fmt.Errorf("drain: no placement-allowed destination for vlog %d shard (need a live disk on a node not already holding a shard)", vlogID)
 }
 
 // migratePlogLocked relocates one plog's bytes from fromDisk to toDisk and

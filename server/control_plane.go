@@ -36,6 +36,86 @@ func (s *Server) DiskStates() map[uint32]string {
 	return out
 }
 
+// SetNodeState transitions a node's liveness and persists it. Marking a node
+// failed drops its disks out of the live set (commit/read gating and placement
+// react immediately) without touching their disk_state, so the loss is transient.
+// Marking it working again restores its disks and abandons any reprotect the
+// outage triggered: the node's bytes are back, so regenerating them elsewhere is
+// wasted work (see cancelNodeReprotectsLocked).
+func (s *Server) SetNodeState(ctx context.Context, nodeID uint32, state string) error {
+	switch state {
+	case meta.NodeWorking, meta.NodeFailed:
+	default:
+		return fmt.Errorf("invalid node state %q", state)
+	}
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	if !s.nodeConfiguredLocked(nodeID) {
+		return fmt.Errorf("node %d is not configured", nodeID)
+	}
+	if err := s.db.SetNodeState(ctx, nodeID, state); err != nil {
+		return err
+	}
+	if state == meta.NodeWorking {
+		delete(s.nodeState, nodeID)
+		return s.cancelNodeReprotectsLocked(ctx, nodeID)
+	}
+	s.nodeState[nodeID] = state
+	return nil
+}
+
+// nodeConfiguredLocked reports whether any configured disk lives on a node. The
+// caller must hold vlogMu.
+func (s *Server) nodeConfiguredLocked(nodeID uint32) bool {
+	for id := range s.diskRoots {
+		if s.nodeOf(id) == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+// cancelNodeReprotectsLocked abandons reprotects triggered by a node outage now
+// that the node is back. For each failed disk on the returning node whose
+// reprotect is still running, it cancels the job and restores the disk to active:
+// the disk's bytes survived the outage, so its not-yet-regenerated shards resolve
+// to it again and the redundancy is whole without finishing the regeneration.
+// The caller must hold vlogMu.
+func (s *Server) cancelNodeReprotectsLocked(ctx context.Context, nodeID uint32) error {
+	for id := range s.diskRoots {
+		if s.nodeOf(id) != nodeID {
+			continue
+		}
+		cancelled, err := s.db.CancelRunningReprotect(ctx, id)
+		if err != nil {
+			return err
+		}
+		if cancelled && s.diskState[id] == meta.DiskFailed {
+			if err := s.setDiskStateLocked(ctx, id, meta.DiskActive); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// NodeStates returns a snapshot of node liveness for every node a configured
+// disk lives on (working unless recorded otherwise).
+func (s *Server) NodeStates() map[uint32]string {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	out := make(map[uint32]string)
+	for id := range s.diskRoots {
+		n := s.nodeOf(id)
+		if state, ok := s.nodeState[n]; ok {
+			out[n] = state
+		} else {
+			out[n] = meta.NodeWorking
+		}
+	}
+	return out
+}
+
 // commitThreshold reports the minimum number of live shards a vlog must have to
 // durably commit a write, mirroring RoseStorage's CommitReady. total is the
 // number of shards actually provisioned for the vlog.
@@ -69,15 +149,18 @@ func (s *Server) readThreshold(info meta.VlogInfo) int {
 	return 1
 }
 
-// liveShardCountLocked reports how many of a vlog's shards currently sit on an
-// active disk, plus the total shards provisioned. The caller must hold vlogMu.
+// liveShardCountLocked reports how many of a vlog's shards currently sit on a
+// live disk (active lifecycle state on a working node), plus the total shards
+// provisioned. A failed node's disks are not live, so its shards stop counting
+// toward commit/read durability until the node returns. The caller must hold
+// vlogMu.
 func (s *Server) liveShardCountLocked(ctx context.Context, vlogID uint32) (live, total int, err error) {
 	shards, err := s.db.VlogShardDisks(ctx, vlogID)
 	if err != nil {
 		return 0, 0, err
 	}
 	for _, sh := range shards {
-		if s.diskState[sh.DiskID] == meta.DiskActive {
+		if s.diskLiveLocked(sh.DiskID) {
 			live++
 		}
 	}
