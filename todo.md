@@ -128,10 +128,31 @@
   job column. Each shard reuses drain's copy-then-repoint discipline and is
   PlacementAllowed-checked against the destination first.
 
+## Disk rebalance job (done)
+
+- Server.Rebalance evens shard counts across active disks (RoseStorage
+  RebalanceStep) as a bounded, best-effort pass: it moves shards off the busiest
+  disk onto the lightest PlacementAllowed disk, reusing drain's copy-then-repoint
+  migratePlog. Unlike drain/reprotect/replace it carries no durable job row -
+  every move is individually crash-safe and a partial pass just leaves a
+  less-even (but valid) cluster the next pass continues from.
+- RebalancePolicy makes the aggressiveness configurable so it does not chase
+  perfect balance: MinSkew is a hysteresis band (no move unless the busiest disk
+  is more than MinSkew shards over the idlest, and it stops once the spread falls
+  back within the band), MaxMovesPerPass caps the IO per pass, and Cooldown is
+  the backoff between passes that actually moved something. Defaults: tolerate a
+  two-shard spread, eight moves/pass, five-minute cooldown.
+
 ## Storage control plane follow-ups (from RoseStorage.tla, not yet implemented)
 
-- Implement the last maintenance job on the same durable `job` machinery:
-  rebalance (RebalanceStep across live disks to even out shard distribution).
+- Model node failure (node_state working/failed) and the one-disk-per-node fault
+  domain; fold node liveness into DiskLive so a failed node's disks drop out, and
+  honor NodeLevelDurability fault domains in PlacementAllowed.
+- Automatic repair/driver: a background scheduler that detects failed disks and
+  drives reprotect, runs rebalance on the cooldown tick, and re-admits writes once
+  every published object is fully protected again; plus the gRPC handlers
+  (AddDisk/RemoveDisk/ReplaceDisk/StartReprotect/StartRebalance) wired to the
+  control-plane methods.
 - Make Recover tolerate a failed disk whose plog files are actually gone (it
   currently OpenPlogs every catalog plog by path, so a true file loss fails
   startup before reprotect can run); reconstruct or stub the missing shard's
@@ -139,10 +160,5 @@
 - Reclaim the regenerated plog left behind when a crash re-runs a reprotect step
   whose ReplaceShardPlog had not yet committed (same duplicate-bytes-on-crash
   caveat compaction has).
-- Model node failure (node_state working/failed) and the one-disk-per-node fault
-  domain; fold node liveness into DiskLive so a failed node's disks drop out, and
-  honor NodeLevelDurability fault domains in PlacementAllowed.
-- Automatic repair that re-admits writes once every published object is fully
-  protected again, plus an RPC/background driver for disk add/drain/replace.
 - Retire a drained disk's stray source files on resume (a crash after the
   metadata flip can leave a copied-from file on the disk being removed).

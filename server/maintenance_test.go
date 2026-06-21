@@ -5,6 +5,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rmmh/rose/meta"
 )
@@ -448,6 +449,120 @@ func TestAttachDiskBringsCapacityOnline(t *testing.T) {
 	}
 	if !onNew {
 		t.Fatalf("attached disk 3 not used for placement: %+v", shards)
+	}
+}
+
+// diskShardCounts reports how many plogs sit on each given disk.
+func diskShardCounts(t *testing.T, s *Server, disks ...uint32) map[uint32]int {
+	t.Helper()
+	out := make(map[uint32]int, len(disks))
+	for _, d := range disks {
+		ps, err := s.db.PlogsOnDisk(context.Background(), d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[d] = len(ps)
+	}
+	return out
+}
+
+func spread(counts map[uint32]int) int {
+	min, max := 1<<30, -1
+	for _, c := range counts {
+		if c < min {
+			min = c
+		}
+		if c > max {
+			max = c
+		}
+	}
+	return max - min
+}
+
+// pileVlogsOnDisk1 provisions n NONE vlogs, each a single shard that placement
+// always lands on the lowest active disk, manufacturing a lopsided cluster.
+func pileVlogsOnDisk1(t *testing.T, s *Server, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		id := provision(t, s, "NONE", 1, 0)
+		writeVlog(t, s, id, []byte("payload"))
+	}
+}
+
+func TestRebalanceEvensOutWithinHysteresis(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 2)
+	s.SetRebalancePolicy(RebalancePolicy{MinSkew: 1, MaxMovesPerPass: 100})
+
+	pileVlogsOnDisk1(t, s, 6) // disk 1: 6 shards, disk 2: 0
+	before := diskShardCounts(t, s, 1, 2)
+	if before[1] != 6 || before[2] != 0 {
+		t.Fatalf("setup skew = %v, want disk1=6 disk2=0", before)
+	}
+
+	moved, err := s.Rebalance(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved == 0 {
+		t.Fatal("rebalance moved nothing on a 6/0 cluster")
+	}
+	after := diskShardCounts(t, s, 1, 2)
+	if got := spread(after); got > 1 {
+		t.Fatalf("after rebalance spread = %d (%v), want <= MinSkew(1)", got, after)
+	}
+
+	// A second pass on the now-even cluster is a no-op (already within the band).
+	moved, err = s.Rebalance(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 0 {
+		t.Fatalf("second rebalance moved %d shards on a balanced cluster, want 0", moved)
+	}
+}
+
+func TestRebalanceHysteresisToleratesMinorImbalance(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 2)
+	// A wide band: a 3/0 spread is below it, so nothing should move.
+	s.SetRebalancePolicy(RebalancePolicy{MinSkew: 5, MaxMovesPerPass: 100})
+
+	pileVlogsOnDisk1(t, s, 3)
+	moved, err := s.Rebalance(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 0 {
+		t.Fatalf("rebalance moved %d shards within the hysteresis band, want 0", moved)
+	}
+}
+
+func TestRebalanceCooldownBacksOff(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 2)
+	// Move one shard per pass, then refuse to start another pass for an hour.
+	s.SetRebalancePolicy(RebalancePolicy{MinSkew: 1, MaxMovesPerPass: 1, Cooldown: time.Hour})
+
+	pileVlogsOnDisk1(t, s, 6)
+	moved, err := s.Rebalance(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 1 {
+		t.Fatalf("first pass moved %d shards, want 1 (per-pass cap)", moved)
+	}
+
+	// Still imbalanced (5/1), but the cooldown blocks the next pass.
+	if got := spread(diskShardCounts(t, s, 1, 2)); got <= 1 {
+		t.Fatalf("cluster already balanced (%d) after one capped move; cannot test cooldown", got)
+	}
+	moved, err = s.Rebalance(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 0 {
+		t.Fatalf("rebalance moved %d shards inside the cooldown window, want 0", moved)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
@@ -30,7 +31,13 @@ type Server struct {
 	diskState map[uint32]string
 	// minCopies is the DUPLICATE commit gate: how many live copies a write must
 	// land on before it is acknowledged durable (capped at the copies provisioned).
-	minCopies     int
+	minCopies int
+	// rebalance bounds how aggressively shard counts are evened across active
+	// disks: a hysteresis band so minor imbalance is tolerated, a per-pass move
+	// cap, and a cooldown between passes. lastRebalance tracks the cooldown and is
+	// guarded by vlogMu.
+	rebalance     RebalancePolicy
+	lastRebalance time.Time
 	handlesMu     sync.Mutex
 	handles       map[int64]*FileHandle
 	handleCounter int64
@@ -45,6 +52,7 @@ func NewServer(db *meta.DB) *Server {
 		diskRoots: map[uint32]string{1: "data"},
 		diskState: make(map[uint32]string),
 		minCopies: 2,
+		rebalance: DefaultRebalancePolicy(),
 		handles:   make(map[int64]*FileHandle),
 	}
 	s.resetDiskStates()

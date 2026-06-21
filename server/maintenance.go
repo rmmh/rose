@@ -6,10 +6,44 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/rmmh/rose/meta"
 	"github.com/rmmh/rose/storage"
 )
+
+// RebalancePolicy bounds how aggressively rebalance evens shard counts across
+// active disks. The point is deliberately not to reach perfect balance: shards
+// are expensive to move, so a little skew is tolerated and passes are rate
+// limited.
+type RebalancePolicy struct {
+	// MinSkew is the hysteresis band. A pass is a no-op unless the busiest active
+	// disk holds at least MinSkew more shards than the idlest, and it stops moving
+	// once the spread falls back within the band. This is what keeps the system
+	// from thrashing shards to flatten a one- or two-shard difference.
+	MinSkew int
+	// MaxMovesPerPass caps how many shards a single pass relocates, bounding the
+	// IO one rebalance triggers. Zero means unbounded within a pass.
+	MaxMovesPerPass int
+	// Cooldown is the minimum wall-clock time between passes that actually moved
+	// something; a pass started inside the window is skipped. This is the backoff
+	// that stops a balanced-enough cluster from rebalancing on every tick.
+	Cooldown time.Duration
+}
+
+// DefaultRebalancePolicy tolerates a two-shard spread, moves at most eight shards
+// per pass, and waits five minutes between passes.
+func DefaultRebalancePolicy() RebalancePolicy {
+	return RebalancePolicy{MinSkew: 2, MaxMovesPerPass: 8, Cooldown: 5 * time.Minute}
+}
+
+// SetRebalancePolicy replaces the rebalance tuning. It is the operator knob for
+// the hysteresis band, per-pass move cap, and backoff window.
+func (s *Server) SetRebalancePolicy(p RebalancePolicy) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	s.rebalance = p
+}
 
 // DrainDisk evacuates every shard off a disk and detaches it, implementing the
 // RoseStorage remove flow (StartRemove -> DrainStep* -> FinishJob). It runs the
@@ -321,6 +355,127 @@ func (s *Server) ensurePlacementAllowedLocked(ctx context.Context, vlogID, toDis
 		}
 	}
 	return nil
+}
+
+// Rebalance evens shard counts across active disks, implementing the RoseStorage
+// RebalanceStep as a bounded, best-effort pass. It moves shards off the busiest
+// disks onto the idlest, but only while the spread exceeds the hysteresis band
+// and only up to the per-pass move cap, and it skips entirely inside the cooldown
+// window after a prior pass moved something. It returns how many shards it moved.
+//
+// Unlike drain/reprotect/replace, rebalance has no must-finish obligation: every
+// move is individually crash-safe (copy-then-repoint via migratePlogLocked) and a
+// partially completed pass leaves a valid, merely-less-even cluster that the next
+// pass continues from. So it carries no durable job row to resume.
+func (s *Server) Rebalance(ctx context.Context) (int, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+
+	pol := s.rebalance
+	if pol.Cooldown > 0 && !s.lastRebalance.IsZero() && time.Since(s.lastRebalance) < pol.Cooldown {
+		return 0, nil // within the backoff window: leave the minor imbalance alone
+	}
+
+	active := s.activeDiskIDs()
+	if len(active) < 2 {
+		return 0, nil
+	}
+
+	counts := make(map[uint32]int, len(active))
+	plogsByDisk := make(map[uint32][]meta.PlogOnDisk, len(active))
+	for _, d := range active {
+		ps, err := s.db.PlogsOnDisk(ctx, d)
+		if err != nil {
+			return 0, err
+		}
+		counts[d] = len(ps)
+		plogsByDisk[d] = ps
+	}
+
+	moves := 0
+	for pol.MaxMovesPerPass <= 0 || moves < pol.MaxMovesPerPass {
+		src, dst := diskExtremes(active, counts)
+		if counts[src]-counts[dst] <= pol.MinSkew {
+			break // spread is within the hysteresis band; minor imbalance is fine
+		}
+		moved, err := s.rebalanceOneLocked(ctx, src, pol.MinSkew, counts, plogsByDisk)
+		if err != nil {
+			return moves, err
+		}
+		if !moved {
+			break // nothing on the busiest disk can legally move to a lighter one
+		}
+		moves++
+	}
+	if moves > 0 {
+		s.lastRebalance = time.Now()
+	}
+	return moves, nil
+}
+
+// diskExtremes returns the busiest and idlest disk by shard count, scanning in
+// the (sorted) active order so ties break deterministically.
+func diskExtremes(active []uint32, counts map[uint32]int) (busiest, idlest uint32) {
+	busiest, idlest = active[0], active[0]
+	for _, d := range active {
+		if counts[d] > counts[busiest] {
+			busiest = d
+		}
+		if counts[d] < counts[idlest] {
+			idlest = d
+		}
+	}
+	return busiest, idlest
+}
+
+// rebalanceOneLocked relocates a single shard off src onto the lightest active
+// disk that does not already hold a shard of the same vlog (PlacementAllowed) and
+// is at least minSkew+1 shards lighter than src, so the move actually improves
+// balance beyond the hysteresis band. It updates counts and plogsByDisk in place
+// and reports whether it moved anything. The caller must hold vlogMu.
+func (s *Server) rebalanceOneLocked(ctx context.Context, src uint32, minSkew int, counts map[uint32]int, plogsByDisk map[uint32][]meta.PlogOnDisk) (bool, error) {
+	for _, p := range plogsByDisk[src] {
+		shards, err := s.db.VlogShardDisks(ctx, p.VlogID)
+		if err != nil {
+			return false, err
+		}
+		occupied := make(map[uint32]bool, len(shards))
+		for _, sh := range shards {
+			occupied[sh.DiskID] = true
+		}
+
+		dst, dstCount := uint32(0), -1
+		for d, c := range counts {
+			if d == src || occupied[d] {
+				continue
+			}
+			if dstCount == -1 || c < dstCount {
+				dst, dstCount = d, c
+			}
+		}
+		if dstCount == -1 || counts[src]-dstCount <= minSkew {
+			continue // no legal destination, or moving there would not help
+		}
+
+		if err := s.migratePlogLocked(ctx, p.PlogID, p.VlogID, src, dst); err != nil {
+			return false, err
+		}
+		counts[src]--
+		counts[dst]++
+		plogsByDisk[src] = removePlog(plogsByDisk[src], p.PlogID)
+		plogsByDisk[dst] = append(plogsByDisk[dst], p)
+		return true, nil
+	}
+	return false, nil
+}
+
+func removePlog(plogs []meta.PlogOnDisk, plogID uint32) []meta.PlogOnDisk {
+	for i, p := range plogs {
+		if p.PlogID == plogID {
+			return append(plogs[:i], plogs[i+1:]...)
+		}
+	}
+	return plogs
 }
 
 // setDiskStateLocked persists a disk transition and updates the cache. The
