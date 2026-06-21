@@ -110,6 +110,18 @@ func initSchema(db *sql.DB) error {
 			used_bytes INTEGER NOT NULL,
 			FOREIGN KEY (node_id) REFERENCES node(id) ON DELETE CASCADE
 		);
+
+		-- Durable maintenance work stream.  Jobs (compaction today, repair and
+		-- rebalance later) survive restarts so a rewrite interrupted by a crash
+		-- is resumed rather than lost or restarted from scratch.
+		CREATE TABLE IF NOT EXISTS job (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			kind TEXT NOT NULL,
+			state TEXT NOT NULL,         -- 'running' | 'done'
+			target_vlog INTEGER NOT NULL DEFAULT 0,
+			dest_vlog INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("init schema: %w", err)

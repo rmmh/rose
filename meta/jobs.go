@@ -1,0 +1,184 @@
+package meta
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+)
+
+// Job is one entry in the durable maintenance work stream.
+type Job struct {
+	ID         int64
+	Kind       string
+	State      string
+	TargetVlog uint32
+	DestVlog   uint32
+}
+
+const (
+	JobCompact = "compact"
+	JobRunning = "running"
+	JobDone    = "done"
+)
+
+// GetOrCreateCompactionJob returns the running compaction job for a vlog,
+// creating one if none exists. Reusing an in-flight job is what lets a crashed
+// rewrite resume against the same destination vlog instead of orphaning it.
+func (d *DB) GetOrCreateCompactionJob(ctx context.Context, targetVlog uint32) (Job, error) {
+	var j Job
+	err := d.db.QueryRowContext(ctx,
+		"SELECT id, kind, state, target_vlog, dest_vlog FROM job WHERE kind = ? AND state = ? AND target_vlog = ?",
+		JobCompact, JobRunning, targetVlog).Scan(&j.ID, &j.Kind, &j.State, &j.TargetVlog, &j.DestVlog)
+	if err == nil {
+		return j, nil
+	}
+	if err != sql.ErrNoRows {
+		return Job{}, err
+	}
+	res, err := d.db.ExecContext(ctx,
+		"INSERT INTO job (kind, state, target_vlog, dest_vlog, created_at) VALUES (?, ?, ?, 0, ?)",
+		JobCompact, JobRunning, targetVlog, time.Now().UnixNano())
+	if err != nil {
+		return Job{}, fmt.Errorf("create compaction job: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Job{}, err
+	}
+	return Job{ID: id, Kind: JobCompact, State: JobRunning, TargetVlog: targetVlog}, nil
+}
+
+func (d *DB) SetJobDest(ctx context.Context, jobID int64, destVlog uint32) error {
+	_, err := d.db.ExecContext(ctx, "UPDATE job SET dest_vlog = ? WHERE id = ?", destVlog, jobID)
+	return err
+}
+
+func (d *DB) MarkJobDone(ctx context.Context, jobID int64) error {
+	_, err := d.db.ExecContext(ctx, "UPDATE job SET state = ? WHERE id = ?", JobDone, jobID)
+	return err
+}
+
+// RunningJobs lists jobs to resume after a restart.
+func (d *DB) RunningJobs(ctx context.Context) ([]Job, error) {
+	rows, err := d.db.QueryContext(ctx,
+		"SELECT id, kind, state, target_vlog, dest_vlog FROM job WHERE state = ? ORDER BY id", JobRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		var j Job
+		if err := rows.Scan(&j.ID, &j.Kind, &j.State, &j.TargetVlog, &j.DestVlog); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// ChunkLoc identifies a live chunk and where its bytes currently live.
+type ChunkLoc struct {
+	Hash        []byte
+	VaddrOffset int64
+	LogicalLen  int
+}
+
+// LiveChunksInVlog returns the still-referenced chunks stored in a vlog, the
+// ones compaction must copy forward.
+func (d *DB) LiveChunksInVlog(ctx context.Context, vlogID uint32) ([]ChunkLoc, error) {
+	rows, err := d.db.QueryContext(ctx,
+		"SELECT hash, vaddr_offset, logical_len FROM chunk WHERE vlog_id = ? AND refcount > 0 ORDER BY vaddr_offset", vlogID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChunkLoc
+	for rows.Next() {
+		var c ChunkLoc
+		if err := rows.Scan(&c.Hash, &c.VaddrOffset, &c.LogicalLen); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// RelocateChunk atomically repoints a chunk at its rewritten copy. The bytes
+// must already be durable in destVlog; until this commits the chunk still
+// resolves to its old location, so a crash mid-compaction is safe to resume.
+func (d *DB) RelocateChunk(ctx context.Context, hash []byte, destVlog uint32, newOffset int64) error {
+	_, err := d.db.ExecContext(ctx,
+		"UPDATE chunk SET vlog_id = ?, vaddr_offset = ? WHERE hash = ?", destVlog, newOffset, hash)
+	return err
+}
+
+// RetireVlog drops a fully-drained vlog: any remaining (dead) chunk rows, its
+// shard mappings, and the vlog row itself. It returns the plogs that backed it
+// so the caller can unmount and delete their files. It fails loudly if any live
+// chunk still points at the vlog, which would mean compaction left data behind.
+func (d *DB) RetireVlog(ctx context.Context, vlogID uint32) ([]PlogInfo, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var liveRemaining int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM chunk WHERE vlog_id = ? AND refcount > 0", vlogID).Scan(&liveRemaining); err != nil {
+		return nil, err
+	}
+	if liveRemaining > 0 {
+		return nil, fmt.Errorf("refusing to retire vlog %d with %d live chunks", vlogID, liveRemaining)
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT p.id, p.disk_id, p.length FROM plog p
+		JOIN vlog_plog vp ON vp.plog_id = p.id WHERE vp.vlog_id = ? ORDER BY p.id`, vlogID)
+	if err != nil {
+		return nil, err
+	}
+	var plogs []PlogInfo
+	for rows.Next() {
+		var p PlogInfo
+		if err := rows.Scan(&p.ID, &p.DiskID, &p.Length); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		plogs = append(plogs, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM chunk WHERE vlog_id = ?", vlogID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM vlog_plog WHERE vlog_id = ?", vlogID); err != nil {
+		return nil, err
+	}
+	for _, p := range plogs {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM plog WHERE id = ?", p.ID); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM vlog WHERE id = ?", vlogID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return plogs, nil
+}
+
+// GetVlog returns one vlog's protection configuration.
+func (d *DB) GetVlog(ctx context.Context, vlogID uint32) (VlogInfo, error) {
+	var info VlogInfo
+	err := d.db.QueryRowContext(ctx,
+		"SELECT id, length, protection_scheme, data_shards, parity_shards FROM vlog WHERE id = ?", vlogID).
+		Scan(&info.ID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards)
+	return info, err
+}

@@ -97,6 +97,57 @@ func (d *DB) ListVlogPlogs(ctx context.Context, vlogID uint32) ([]VlogPlogInfo, 
 	return out, rows.Err()
 }
 
+// VlogUsage accounts for the live and dead bytes in a vlog. Dead bytes are
+// space occupied by chunks no longer referenced by any live head or snapshot;
+// they are only physically reclaimed by compaction, which rewrites the live
+// chunks into a fresh vlog and retires this one.
+type VlogUsage struct {
+	VlogID     uint32
+	TotalBytes int64 // the vlog write cursor: every byte ever appended
+	LiveBytes  int64 // bytes still referenced (chunk refcount > 0)
+}
+
+func (u VlogUsage) DeadBytes() int64 {
+	dead := u.TotalBytes - u.LiveBytes
+	if dead < 0 {
+		return 0
+	}
+	return dead
+}
+
+func (u VlogUsage) WasteRatio() float64 {
+	if u.TotalBytes <= 0 {
+		return 0
+	}
+	return float64(u.DeadBytes()) / float64(u.TotalBytes)
+}
+
+// VlogUsages reports live/dead accounting for every vlog. A chunk counts as live
+// while its refcount is positive; refcount-zero chunks (whether or not their
+// rows have been collected) are dead space awaiting compaction.
+func (d *DB) VlogUsages(ctx context.Context) ([]VlogUsage, error) {
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT v.id, v.length,
+		       COALESCE(SUM(CASE WHEN c.refcount > 0 THEN c.compressed_len ELSE 0 END), 0)
+		FROM vlog v
+		LEFT JOIN chunk c ON c.vlog_id = v.id
+		GROUP BY v.id, v.length
+		ORDER BY v.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []VlogUsage
+	for rows.Next() {
+		var u VlogUsage
+		if err := rows.Scan(&u.VlogID, &u.TotalBytes, &u.LiveBytes); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) SetVlogLength(ctx context.Context, vlogID uint32, length int64) error {
 	_, err := d.db.ExecContext(ctx, "UPDATE vlog SET length = ? WHERE id = ?", length, vlogID)
 	return err

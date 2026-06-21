@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math/rand"
 	"net"
 	"os"
@@ -254,6 +255,135 @@ func TestGCReclaimsOnlyUnreferencedChunks(t *testing.T) {
 	}
 	if again, err := s.GC(ctx); err != nil || again != 0 {
 		t.Fatalf("second GC collected %d (err=%v), want 0", again, err)
+	}
+}
+
+func TestCompactionRewritesVlogAndReclaimsSpace(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	diskRoot := filepath.Join(dir, "disk")
+	s := server.NewServerWithDataDir(db, diskRoot)
+	ctx := context.Background()
+
+	// Distinct payloads land in one active vlog. Keep /keep, delete the rest.
+	keep := make([]byte, 64*1024)
+	rand.New(rand.NewSource(1)).Read(keep)
+	writeServerFile(t, s, "/keep", keep)
+	for i := 0; i < 4; i++ {
+		dead := make([]byte, 64*1024)
+		rand.New(rand.NewSource(int64(100 + i))).Read(dead)
+		writeServerFile(t, s, fmt.Sprintf("/dead%d", i), dead)
+		if _, err := s.Unlink(ctx, &pb.UnlinkRequest{Path: fmt.Sprintf("/dead%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	usages, err := db.VlogUsages(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usages) != 1 || usages[0].DeadBytes() == 0 {
+		t.Fatalf("expected one vlog with dead space, got %+v", usages)
+	}
+	sourceVlog := usages[0].VlogID
+
+	// Aggressive policy so the single wasteful vlog is selected.
+	n, err := s.Compact(ctx, server.CompactionPolicy{MinWasteRatio: 0.1, MinDeadBytes: 1, MaxJobs: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("compacted %d vlogs, want 1", n)
+	}
+
+	// The source vlog is retired; a fresh one holds only the live chunk.
+	after, err := db.VlogUsages(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range after {
+		if u.VlogID == sourceVlog {
+			t.Fatalf("source vlog %d still present after compaction", sourceVlog)
+		}
+		if u.DeadBytes() != 0 {
+			t.Fatalf("compacted vlog %d still has %d dead bytes", u.VlogID, u.DeadBytes())
+		}
+	}
+
+	// Survivor data is intact, both live and after a restart that re-mounts the
+	// rewritten vlog.
+	if got := readServerFile(t, s, "/keep"); !bytes.Equal(got, keep) {
+		t.Fatal("kept file corrupted by compaction")
+	}
+	restarted := server.NewServerWithDataDir(db, diskRoot)
+	if err := restarted.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := readServerFile(t, restarted, "/keep"); !bytes.Equal(got, keep) {
+		t.Fatal("kept file unreadable after restart")
+	}
+}
+
+func TestCompactionResumesAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	diskRoot := filepath.Join(dir, "disk")
+	s := server.NewServerWithDataDir(db, diskRoot)
+	ctx := context.Background()
+
+	keep := make([]byte, 32*1024)
+	rand.New(rand.NewSource(5)).Read(keep)
+	writeServerFile(t, s, "/keep", keep)
+	dead := make([]byte, 32*1024)
+	rand.New(rand.NewSource(6)).Read(dead)
+	writeServerFile(t, s, "/dead", dead)
+	if _, err := s.Unlink(ctx, &pb.UnlinkRequest{Path: "/dead"}); err != nil {
+		t.Fatal(err)
+	}
+
+	usages, err := db.VlogUsages(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceVlog := usages[0].VlogID
+
+	// Simulate a crash after a compaction job was durably recorded but before
+	// any work ran: a fresh server must pick it up during recovery and finish.
+	if _, err := db.GetOrCreateCompactionJob(ctx, sourceVlog); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := server.NewServerWithDataDir(db, diskRoot)
+	if err := restarted.Recover(ctx); err != nil {
+		t.Fatalf("recover should resume compaction: %v", err)
+	}
+
+	after, err := db.VlogUsages(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range after {
+		if u.VlogID == sourceVlog {
+			t.Fatal("resumed recovery did not retire the source vlog")
+		}
+	}
+	if got := readServerFile(t, restarted, "/keep"); !bytes.Equal(got, keep) {
+		t.Fatal("kept file unreadable after resumed compaction")
+	}
+	jobs, err := db.RunningJobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("expected no running jobs after resume, got %d", len(jobs))
 	}
 }
 

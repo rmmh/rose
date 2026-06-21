@@ -124,7 +124,67 @@ func (s *Server) Recover(ctx context.Context) error {
 	}
 	s.plogs = plogByID
 	s.vlogs = vlogs
+
+	// Resume any maintenance work interrupted by the crash/restart.
+	jobs, err := s.db.RunningJobs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if job.Kind == meta.JobCompact {
+			if err := s.CompactVlog(ctx, job.TargetVlog); err != nil {
+				return fmt.Errorf("resume compaction of vlog %d: %w", job.TargetVlog, err)
+			}
+		}
+	}
 	return nil
+}
+
+// provisionVlogLocked creates a vlog, its backing plogs across the configured
+// disks, and the in-memory clients, registering everything. The caller must
+// hold vlogMu.
+func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataShards, parityShards int) (uint32, *storage.Vlog, error) {
+	id, err := s.db.MakeVlog(ctx, scheme, int32(dataShards), int32(parityShards))
+	if err != nil {
+		return 0, nil, err
+	}
+	diskIDs := s.activeDiskIDs()
+	if len(diskIDs) == 0 {
+		return 0, nil, fmt.Errorf("no active disks configured")
+	}
+	clientCount := 1
+	switch scheme {
+	case "DUPLICATE":
+		clientCount = len(diskIDs)
+	case "EC":
+		clientCount = dataShards + parityShards
+		if clientCount == 0 || clientCount > len(diskIDs) {
+			return 0, nil, fmt.Errorf("EC vlog needs 1..%d shards, got %d", len(diskIDs), clientCount)
+		}
+	}
+	clients := make([]storage.PlogClient, 0, clientCount)
+	for shard := 0; shard < clientCount; shard++ {
+		diskID := diskIDs[shard]
+		plogID, err := s.db.MakePlog(ctx, diskID)
+		if err != nil {
+			return 0, nil, err
+		}
+		if err := s.db.AssignPlogToVlog(ctx, id, shard, plogID); err != nil {
+			return 0, nil, err
+		}
+		plog, err := storage.OpenPlog(s.plogPath(diskID, plogID), plogID)
+		if err != nil {
+			return 0, nil, fmt.Errorf("open plog %d: %w", plogID, err)
+		}
+		s.plogs[plogID] = plog
+		clients = append(clients, &localPlogClient{plog: plog})
+	}
+	vlog, err := storage.NewVlog(id, scheme, dataShards, parityShards, clients, 0)
+	if err != nil {
+		return 0, nil, fmt.Errorf("create vlog in memory: %w", err)
+	}
+	s.vlogs[id] = vlog
+	return id, vlog, nil
 }
 
 type localPlogClient struct {

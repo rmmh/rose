@@ -246,39 +246,11 @@ func (s *Server) getOrCreateActiveVlog(ctx context.Context) (uint32, error) {
 		return s.activeVlog, nil
 	}
 
-	// Create a new vlog. For now, we'll just use DUPLICATE with 1 data shard.
-	id, err := s.db.MakeVlog(ctx, "DUPLICATE", 1, 0)
+	// Default protection for now is DUPLICATE across every configured disk.
+	id, _, err := s.provisionVlogLocked(ctx, "DUPLICATE", 1, 0)
 	if err != nil {
 		return 0, err
 	}
-
-	diskIDs := s.activeDiskIDs()
-	if len(diskIDs) == 0 {
-		return 0, fmt.Errorf("no active disks configured")
-	}
-	clients := make([]storage.PlogClient, 0, len(diskIDs))
-	for shard, diskID := range diskIDs {
-		plogID, err := s.db.MakePlog(ctx, diskID)
-		if err != nil {
-			return 0, err
-		}
-		if err := s.db.AssignPlogToVlog(ctx, id, shard, plogID); err != nil {
-			return 0, err
-		}
-		plog, err := storage.OpenPlog(s.plogPath(diskID, plogID), plogID)
-		if err != nil {
-			return 0, fmt.Errorf("open plog %d: %w", plogID, err)
-		}
-		s.plogs[plogID] = plog
-		clients = append(clients, &localPlogClient{plog: plog})
-	}
-
-	vlog, err := storage.NewVlog(id, "DUPLICATE", 1, 0, clients, 0)
-	if err != nil {
-		return 0, fmt.Errorf("create vlog in memory: %w", err)
-	}
-
-	s.vlogs[id] = vlog
 	s.activeVlog = id
 	return id, nil
 }
@@ -364,45 +336,12 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 
 // Vlog Operations
 func (s *Server) MakeVlog(ctx context.Context, req *pb.MakeVlogRequest) (*pb.MakeVlogResponse, error) {
-	id, err := s.db.MakeVlog(ctx, req.GetProtectionScheme(), req.GetDataShards(), req.GetParityShards())
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	id, _, err := s.provisionVlogLocked(ctx, req.GetProtectionScheme(), int(req.GetDataShards()), int(req.GetParityShards()))
 	if err != nil {
 		return nil, err
 	}
-	diskIDs := s.activeDiskIDs()
-	if len(diskIDs) == 0 {
-		return nil, fmt.Errorf("no active disks configured")
-	}
-	clientCount := 1
-	if req.GetProtectionScheme() == "DUPLICATE" {
-		clientCount = len(diskIDs)
-	} else if req.GetProtectionScheme() == "EC" {
-		clientCount = int(req.GetDataShards() + req.GetParityShards())
-		if clientCount == 0 || clientCount > len(diskIDs) {
-			return nil, fmt.Errorf("EC vlog requires data or parity shards")
-		}
-	}
-	clients := make([]storage.PlogClient, 0, clientCount)
-	for shard := 0; shard < clientCount; shard++ {
-		diskID := diskIDs[shard]
-		plogID, err := s.db.MakePlog(ctx, diskID)
-		if err != nil {
-			return nil, err
-		}
-		if err := s.db.AssignPlogToVlog(ctx, id, shard, plogID); err != nil {
-			return nil, err
-		}
-		plog, err := storage.OpenPlog(s.plogPath(diskID, plogID), plogID)
-		if err != nil {
-			return nil, err
-		}
-		s.plogs[plogID] = plog
-		clients = append(clients, &localPlogClient{plog: plog})
-	}
-	vlog, err := storage.NewVlog(id, req.GetProtectionScheme(), int(req.GetDataShards()), int(req.GetParityShards()), clients, 0)
-	if err != nil {
-		return nil, err
-	}
-	s.vlogs[id] = vlog
 	return &pb.MakeVlogResponse{VlogId: id}, nil
 }
 
