@@ -194,10 +194,22 @@ CommitVlog(o) ==
     /\ object_state[o] = "writing"
     /\ CommitReady(o)
     /\ AcknowledgedForCommit(o)
+    /\ object_state' = [object_state EXCEPT ![o] = "commit-durable"]
+    /\ last_rpc' = last_rpc
+    /\ UNCHANGED <<file_state, object_mode, plog_ready, disk_state, node_state,
+                  pending, stored, job_state, job_kind, job_disk, job_progress>>
+
+PublishVlog(o) ==
+    /\ object_state[o] = "commit-durable"
     /\ object_state' = [object_state EXCEPT ![o] = "committed"]
     /\ last_rpc' = last_rpc
     /\ UNCHANGED <<file_state, object_mode, plog_ready, disk_state, node_state,
                   pending, stored, job_state, job_kind, job_disk, job_progress>>
+
+CrashRestart ==
+    /\ last_rpc' = "crash-restart"
+    /\ UNCHANGED <<file_state, object_mode, object_state, plog_ready, disk_state,
+                  node_state, pending, stored, job_state, job_kind, job_disk, job_progress>>
 
 Read(o) ==
     /\ object_state[o] = "committed"
@@ -375,6 +387,8 @@ Next ==
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : CommitPlog(d, o, s)
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : SendPlogAck(d, o, s) \/ ReceivePlogAck(d, o, s) \/ RetryPlog(d, o, s) \/ DropPlogMessage(d, o, s)
     \/ \E o \in Objects : CommitVlog(o)
+    \/ \E o \in Objects : PublishVlog(o)
+    \/ CrashRestart
     \/ \E o \in Objects : Read(o) \/ ReadVlog(o)
     \/ \E d \in Disks, o \in Objects, s \in 0..TotalShards : ReadPlog(d, o, s)
     \/ \E d \in Disks : AddDisk(d) \/ FailDisk(d)
