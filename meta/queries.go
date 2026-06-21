@@ -118,14 +118,25 @@ func (d *DB) OpenFile(ctx context.Context, path string) (int64, error) {
 	return id, err
 }
 
-// AddChunk records immutable chunk placement. References are adjusted only when
-// a file version is published, unlinked, or captured/released by a snapshot.
-func (d *DB) AddChunk(ctx context.Context, hash []byte, vlogID uint32, vaddrOffset int64, logicalLen int, compressedLen int) error {
-	_, err := d.db.ExecContext(ctx, `
+// ChunkPlacement describes one chunk of a file version: its content hash and
+// where the bytes live in a virtual log.
+type ChunkPlacement struct {
+	Hash          []byte
+	VlogID        uint32
+	VaddrOffset   int64
+	LogicalLen    int
+	CompressedLen int
+}
+
+// insertChunk records immutable chunk placement at refcount 0. The reference is
+// taken in the same transaction that publishes the file, so a committed chunk is
+// never durably visible at refcount 0 while it is about to be referenced.
+func insertChunk(ctx context.Context, tx *sql.Tx, p ChunkPlacement) error {
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO chunk (hash, refcount, vlog_id, vaddr_offset, logical_len, compressed_len)
 		VALUES (?, 0, ?, ?, ?, ?)
 		ON CONFLICT(hash) DO NOTHING
-	`, hash, vlogID, vaddrOffset, logicalLen, compressedLen)
+	`, p.Hash, p.VlogID, p.VaddrOffset, p.LogicalLen, p.CompressedLen)
 	return err
 }
 
@@ -153,13 +164,29 @@ func fileChunks(ctx context.Context, tx *sql.Tx, fileID int64) ([]byte, error) {
 }
 
 // CommitFile atomically publishes a new immutable file version and transfers
-// the namespace reference from the previous head.
-func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, chunks []byte) (int64, error) {
+// the namespace reference from the previous head. Chunk rows are inserted and
+// referenced inside the same transaction, so no committed chunk is ever durably
+// visible at refcount 0 in the window before it is referenced.
+func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, placements []ChunkPlacement) (int64, error) {
+	chunks := make([]byte, 0, len(placements)*19)
+	lenBytes := make([]byte, 4)
+	for _, p := range placements {
+		chunks = append(chunks, p.Hash...)
+		binary.LittleEndian.PutUint32(lenBytes, uint32(p.LogicalLen))
+		chunks = append(chunks, lenBytes...)
+	}
+
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin file commit: %w", err)
 	}
 	defer tx.Rollback()
+
+	for _, p := range placements {
+		if err := insertChunk(ctx, tx, p); err != nil {
+			return 0, fmt.Errorf("insert chunk: %w", err)
+		}
+	}
 
 	var oldID int64
 	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", path).Scan(&oldID)
@@ -195,6 +222,46 @@ func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, chunks []
 		return 0, fmt.Errorf("commit file version: %w", err)
 	}
 	return id, nil
+}
+
+// GCChunks reclaims every chunk whose reference count has fallen to zero,
+// implementing the spec's GCChunk action. A refcount of zero means the chunk is
+// reachable from no live file head and no active snapshot, so collecting it
+// cannot make any reachable version unreadable. It returns the placements of the
+// collected chunks so a caller can later reclaim their log space via compaction.
+func (d *DB) GCChunks(ctx context.Context) ([]ChunkPlacement, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, "SELECT hash, vlog_id, vaddr_offset, logical_len, compressed_len FROM chunk WHERE refcount <= 0")
+	if err != nil {
+		return nil, err
+	}
+	var collected []ChunkPlacement
+	for rows.Next() {
+		var p ChunkPlacement
+		if err := rows.Scan(&p.Hash, &p.VlogID, &p.VaddrOffset, &p.LogicalLen, &p.CompressedLen); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		collected = append(collected, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM chunk WHERE refcount <= 0"); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return collected, nil
 }
 
 func (d *DB) GetFileSize(ctx context.Context, path string) (int64, error) {

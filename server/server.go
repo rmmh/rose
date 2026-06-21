@@ -147,6 +147,17 @@ func (c *localPlogClient) Scrub() (storage.ScrubResult, error) {
 	return c.plog.Scrub()
 }
 
+// GC reclaims unreferenced chunk metadata (refcount zero) and reports how many
+// chunks were collected. The chunks' log bytes become orphan data eligible for
+// later segment compaction.
+func (s *Server) GC(ctx context.Context) (int, error) {
+	collected, err := s.db.GCChunks(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(collected), nil
+}
+
 // VlogScrub reports a scrub of one mounted virtual log.
 type VlogScrub struct {
 	VlogID uint32

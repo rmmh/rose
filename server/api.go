@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +11,7 @@ import (
 
 	chunkers "github.com/PlakarKorp/go-cdc-chunkers"
 	_ "github.com/PlakarKorp/go-cdc-chunkers/chunkers/fastcdc"
+	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/storage"
 )
@@ -314,7 +314,7 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 			return nil, fmt.Errorf("new chunker: %w", err)
 		}
 
-		var chunksBlob []byte
+		var placements []meta.ChunkPlacement
 		for {
 			chunkData, err := chunker.Next()
 			if err != nil && err != io.EOF {
@@ -331,15 +331,13 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 					return nil, fmt.Errorf("write vlog: %w", wErr)
 				}
 
-				if err := s.db.AddChunk(ctx, chunkHash, vlogID, offset, len(chunkData), len(chunkData)); err != nil {
-					slog.Error("Failed to add chunk", "error", err)
-					return nil, fmt.Errorf("add chunk meta: %w", err)
-				}
-
-				chunksBlob = append(chunksBlob, chunkHash...)
-				lenBytes := make([]byte, 4)
-				binary.LittleEndian.PutUint32(lenBytes, uint32(len(chunkData)))
-				chunksBlob = append(chunksBlob, lenBytes...)
+				placements = append(placements, meta.ChunkPlacement{
+					Hash:          chunkHash,
+					VlogID:        vlogID,
+					VaddrOffset:   offset,
+					LogicalLen:    len(chunkData),
+					CompressedLen: len(chunkData),
+				})
 			}
 			if err == io.EOF {
 				break
@@ -353,7 +351,10 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 			return nil, fmt.Errorf("persist vlog cursor: %w", err)
 		}
 
-		if _, err := s.db.CommitFile(ctx, h.path, time.Now().UnixNano(), chunksBlob); err != nil {
+		// The vlog bytes are durable before metadata publishes references to
+		// them. A crash here leaves the chunks as orphan log data reclaimed by
+		// later compaction, never a dangling metadata reference.
+		if _, err := s.db.CommitFile(ctx, h.path, time.Now().UnixNano(), placements); err != nil {
 			return nil, fmt.Errorf("publish file metadata: %w", err)
 		}
 	}

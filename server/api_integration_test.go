@@ -207,6 +207,99 @@ func TestRecoverReopensPersistedVlogs(t *testing.T) {
 	}
 }
 
+func TestGCReclaimsOnlyUnreferencedChunks(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := server.NewServerWithDataDir(db, filepath.Join(dir, "disk"))
+	ctx := context.Background()
+
+	writeServerFile(t, s, "/a", []byte("alpha content"))
+	snap, err := s.CreateSnapshot(ctx, &pb.CreateSnapshotRequest{Name: "snap"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Overwrite the live head; the old chunk is now reachable only via snapshot.
+	writeServerFile(t, s, "/a", []byte("beta content"))
+
+	// Nothing is collectable: old chunk pinned by the snapshot, new by the head.
+	if n, err := s.GC(ctx); err != nil || n != 0 {
+		t.Fatalf("premature GC collected %d (err=%v), want 0", n, err)
+	}
+	// Both the snapshot and live versions still read correctly.
+	if got := readSnapshotFile(t, s, snap.GetSnapshotId(), "/a"); !bytes.Equal(got, []byte("alpha content")) {
+		t.Fatalf("snapshot read = %q", got)
+	}
+	if got := readServerFile(t, s, "/a"); !bytes.Equal(got, []byte("beta content")) {
+		t.Fatalf("live read = %q", got)
+	}
+
+	// Releasing the snapshot drops the old chunk to refcount zero.
+	if _, err := s.DeleteSnapshot(ctx, &pb.DeleteSnapshotRequest{SnapshotId: snap.GetSnapshotId()}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.GC(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("GC collected nothing after snapshot release")
+	}
+	// The live version is untouched, and GC is idempotent.
+	if got := readServerFile(t, s, "/a"); !bytes.Equal(got, []byte("beta content")) {
+		t.Fatalf("live read after GC = %q", got)
+	}
+	if again, err := s.GC(ctx); err != nil || again != 0 {
+		t.Fatalf("second GC collected %d (err=%v), want 0", again, err)
+	}
+}
+
+func writeServerFile(t *testing.T, s *server.Server, path string, data []byte) {
+	t.Helper()
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: data}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readServerFile(t *testing.T, s *server.Server, path string) []byte {
+	t.Helper()
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Offset: 0, Length: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res.GetBuffer()
+}
+
+func readSnapshotFile(t *testing.T, s *server.Server, snapshotID uint64, path string) []byte {
+	t.Helper()
+	ctx := context.Background()
+	open, err := s.OpenSnapshot(ctx, &pb.OpenSnapshotRequest{SnapshotId: snapshotID, Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Offset: 0, Length: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res.GetBuffer()
+}
+
 func TestScrubFlagsCorruptionAndReplicaServesGoodData(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
