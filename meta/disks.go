@@ -26,10 +26,16 @@ type DiskInfo struct {
 // idempotent: startup declares its configured disks without clobbering a
 // draining/failed/detached state a prior maintenance operation persisted.
 func (d *DB) RegisterDisk(ctx context.Context, id, nodeID uint32) error {
+	return d.RegisterDiskWithCapacity(ctx, id, nodeID, 0)
+}
+
+// RegisterDiskWithCapacity is RegisterDisk with the capacity reported by the
+// control-plane AddDisk RPC. Existing catalog entries are never overwritten.
+func (d *DB) RegisterDiskWithCapacity(ctx context.Context, id, nodeID uint32, totalBytes uint64) error {
 	_, err := d.db.ExecContext(ctx,
 		`INSERT INTO disk (id, node_id, total_bytes, used_bytes, state)
-		 VALUES (?, ?, 0, 0, ?) ON CONFLICT(id) DO NOTHING`,
-		id, nodeID, DiskActive)
+		 VALUES (?, ?, ?, 0, ?) ON CONFLICT(id) DO NOTHING`,
+		id, nodeID, totalBytes, DiskActive)
 	if err != nil {
 		return fmt.Errorf("register disk %d: %w", id, err)
 	}

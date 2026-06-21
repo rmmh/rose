@@ -97,6 +97,24 @@ func (d *DB) ListVlogPlogs(ctx context.Context, vlogID uint32) ([]VlogPlogInfo, 
 	return out, rows.Err()
 }
 
+// VlogsForPlog returns the vlogs currently referencing a plog.
+func (d *DB) VlogsForPlog(ctx context.Context, plogID uint32) ([]uint32, error) {
+	rows, err := d.db.QueryContext(ctx, "SELECT vlog_id FROM vlog_plog WHERE plog_id = ? ORDER BY vlog_id", plogID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uint32
+	for rows.Next() {
+		var id uint32
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // VlogUsage accounts for the live and dead bytes in a vlog. Dead bytes are
 // space occupied by chunks no longer referenced by any live head or snapshot;
 // they are only physically reclaimed by compaction, which rewrites the live

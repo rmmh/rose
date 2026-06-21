@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/rmmh/rose/meta"
+	"github.com/rmmh/rose/storage"
 )
 
 // SetDiskState transitions a configured disk's lifecycle state and persists it
@@ -58,9 +59,57 @@ func (s *Server) SetNodeState(ctx context.Context, nodeID uint32, state string) 
 	}
 	if state == meta.NodeWorking {
 		delete(s.nodeState, nodeID)
+		// A recovered server intentionally leaves a failed node's plogs closed.
+		// Before cancelling its reprotect, reopen those original files and remount
+		// the affected vlogs.  Otherwise a cold restart followed by node return
+		// would mark the disk active while its vlog still contains offline clients.
+		if err := s.reopenNodePlogsLocked(ctx, nodeID); err != nil {
+			// Do not leave the disk live if its promised return did not make the
+			// original bytes reachable. Keep the durable and cached liveness gates
+			// conservative so commits remain read-only until repair can proceed.
+			_ = s.db.SetNodeState(ctx, nodeID, meta.NodeFailed)
+			s.nodeState[nodeID] = meta.NodeFailed
+			return err
+		}
 		return s.cancelNodeReprotectsLocked(ctx, nodeID)
 	}
 	s.nodeState[nodeID] = state
+	return nil
+}
+
+// reopenNodePlogsLocked reattaches plogs that Recover left offline because their
+// node was unavailable. It deliberately fails before cancelling reprotect if a
+// supposedly returned disk still lacks a file: treating a genuinely lost file as
+// healthy would violate the durability gate. The caller must hold vlogMu.
+func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error {
+	infos, err := s.db.ListPlogs(ctx)
+	if err != nil {
+		return err
+	}
+	affected := make(map[uint32]bool)
+	for _, info := range infos {
+		if s.nodeOf(info.DiskID) != nodeID || !s.offlinePlogs[info.ID] {
+			continue
+		}
+		p, err := storage.OpenPlog(s.plogPath(info.DiskID, info.ID), info.ID)
+		if err != nil {
+			return fmt.Errorf("reopen plog %d on returned node %d: %w", info.ID, nodeID, err)
+		}
+		s.plogs[info.ID] = p
+		delete(s.offlinePlogs, info.ID)
+		mappings, err := s.db.VlogsForPlog(ctx, info.ID)
+		if err != nil {
+			return err
+		}
+		for _, vlogID := range mappings {
+			affected[vlogID] = true
+		}
+	}
+	for vlogID := range affected {
+		if err := s.remountVlogLocked(ctx, vlogID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

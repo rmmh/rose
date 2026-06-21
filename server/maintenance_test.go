@@ -266,6 +266,14 @@ func TestReprotectResumesAfterRestart(t *testing.T) {
 	if err := db.SetDiskState(ctx, victim, meta.DiskFailed); err != nil {
 		t.Fatal(err)
 	}
+	// This is a real cold-start loss, not merely a failed-state marker over an
+	// still-present local file. Recover must mount an offline shard and let the
+	// resumed reprotect reconstruct it from the surviving EC shards.
+	for _, p := range mustPlogsOnDisk(t, db, victim) {
+		if err := os.Remove(s1.plogPath(victim, p.PlogID)); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// A fresh server resumes the reprotect from the running job during Recover.
 	s2 := NewServerWithDiskRoots(db, roots)
@@ -295,6 +303,15 @@ func TestReprotectResumesAfterRestart(t *testing.T) {
 	if len(jobs) != 0 {
 		t.Fatalf("resumed reprotect left %d running jobs", len(jobs))
 	}
+}
+
+func mustPlogsOnDisk(t *testing.T, db *meta.DB, diskID uint32) []meta.PlogOnDisk {
+	t.Helper()
+	plogs, err := db.PlogsOnDisk(context.Background(), diskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plogs
 }
 
 func TestReplaceDiskMovesShardsOntoNewDisk(t *testing.T) {

@@ -23,6 +23,7 @@ const (
 	JobDrain     = "drain"
 	JobReprotect = "reprotect"
 	JobReplace   = "replace"
+	JobRebalance = "rebalance"
 	JobRunning   = "running"
 	JobDone      = "done"
 	JobCancelled = "cancelled"
@@ -83,6 +84,11 @@ func (d *DB) GetOrCreateReprotectJob(ctx context.Context, targetDisk uint32) (Jo
 // persisted so a crash mid-replace resumes onto the same freshly added disk.
 func (d *DB) GetOrCreateReplaceJob(ctx context.Context, targetDisk, destDisk uint32) (Job, error) {
 	return d.getOrCreateDiskJob(ctx, JobReplace, targetDisk, destDisk)
+}
+
+// GetOrCreateRebalanceJob records the single cluster-wide rebalance pass.
+func (d *DB) GetOrCreateRebalanceJob(ctx context.Context) (Job, error) {
+	return d.getOrCreateDiskJob(ctx, JobRebalance, 0, 0)
 }
 
 // getOrCreateDiskJob is the shared get-or-create for disk-maintenance jobs keyed
@@ -158,6 +164,15 @@ func (d *DB) RunningJobs(ctx context.Context) ([]Job, error) {
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+// GetJob returns a durable maintenance job by id.
+func (d *DB) GetJob(ctx context.Context, id int64) (Job, error) {
+	j, err := scanJob(d.db.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM job WHERE id = ?", id))
+	if err == sql.ErrNoRows {
+		return Job{}, fmt.Errorf("job %d not found", id)
+	}
+	return j, err
 }
 
 // ChunkLoc identifies a live chunk and where its bytes currently live.

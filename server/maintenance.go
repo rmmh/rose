@@ -124,8 +124,8 @@ func (s *Server) ReprotectDisk(ctx context.Context, diskID uint32) error {
 	if _, ok := s.diskRoots[diskID]; !ok {
 		return fmt.Errorf("reprotect: disk %d is not configured", diskID)
 	}
-	if s.diskState[diskID] != meta.DiskFailed {
-		return fmt.Errorf("reprotect: disk %d is %s, only failed disks are reprotected", diskID, s.diskState[diskID])
+	if s.diskState[diskID] != meta.DiskFailed && s.diskState[diskID] != meta.DiskDraining {
+		return fmt.Errorf("reprotect: disk %d is %s, only failed or draining disks are reprotected", diskID, s.diskState[diskID])
 	}
 
 	job, err := s.db.GetOrCreateReprotectJob(ctx, diskID)
@@ -197,6 +197,7 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 		return err
 	}
 	delete(s.plogs, lostPlogID)
+	delete(s.offlinePlogs, lostPlogID)
 
 	if s.activeVlog == vlogID {
 		s.activeVlog = 0
@@ -267,19 +268,35 @@ func (s *Server) reconstructECShardLocked(ctx context.Context, info meta.VlogInf
 // the operator action that brings fresh capacity online. (AddDisk is reserved by
 // the gRPC surface for the future RPC driver.)
 func (s *Server) AttachDisk(ctx context.Context, diskID uint32, root string) error {
+	return s.AttachDiskOnNode(ctx, diskID, diskID, root, 0)
+}
+
+// AttachDiskOnNode adds a previously absent disk to a specific node fault
+// domain. The capacity is catalog metadata used by external schedulers; local
+// placement currently measures actual plog bytes.
+func (s *Server) AttachDiskOnNode(ctx context.Context, diskID, nodeID uint32, root string, totalBytes uint64) error {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
 	if _, ok := s.diskRoots[diskID]; ok {
 		return fmt.Errorf("attach disk: disk %d already configured", diskID)
 	}
-	node := s.nodeOf(diskID)
-	if err := s.db.RegisterNode(ctx, node); err != nil {
+	disks, err := s.db.ListDisks(ctx)
+	if err != nil {
 		return err
 	}
-	if err := s.db.RegisterDisk(ctx, diskID, node); err != nil {
+	for _, disk := range disks {
+		if disk.ID == diskID {
+			return fmt.Errorf("attach disk: disk %d already exists in catalog", diskID)
+		}
+	}
+	if err := s.db.RegisterNode(ctx, nodeID); err != nil {
+		return err
+	}
+	if err := s.db.RegisterDiskWithCapacity(ctx, diskID, nodeID, totalBytes); err != nil {
 		return err
 	}
 	s.diskRoots[diskID] = root
+	s.diskNodes[diskID] = nodeID
 	s.diskState[diskID] = meta.DiskActive
 	return nil
 }
@@ -610,22 +627,7 @@ func (s *Server) remountVlogLocked(ctx context.Context, vlogID uint32) error {
 	if err != nil {
 		return err
 	}
-	mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
-	if err != nil {
-		return err
-	}
-	clients := make([]storage.PlogClient, len(mappings))
-	for i, m := range mappings {
-		if m.ShardIndex != i {
-			return fmt.Errorf("vlog %d has non-contiguous shard mapping", vlogID)
-		}
-		plog, ok := s.plogs[m.PlogID]
-		if !ok {
-			return fmt.Errorf("vlog %d references missing plog %d", vlogID, m.PlogID)
-		}
-		clients[i] = &localPlogClient{plog: plog}
-	}
-	vlog, err := storage.NewVlog(info.ID, info.ProtectionScheme, int(info.DataShards), int(info.ParityShards), clients, info.Length)
+	vlog, err := s.mountVlogLocked(ctx, info)
 	if err != nil {
 		return fmt.Errorf("remount vlog %d: %w", vlogID, err)
 	}

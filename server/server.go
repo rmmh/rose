@@ -18,6 +18,12 @@ type Server struct {
 	db    *meta.DB
 	plogs map[uint32]*storage.Plog
 	vlogs map[uint32]*storage.Vlog
+	// offlinePlogs records plogs whose backing disk was unreachable at recovery
+	// (a failed disk or a disk on a failed node), so their files were never
+	// opened. Their vlogs mount with an offlinePlogClient hole that the redundancy
+	// layer treats as a missing shard; reprotect regenerates them and a returning
+	// node reopens them. Guarded by vlogMu.
+	offlinePlogs map[uint32]bool
 
 	// vlogMu guards the vlog/plog maps, the active-vlog pointer, and the disk
 	// lifecycle cache below, so placement and commit-durability decisions see a
@@ -44,26 +50,31 @@ type Server struct {
 	// disks: a hysteresis band so minor imbalance is tolerated, a per-pass move
 	// cap, and a cooldown between passes. lastRebalance tracks the cooldown and is
 	// guarded by vlogMu.
-	rebalance     RebalancePolicy
-	lastRebalance time.Time
-	handlesMu     sync.Mutex
-	handles       map[int64]*FileHandle
-	handleCounter int64
+	rebalance         RebalancePolicy
+	lastRebalance     time.Time
+	maintenanceMu     sync.Mutex
+	maintenanceEvery  time.Duration
+	maintenanceCancel context.CancelFunc
+	handlesMu         sync.Mutex
+	handles           map[int64]*FileHandle
+	handleCounter     int64
 }
 
 func NewServer(db *meta.DB) *Server {
 	s := &Server{
-		db:        db,
-		plogs:     make(map[uint32]*storage.Plog),
-		vlogs:     make(map[uint32]*storage.Vlog),
-		dataDir:   "data",
-		diskRoots: map[uint32]string{1: "data"},
-		diskState: make(map[uint32]string),
-		diskNodes: make(map[uint32]uint32),
-		nodeState: make(map[uint32]string),
-		minCopies: 2,
-		rebalance: DefaultRebalancePolicy(),
-		handles:   make(map[int64]*FileHandle),
+		db:               db,
+		plogs:            make(map[uint32]*storage.Plog),
+		vlogs:            make(map[uint32]*storage.Vlog),
+		offlinePlogs:     make(map[uint32]bool),
+		dataDir:          "data",
+		diskRoots:        map[uint32]string{1: "data"},
+		diskState:        make(map[uint32]string),
+		diskNodes:        make(map[uint32]uint32),
+		nodeState:        make(map[uint32]string),
+		minCopies:        2,
+		rebalance:        DefaultRebalancePolicy(),
+		maintenanceEvery: time.Second,
+		handles:          make(map[int64]*FileHandle),
 	}
 	s.resetDiskStates()
 	return s
@@ -134,6 +145,15 @@ func (s *Server) SetDiskNode(diskID, nodeID uint32) {
 // The caller must hold vlogMu.
 func (s *Server) diskLiveLocked(diskID uint32) bool {
 	return s.diskState[diskID] == meta.DiskActive && s.nodeState[s.nodeOf(diskID)] != meta.NodeFailed
+}
+
+// diskReachableLocked reports whether a disk's plog files can be opened and read.
+// Unlike diskLiveLocked, a draining or detached disk is still reachable (its
+// files are local and being evacuated); only a failed disk (hardware loss) or a
+// disk on a failed node (offline) is unreachable. Recover skips opening plogs on
+// unreachable disks and stubs them offline. The caller must hold vlogMu.
+func (s *Server) diskReachableLocked(diskID uint32) bool {
+	return s.diskState[diskID] != meta.DiskFailed && s.nodeState[s.nodeOf(diskID)] != meta.NodeFailed
 }
 
 // activeDiskIDs returns the configured disks currently eligible to receive new
@@ -220,41 +240,36 @@ func (s *Server) Recover(ctx context.Context) error {
 		return err
 	}
 	plogByID := make(map[uint32]*storage.Plog, len(plogInfos))
+	s.offlinePlogs = make(map[uint32]bool)
 	for _, info := range plogInfos {
+		if !s.diskReachableLocked(info.DiskID) {
+			// A failed disk's bytes are gone and a failed node's disk is offline;
+			// either way the file is unreachable. Stub it offline rather than
+			// failing recovery on the first dead disk, so its vlog mounts degraded
+			// and reprotect (or a returning node) can restore it.
+			s.offlinePlogs[info.ID] = true
+			continue
+		}
 		plog, err := storage.OpenPlog(s.plogPath(info.DiskID, info.ID), info.ID)
 		if err != nil {
 			return fmt.Errorf("recover plog %d on disk %d: %w", info.ID, info.DiskID, err)
 		}
 		plogByID[info.ID] = plog
 	}
+	s.plogs = plogByID
+
 	vlogInfos, err := s.db.ListVlogs(ctx)
 	if err != nil {
 		return err
 	}
 	vlogs := make(map[uint32]*storage.Vlog, len(vlogInfos))
 	for _, info := range vlogInfos {
-		mappings, err := s.db.ListVlogPlogs(ctx, info.ID)
+		vlog, err := s.mountVlogLocked(ctx, info)
 		if err != nil {
 			return err
 		}
-		clients := make([]storage.PlogClient, len(mappings))
-		for index, mapping := range mappings {
-			if mapping.ShardIndex != index {
-				return fmt.Errorf("vlog %d has non-contiguous shard mapping", info.ID)
-			}
-			plog, ok := plogByID[mapping.PlogID]
-			if !ok {
-				return fmt.Errorf("vlog %d references missing plog %d", info.ID, mapping.PlogID)
-			}
-			clients[index] = &localPlogClient{plog: plog}
-		}
-		vlog, err := storage.NewVlog(info.ID, info.ProtectionScheme, int(info.DataShards), int(info.ParityShards), clients, info.Length)
-		if err != nil {
-			return fmt.Errorf("recover vlog %d: %w", info.ID, err)
-		}
 		vlogs[info.ID] = vlog
 	}
-	s.plogs = plogByID
 	s.vlogs = vlogs
 
 	// Resume any maintenance work interrupted by the crash/restart.
@@ -280,8 +295,16 @@ func (s *Server) Recover(ctx context.Context) error {
 			if err := s.ReplaceDiskWith(ctx, job.TargetDisk, job.DestDisk); err != nil {
 				return fmt.Errorf("resume replace of disk %d: %w", job.TargetDisk, err)
 			}
+		case meta.JobRebalance:
+			if _, err := s.Rebalance(ctx); err != nil {
+				return fmt.Errorf("resume rebalance: %w", err)
+			}
+			if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
+				return fmt.Errorf("finish resumed rebalance: %w", err)
+			}
 		}
 	}
+	s.startMaintenanceDriver()
 	return nil
 }
 
@@ -332,6 +355,47 @@ func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataSha
 	}
 	s.vlogs[id] = vlog
 	return id, vlog, nil
+}
+
+// plogClientLocked returns the in-memory client for a shard's backing plog: the
+// live local client when its file is open, or an offline stub when the plog sits
+// on an unreachable disk (recorded in offlinePlogs). A plog that is neither open
+// nor known-offline is a genuine inconsistency and errors. The caller must hold
+// vlogMu.
+func (s *Server) plogClientLocked(plogID uint32) (storage.PlogClient, error) {
+	if p, ok := s.plogs[plogID]; ok {
+		return &localPlogClient{plog: p}, nil
+	}
+	if s.offlinePlogs[plogID] {
+		return offlinePlogClient{plogID: plogID}, nil
+	}
+	return nil, fmt.Errorf("references missing plog %d", plogID)
+}
+
+// mountVlogLocked builds a vlog's in-memory client set from current placement
+// metadata, stubbing any shard on an unreachable disk offline. The caller must
+// hold vlogMu.
+func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*storage.Vlog, error) {
+	mappings, err := s.db.ListVlogPlogs(ctx, info.ID)
+	if err != nil {
+		return nil, err
+	}
+	clients := make([]storage.PlogClient, len(mappings))
+	for index, mapping := range mappings {
+		if mapping.ShardIndex != index {
+			return nil, fmt.Errorf("vlog %d has non-contiguous shard mapping", info.ID)
+		}
+		client, err := s.plogClientLocked(mapping.PlogID)
+		if err != nil {
+			return nil, fmt.Errorf("mount vlog %d: %w", info.ID, err)
+		}
+		clients[index] = client
+	}
+	vlog, err := storage.NewVlog(info.ID, info.ProtectionScheme, int(info.DataShards), int(info.ParityShards), clients, info.Length)
+	if err != nil {
+		return nil, fmt.Errorf("mount vlog %d: %w", info.ID, err)
+	}
+	return vlog, nil
 }
 
 type localPlogClient struct {
@@ -387,5 +451,38 @@ func (s *Server) Scrub() ([]VlogScrub, error) {
 	return out, nil
 }
 
-// Ensure localPlogClient implements storage.PlogClient
-var _ storage.PlogClient = &localPlogClient{}
+// offlinePlogClient stands in for a shard whose backing plog is unreachable: its
+// disk is failed or on a failed node, so Recover never opened the file. Every
+// operation errors, which the redundancy layer treats as a missing shard (EC
+// reconstructs, DUPLICATE falls through) and reprotect regenerates from the
+// surviving copies. It lets a vlog mount with a hole instead of failing recovery
+// on the first dead disk.
+type offlinePlogClient struct {
+	plogID uint32
+}
+
+func (c offlinePlogClient) err() error {
+	return fmt.Errorf("plog %d is offline (disk unreachable)", c.plogID)
+}
+
+func (c offlinePlogClient) Write(ctx context.Context, txnID int64, data []byte) (int64, error) {
+	return 0, c.err()
+}
+
+func (c offlinePlogClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
+	return nil, c.err()
+}
+
+func (c offlinePlogClient) Commit(ctx context.Context, txnID int64) error {
+	return c.err()
+}
+
+func (c offlinePlogClient) Scrub() (storage.ScrubResult, error) {
+	return storage.ScrubResult{}, c.err()
+}
+
+// Ensure the plog clients implement storage.PlogClient
+var (
+	_ storage.PlogClient = &localPlogClient{}
+	_ storage.PlogClient = offlinePlogClient{}
+)

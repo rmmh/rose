@@ -1,0 +1,87 @@
+package server
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/rmmh/rose/meta"
+)
+
+// SetMaintenanceInterval changes the control-plane driver's polling interval.
+// It is primarily an operator/test tuning knob; rebalance's own policy remains
+// the authority on how often bytes are moved.
+func (s *Server) SetMaintenanceInterval(interval time.Duration) {
+	s.maintenanceMu.Lock()
+	s.maintenanceEvery = interval
+	running := s.maintenanceCancel != nil
+	s.maintenanceMu.Unlock()
+	if running {
+		s.StopMaintenanceDriver()
+		s.startMaintenanceDriver()
+	}
+}
+
+// startMaintenanceDriver starts one background control-plane loop. Recover
+// calls it only after rebuilding clients and resuming durable jobs, so its first
+// tick sees a consistent catalog.
+func (s *Server) startMaintenanceDriver() {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+	if s.maintenanceCancel != nil || s.maintenanceEvery <= 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.maintenanceCancel = cancel
+	interval := s.maintenanceEvery
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := s.RunMaintenanceOnce(ctx); err != nil && ctx.Err() == nil {
+					slog.Error("storage maintenance pass failed", "error", err)
+				}
+			}
+		}
+	}()
+}
+
+// StopMaintenanceDriver stops the background loop. Embedders should call it
+// before closing the catalog; it is idempotent and intentionally separate from
+// the Close RPC.
+func (s *Server) StopMaintenanceDriver() {
+	s.maintenanceMu.Lock()
+	cancel := s.maintenanceCancel
+	s.maintenanceCancel = nil
+	s.maintenanceMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// RunMaintenanceOnce is one deterministic control-plane pass. Failed disks are
+// reprotected first, preserving the TLA model's requirement that every published
+// object regain its full placement before the normal commit gate re-admits
+// writes. Rebalance then gets a chance to run; its policy enforces the cooldown.
+func (s *Server) RunMaintenanceOnce(ctx context.Context) error {
+	states := s.DiskStates()
+	var firstErr error
+	for diskID, state := range states {
+		if state != meta.DiskFailed {
+			continue
+		}
+		if err := s.ReprotectDisk(ctx, diskID); err != nil && firstErr == nil {
+			// One unrecoverable vlog must not stop repairs for independent failed
+			// disks. Its failed state remains the durable retry signal.
+			firstErr = err
+		}
+	}
+	if _, err := s.Rebalance(ctx); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
