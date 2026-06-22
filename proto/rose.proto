@@ -41,18 +41,22 @@ service Rose {
 // File requests
 message OpenRequest {
   string path = 1;
+  string operation_key = 2;
 }
 
 message OpenResponse {
   int64 handle = 1;
+  int64 acknowledged_offset = 2;
 }
 
 message WriteRequest {
   int64 handle = 1;
   bytes buffer = 2;
+  int64 offset = 3;
 }
 
 message WriteResponse {
+  int64 acknowledged_offset = 1;
 }
 
 message ReadRequest {
@@ -110,6 +114,9 @@ message OpenSnapshotRequest {
 
 message CloseRequest {
   int64 handle = 1;
+  // Client-generated, stable across retries.  Repeating Close with the same
+  // key returns the outcome of the original write rather than appending again.
+  string idempotency_key = 2;
 }
 
 message CloseResponse {

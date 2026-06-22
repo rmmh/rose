@@ -77,6 +77,7 @@ func (MaintenanceJobState) EnumDescriptor() ([]byte, []int) {
 type OpenRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	OperationKey  string                 `protobuf:"bytes,2,opt,name=operation_key,json=operationKey,proto3" json:"operation_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -118,11 +119,19 @@ func (x *OpenRequest) GetPath() string {
 	return ""
 }
 
+func (x *OpenRequest) GetOperationKey() string {
+	if x != nil {
+		return x.OperationKey
+	}
+	return ""
+}
+
 type OpenResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Handle        int64                  `protobuf:"varint,1,opt,name=handle,proto3" json:"handle,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Handle             int64                  `protobuf:"varint,1,opt,name=handle,proto3" json:"handle,omitempty"`
+	AcknowledgedOffset int64                  `protobuf:"varint,2,opt,name=acknowledged_offset,json=acknowledgedOffset,proto3" json:"acknowledged_offset,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *OpenResponse) Reset() {
@@ -162,10 +171,18 @@ func (x *OpenResponse) GetHandle() int64 {
 	return 0
 }
 
+func (x *OpenResponse) GetAcknowledgedOffset() int64 {
+	if x != nil {
+		return x.AcknowledgedOffset
+	}
+	return 0
+}
+
 type WriteRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Handle        int64                  `protobuf:"varint,1,opt,name=handle,proto3" json:"handle,omitempty"`
 	Buffer        []byte                 `protobuf:"bytes,2,opt,name=buffer,proto3" json:"buffer,omitempty"`
+	Offset        int64                  `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -214,10 +231,18 @@ func (x *WriteRequest) GetBuffer() []byte {
 	return nil
 }
 
+func (x *WriteRequest) GetOffset() int64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
 type WriteResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	AcknowledgedOffset int64                  `protobuf:"varint,1,opt,name=acknowledged_offset,json=acknowledgedOffset,proto3" json:"acknowledged_offset,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *WriteResponse) Reset() {
@@ -248,6 +273,13 @@ func (x *WriteResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use WriteResponse.ProtoReflect.Descriptor instead.
 func (*WriteResponse) Descriptor() ([]byte, []int) {
 	return file_proto_rose_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *WriteResponse) GetAcknowledgedOffset() int64 {
+	if x != nil {
+		return x.AcknowledgedOffset
+	}
+	return 0
 }
 
 type ReadRequest struct {
@@ -831,10 +863,13 @@ func (x *OpenSnapshotRequest) GetPath() string {
 }
 
 type CloseRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Handle        int64                  `protobuf:"varint,1,opt,name=handle,proto3" json:"handle,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Handle int64                  `protobuf:"varint,1,opt,name=handle,proto3" json:"handle,omitempty"`
+	// Client-generated, stable across retries.  Repeating Close with the same
+	// key returns the outcome of the original write rather than appending again.
+	IdempotencyKey string `protobuf:"bytes,2,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CloseRequest) Reset() {
@@ -872,6 +907,13 @@ func (x *CloseRequest) GetHandle() int64 {
 		return x.Handle
 	}
 	return 0
+}
+
+func (x *CloseRequest) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
+	}
+	return ""
 }
 
 type CloseResponse struct {
@@ -2137,15 +2179,19 @@ var File_proto_rose_proto protoreflect.FileDescriptor
 
 const file_proto_rose_proto_rawDesc = "" +
 	"\n" +
-	"\x10proto/rose.proto\x12\arose.v1\"!\n" +
+	"\x10proto/rose.proto\x12\arose.v1\"F\n" +
 	"\vOpenRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"&\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12#\n" +
+	"\roperation_key\x18\x02 \x01(\tR\foperationKey\"W\n" +
 	"\fOpenResponse\x12\x16\n" +
-	"\x06handle\x18\x01 \x01(\x03R\x06handle\">\n" +
+	"\x06handle\x18\x01 \x01(\x03R\x06handle\x12/\n" +
+	"\x13acknowledged_offset\x18\x02 \x01(\x03R\x12acknowledgedOffset\"V\n" +
 	"\fWriteRequest\x12\x16\n" +
 	"\x06handle\x18\x01 \x01(\x03R\x06handle\x12\x16\n" +
-	"\x06buffer\x18\x02 \x01(\fR\x06buffer\"\x0f\n" +
-	"\rWriteResponse\"U\n" +
+	"\x06buffer\x18\x02 \x01(\fR\x06buffer\x12\x16\n" +
+	"\x06offset\x18\x03 \x01(\x03R\x06offset\"@\n" +
+	"\rWriteResponse\x12/\n" +
+	"\x13acknowledged_offset\x18\x01 \x01(\x03R\x12acknowledgedOffset\"U\n" +
 	"\vReadRequest\x12\x16\n" +
 	"\x06handle\x18\x01 \x01(\x03R\x06handle\x12\x16\n" +
 	"\x06offset\x18\x02 \x01(\x03R\x06offset\x12\x16\n" +
@@ -2175,9 +2221,10 @@ const file_proto_rose_proto_rawDesc = "" +
 	"\x13OpenSnapshotRequest\x12\x1f\n" +
 	"\vsnapshot_id\x18\x01 \x01(\x04R\n" +
 	"snapshotId\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\"&\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\"O\n" +
 	"\fCloseRequest\x12\x16\n" +
-	"\x06handle\x18\x01 \x01(\x03R\x06handle\"\x0f\n" +
+	"\x06handle\x18\x01 \x01(\x03R\x06handle\x12'\n" +
+	"\x0fidempotency_key\x18\x02 \x01(\tR\x0eidempotencyKey\"\x0f\n" +
 	"\rCloseResponse\"\x84\x01\n" +
 	"\x0fMakeVlogRequest\x12+\n" +
 	"\x11protection_scheme\x18\x01 \x01(\tR\x10protectionScheme\x12\x1f\n" +

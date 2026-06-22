@@ -180,6 +180,10 @@ type plogClientAdapter struct{ p *Plog }
 func (a plogClientAdapter) Write(_ context.Context, txnID int64, data []byte) (int64, error) {
 	return a.p.Write(txnID, data)
 }
+
+func (a plogClientAdapter) EnsureAppend(_ context.Context, offset int64, data []byte) error {
+	return a.p.EnsureAppend(offset, data)
+}
 func (a plogClientAdapter) Read(_ context.Context, offset int64, length int) ([]byte, error) {
 	return a.p.Read(offset, length)
 }

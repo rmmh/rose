@@ -67,6 +67,8 @@ type Server struct {
 	handlesMu         sync.Mutex
 	handles           map[int64]*FileHandle
 	handleCounter     int64
+	writeOpsMu        sync.Mutex
+	writeOps          map[int64]*sync.Mutex
 }
 
 // MaxVlogBytes is the 32-bit byte-addressable virtual-log boundary described
@@ -90,6 +92,7 @@ func NewServer(db *meta.DB) *Server {
 		rebalance:          DefaultRebalancePolicy(),
 		maintenanceEvery:   time.Second,
 		handles:            make(map[int64]*FileHandle),
+		writeOps:           make(map[int64]*sync.Mutex),
 	}
 	s.resetDiskStates()
 	return s
@@ -297,6 +300,21 @@ func (s *Server) Recover(ctx context.Context) error {
 		vlogs[info.ID] = vlog
 	}
 	s.vlogs = vlogs
+
+	// Prepared write operations retain their exact chunk reservations. Reconcile
+	// any planned-but-unmarked chunks now that plogs are mounted again; a client
+	// retry can then continue from the durable acknowledged offset without
+	// creating a second append. Tails remain in metadata until their caller
+	// retries the corresponding Write or Close.
+	prepared, err := s.db.PreparedWriteOps(ctx)
+	if err != nil {
+		return err
+	}
+	for _, op := range prepared {
+		if err := s.finishPlannedWriteChunks(ctx, op); err != nil {
+			return fmt.Errorf("recover write operation %d: %w", op.ID, err)
+		}
+	}
 
 	// Resume any maintenance work interrupted by the crash/restart.
 	jobs, err := s.db.RunningJobs(ctx)
@@ -511,6 +529,10 @@ func (c *localPlogClient) Read(ctx context.Context, offset int64, length int) ([
 	return c.plog.Read(offset, length)
 }
 
+func (c *localPlogClient) EnsureAppend(ctx context.Context, offset int64, data []byte) error {
+	return c.plog.EnsureAppend(offset, data)
+}
+
 func (c *localPlogClient) Commit(ctx context.Context, txnID int64) error {
 	return c.plog.Commit()
 }
@@ -572,6 +594,10 @@ func (c offlinePlogClient) Write(ctx context.Context, txnID int64, data []byte) 
 
 func (c offlinePlogClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
 	return nil, c.err()
+}
+
+func (c offlinePlogClient) EnsureAppend(ctx context.Context, offset int64, data []byte) error {
+	return c.err()
 }
 
 func (c offlinePlogClient) Commit(ctx context.Context, txnID int64) error {

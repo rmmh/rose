@@ -95,6 +95,41 @@ func initSchema(db *sql.DB, durable bool) error {
 			compressed_len INTEGER NOT NULL
 		);
 
+		-- A file write is prepared durably before any physical shard receives its
+		-- bytes.  The idempotency key is the client's stable operation identity;
+		-- chunk rows retain the payload and its exact reserved vlog location so a
+		-- later recovery/retry never invents a second append.
+		CREATE TABLE IF NOT EXISTS write_op (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			idempotency_key TEXT NOT NULL UNIQUE,
+			path TEXT NOT NULL,
+			state TEXT NOT NULL, -- prepared | committed | abandoned
+			created_at INTEGER NOT NULL,
+			file_id INTEGER NOT NULL DEFAULT 0,
+			acknowledged_offset INTEGER NOT NULL DEFAULT 0,
+			tail BLOB NOT NULL DEFAULT X''
+		);
+
+		CREATE TABLE IF NOT EXISTS write_op_chunk (
+			write_op_id INTEGER NOT NULL REFERENCES write_op(id) ON DELETE CASCADE,
+			chunk_idx INTEGER NOT NULL,
+			data BLOB NOT NULL,
+			hash BLOB NOT NULL,
+			vlog_id INTEGER NOT NULL,
+			vaddr_offset INTEGER NOT NULL,
+			logical_len INTEGER NOT NULL,
+			state TEXT NOT NULL DEFAULT 'planned', -- planned | durable
+			PRIMARY KEY (write_op_id, chunk_idx)
+		);
+
+		-- A vlog may be appended by at most one nonterminal write operation.
+		CREATE TABLE IF NOT EXISTS vlog_lease (
+			vlog_id INTEGER PRIMARY KEY REFERENCES vlog(id) ON DELETE CASCADE,
+			write_op_id INTEGER NOT NULL REFERENCES write_op(id) ON DELETE CASCADE,
+			ordinal INTEGER NOT NULL,
+			UNIQUE (write_op_id, ordinal)
+		);
+
 		CREATE TABLE IF NOT EXISTS vlog (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			length INTEGER NOT NULL DEFAULT 0,
@@ -210,6 +245,15 @@ func initSchema(db *sql.DB, durable bool) error {
 	if _, err := db.Exec(`ALTER TABLE node ADD COLUMN state TEXT NOT NULL DEFAULT 'working'`); err != nil {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("add node.state column: %w", err)
+		}
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE write_op ADD COLUMN acknowledged_offset INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE write_op ADD COLUMN tail BLOB NOT NULL DEFAULT X''`,
+		`ALTER TABLE write_op_chunk ADD COLUMN state TEXT NOT NULL DEFAULT 'planned'`,
+	} {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("migrate write operation metadata: %w", err)
 		}
 	}
 	return nil

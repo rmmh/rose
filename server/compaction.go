@@ -81,6 +81,15 @@ func (s *Server) Compact(ctx context.Context, policy CompactionPolicy) (int, err
 func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
+	leased, err := s.db.VlogLeased(ctx, sourceID)
+	if err != nil {
+		return fmt.Errorf("compact: check lease for vlog %d: %w", sourceID, err)
+	}
+	if leased {
+		// A write operation owns the append cursor and may have planned chunks
+		// not yet published. Retiring it would invalidate that durable intent.
+		return nil
+	}
 
 	source, ok := s.vlogs[sourceID]
 	if !ok {

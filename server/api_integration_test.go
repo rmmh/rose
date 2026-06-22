@@ -67,6 +67,55 @@ func readHandle(t *testing.T, client pb.RoseClient, handle int64) []byte {
 	return res.GetBuffer()
 }
 
+func TestWriteOperationRetriesOpenWriteAndClose(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+	data := bytes.Repeat([]byte("retryable-stream-data"), 600)
+	first, err := client.Open(ctx, &pb.OpenRequest{Path: "/retry", OperationKey: "op-retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.Open(ctx, &pb.OpenRequest{Path: "/retry", OperationKey: "op-retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GetAcknowledgedOffset() != 0 || second.GetAcknowledgedOffset() != 0 {
+		t.Fatal("new operation acknowledged data")
+	}
+	write := &pb.WriteRequest{Handle: first.GetHandle(), Offset: 0, Buffer: data}
+	result, err := client.Write(ctx, write)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.GetAcknowledgedOffset() != int64(len(data)) {
+		t.Fatalf("ack = %d", result.GetAcknowledgedOffset())
+	}
+	result, err = client.Write(ctx, write)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.GetAcknowledgedOffset() != int64(len(data)) {
+		t.Fatalf("retry ack = %d", result.GetAcknowledgedOffset())
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{Handle: first.GetHandle(), IdempotencyKey: "op-retry"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{Handle: first.GetHandle(), IdempotencyKey: "op-retry"}); err != nil {
+		t.Fatal(err)
+	}
+	read, err := client.Open(ctx, &pb.OpenRequest{Path: "/retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.Read(ctx, &pb.ReadRequest{Handle: read.GetHandle(), Length: int64(len(data))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.GetBuffer(), data) {
+		t.Fatal("retried operation published different content")
+	}
+}
+
 func TestFileSnapshotNamespaceLifecycleOverGRPC(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()

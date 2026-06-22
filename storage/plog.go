@@ -135,6 +135,10 @@ func calcPhysical(logical int64) int64 {
 func (p *Plog) Write(txnID int64, data []byte) (int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.writeLocked(data)
+}
+
+func (p *Plog) writeLocked(data []byte) (int64, error) {
 
 	offset := p.logicalLength
 	pos := 0
@@ -155,6 +159,37 @@ func (p *Plog) Write(txnID int64, data []byte) (int64, error) {
 		}
 	}
 	return offset, nil
+}
+
+// EnsureAppend makes the byte range [offset, offset+len(data)) present without
+// ever appending a duplicate.  It is the physical retry primitive used by a
+// leased vlog after an RPC or a multi-shard fan-out has an unknown outcome.
+// Existing bytes must match exactly; a mismatch is corruption or a conflicting
+// reservation, not a condition that can safely be retried.
+func (p *Plog) EnsureAppend(offset int64, data []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if offset < 0 || offset > p.logicalLength {
+		return fmt.Errorf("ensure append plog %d: offset %d beyond length %d", p.id, offset, p.logicalLength)
+	}
+	overlap := p.logicalLength - offset
+	if overlap > int64(len(data)) {
+		overlap = int64(len(data))
+	}
+	if overlap > 0 {
+		existing, err := p.readLocked(offset, int(overlap))
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(existing, data[:overlap]) {
+			return fmt.Errorf("ensure append plog %d: existing bytes differ at offset %d", p.id, offset)
+		}
+	}
+	if overlap == int64(len(data)) {
+		return nil
+	}
+	_, err := p.writeLocked(data[overlap:])
+	return err
 }
 
 // sealSector writes the now-full open sector to its fixed physical position and
@@ -193,6 +228,10 @@ func (p *Plog) sealSector() error {
 func (p *Plog) Read(offset int64, length int) ([]byte, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.readLocked(offset, length)
+}
+
+func (p *Plog) readLocked(offset int64, length int) ([]byte, error) {
 
 	if offset < 0 || length < 0 {
 		return nil, fmt.Errorf("read plog %d: invalid offset %d length %d", p.id, offset, length)

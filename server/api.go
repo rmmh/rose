@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	chunkers "github.com/PlakarKorp/go-cdc-chunkers"
@@ -20,7 +21,8 @@ type FileHandle struct {
 	id         int64
 	path       string
 	snapshotID uint64
-	buffer     []byte
+	writeOpID  int64
+	writeKey   string
 }
 
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
@@ -40,15 +42,33 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	hid := s.handleCounter
 	s.handleCounter++
 
-	s.handles[hid] = &FileHandle{
-		id:     id,
-		path:   path,
-		buffer: make([]byte, 0),
+	h := &FileHandle{
+		id:   id,
+		path: path,
 	}
+	if req.GetOperationKey() != "" {
+		op, err := s.db.CreateWriteOp(ctx, req.GetOperationKey(), path, nil)
+		if err != nil {
+			return nil, err
+		}
+		if op.Path != path {
+			return nil, fmt.Errorf("write operation key is already bound to %q", op.Path)
+		}
+		h.writeOpID, h.writeKey = op.ID, op.IdempotencyKey
+	}
+	s.handles[hid] = h
 
 	slog.Info("Open", "handle", hid, "id", id, "path", path)
 
-	return &pb.OpenResponse{Handle: hid}, nil
+	ack := int64(0)
+	if h.writeOpID != 0 {
+		op, err := s.db.WriteOpByKey(ctx, h.writeKey)
+		if err != nil {
+			return nil, err
+		}
+		ack = op.AcknowledgedOffset
+	}
+	return &pb.OpenResponse{Handle: hid, AcknowledgedOffset: ack}, nil
 }
 
 func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) (*pb.OpenResponse, error) {
@@ -113,9 +133,8 @@ func (s *Server) DeleteSnapshot(ctx context.Context, req *pb.DeleteSnapshotReque
 
 func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 	s.handlesMu.Lock()
-	defer s.handlesMu.Unlock()
-
 	h, ok := s.handles[req.GetHandle()]
+	s.handlesMu.Unlock()
 	if !ok {
 		slog.Error("Write failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
@@ -123,11 +142,41 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 	if h.snapshotID != 0 {
 		return nil, fmt.Errorf("snapshot handles are read-only")
 	}
-
-	slog.Info("Write", "handle", req.GetHandle())
-
-	h.buffer = append(h.buffer, req.GetBuffer()...)
-	return &pb.WriteResponse{}, nil
+	if err := s.ensureWriteOperation(ctx, h, req.GetHandle()); err != nil {
+		return nil, err
+	}
+	mu := s.writeOperationLock(h.writeOpID)
+	mu.Lock()
+	defer mu.Unlock()
+	op, err := s.db.WriteOpByKey(ctx, h.writeKey)
+	if err != nil {
+		return nil, err
+	}
+	if op.State == meta.WriteOpCommitted {
+		return &pb.WriteResponse{AcknowledgedOffset: op.AcknowledgedOffset}, nil
+	}
+	if req.GetOffset() > op.AcknowledgedOffset {
+		return nil, fmt.Errorf("write offset %d skips acknowledged offset %d", req.GetOffset(), op.AcknowledgedOffset)
+	}
+	if req.GetOffset() < op.AcknowledgedOffset {
+		if req.GetOffset()+int64(len(req.GetBuffer())) > op.AcknowledgedOffset {
+			return nil, fmt.Errorf("write overlaps acknowledged range")
+		}
+		return &pb.WriteResponse{AcknowledgedOffset: op.AcknowledgedOffset}, nil
+	}
+	// A previous attempt may have durably recorded this exact input as the
+	// operation's tail before its response was lost.  Do not append it twice.
+	if len(op.Tail) > 0 {
+		if !bytes.Equal(op.Tail, req.GetBuffer()) {
+			return nil, fmt.Errorf("retry data differs from pending write")
+		}
+	} else if err := s.db.UpdateWriteOpStream(ctx, op.ID, op.AcknowledgedOffset, append([]byte(nil), req.GetBuffer()...)); err != nil {
+		return nil, err
+	}
+	if err := s.flushWriteOp(ctx, op.ID, op.AcknowledgedOffset+int64(len(req.GetBuffer()))); err != nil {
+		return nil, err
+	}
+	return &pb.WriteResponse{AcknowledgedOffset: op.AcknowledgedOffset + int64(len(req.GetBuffer()))}, nil
 }
 
 func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
@@ -140,24 +189,6 @@ func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRespons
 	if !ok {
 		slog.Error("Read failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
-	}
-
-	// If the file handle is currently open and has a buffer (e.g., being written to right now), read from it.
-	if len(h.buffer) > 0 {
-		slog.Info("Read from buffer", "handle", req.GetHandle(), "offset", req.GetOffset(), "length", req.GetLength())
-
-		if req.GetOffset() >= int64(len(h.buffer)) {
-			return &pb.ReadResponse{Buffer: nil}, nil
-		}
-
-		end := req.GetOffset() + req.GetLength()
-		if end > int64(len(h.buffer)) {
-			end = int64(len(h.buffer))
-		}
-
-		return &pb.ReadResponse{
-			Buffer: h.buffer[req.GetOffset():end],
-		}, nil
 	}
 
 	if h.id == 0 {
@@ -219,17 +250,6 @@ func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRespons
 	return &pb.ReadResponse{Buffer: out}, nil
 }
 func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.GetattrResponse, error) {
-	// First check memory buffers for un-closed handles
-	s.handlesMu.Lock()
-	for _, h := range s.handles {
-		if h.path == req.GetPath() {
-			size := int64(len(h.buffer))
-			s.handlesMu.Unlock()
-			return &pb.GetattrResponse{Size: size}, nil
-		}
-	}
-	s.handlesMu.Unlock()
-
 	size, err := s.db.GetFileSize(ctx, req.GetPath())
 	if err != nil {
 		slog.Error("Getattr failed", "path", req.GetPath(), "error", err)
@@ -268,92 +288,222 @@ func (s *Server) activeVlogForAppend(ctx context.Context, bucket string, n int) 
 	return s.provisionBucketVlogLocked(ctx, bucket)
 }
 
+func (s *Server) writeOperationLock(id int64) *sync.Mutex {
+	s.writeOpsMu.Lock()
+	defer s.writeOpsMu.Unlock()
+	mu := s.writeOps[id]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		s.writeOps[id] = mu
+	}
+	return mu
+}
+
+// ensureWriteOperation lazily supplies an operation for legacy callers that
+// opened a read handle and then wrote it. New clients must supply operation_key
+// to Open so an unknown Open outcome itself is retryable.
+func (s *Server) ensureWriteOperation(ctx context.Context, h *FileHandle, handle int64) error {
+	if h.writeOpID != 0 {
+		return nil
+	}
+	s.handlesMu.Lock()
+	defer s.handlesMu.Unlock()
+	if h.writeOpID != 0 {
+		return nil
+	}
+	key := fmt.Sprintf("legacy-handle-%d", handle)
+	op, err := s.db.CreateWriteOp(ctx, key, h.path, nil)
+	if err != nil {
+		return err
+	}
+	h.writeOpID, h.writeKey = op.ID, key
+	return nil
+}
+
+func (s *Server) leasedVlogForWrite(ctx context.Context, opID int64, path string, n int) (uint32, *storage.Vlog, error) {
+	if int64(n) > MaxVlogBytes {
+		return 0, nil, fmt.Errorf("chunk exceeds max vlog size")
+	}
+	leases, err := s.db.WriteOpLeases(ctx, opID)
+	if err != nil {
+		return 0, nil, err
+	}
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	for i := len(leases) - 1; i >= 0; i-- {
+		if v := s.vlogs[leases[i]]; v != nil && v.Length()+int64(n) <= MaxVlogBytes {
+			return leases[i], v, nil
+		}
+	}
+	pol := s.bucketPolicyLocked(bucketOf(path))
+	// Prefer a compatible, currently unlocked vlog.  The unique vlog_lease row
+	// arbitrates concurrent claimers; a uniqueness error simply means another
+	// operation won that candidate.
+	for id, v := range s.vlogs {
+		if v.Length()+int64(n) > MaxVlogBytes {
+			continue
+		}
+		info, err := s.db.GetVlog(ctx, id)
+		if err != nil {
+			continue
+		}
+		if info.ProtectionScheme != pol.ProtectionScheme || int(info.DataShards) != pol.DataShards || int(info.ParityShards) != pol.ParityShards {
+			continue
+		}
+		if err := s.db.ClaimVlogLease(ctx, id, opID, len(leases)); err == nil {
+			return id, v, nil
+		}
+	}
+	id, v, err := s.provisionVlogLocked(ctx, pol.ProtectionScheme, pol.DataShards, pol.ParityShards)
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := s.db.ClaimVlogLease(ctx, id, opID, len(leases)); err != nil {
+		return 0, nil, err
+	}
+	return id, v, nil
+}
+
+func (s *Server) flushWriteOp(ctx context.Context, opID, acknowledged int64) error {
+	// Load by id through the prepared scan: this keeps the metadata API small
+	// while recovery uses the same durable operation listing.
+	ops, err := s.db.PreparedWriteOps(ctx)
+	if err != nil {
+		return err
+	}
+	var found meta.WriteOp
+	for _, candidate := range ops {
+		if candidate.ID == opID {
+			found = candidate
+			break
+		}
+	}
+	if found.ID == 0 {
+		return fmt.Errorf("write operation %d is not prepared", opID)
+	}
+	if err := s.finishPlannedWriteChunks(ctx, found); err != nil {
+		return err
+	}
+	if len(found.Tail) == 0 {
+		if acknowledged != found.AcknowledgedOffset {
+			return fmt.Errorf("write operation %d has no pending data", opID)
+		}
+		return nil
+	}
+	rd := bytes.NewReader(found.Tail)
+	chunker, err := chunkers.NewChunker("fastcdc", rd, nil)
+	if err != nil {
+		return err
+	}
+	chunks, err := s.db.WriteOpChunks(ctx, opID)
+	if err != nil {
+		return err
+	}
+	index := len(chunks)
+	for {
+		data, nextErr := chunker.Next()
+		if nextErr != nil && nextErr != io.EOF {
+			return nextErr
+		}
+		if len(data) > 0 {
+			owned := append([]byte(nil), data...)
+			vlogID, v, err := s.leasedVlogForWrite(ctx, opID, found.Path, len(owned))
+			if err != nil {
+				return err
+			}
+			hash := sha256.Sum256(owned)
+			if err := s.db.AppendWriteOpChunk(ctx, opID, meta.WriteOpChunk{Index: index, Data: owned, Hash: hash[:15], VlogID: vlogID, VaddrOffset: v.Length(), LogicalLen: len(owned)}); err != nil {
+				return err
+			}
+			if err := s.finishPlannedWriteChunks(ctx, found); err != nil {
+				return err
+			}
+			index++
+		}
+		if nextErr == io.EOF {
+			break
+		}
+	}
+	return s.db.UpdateWriteOpStream(ctx, opID, acknowledged, nil)
+}
+
+func (s *Server) finishPlannedWriteChunks(ctx context.Context, op meta.WriteOp) error {
+	chunks, err := s.db.WriteOpChunks(ctx, op.ID)
+	if err != nil {
+		return err
+	}
+	for _, chunk := range chunks {
+		if chunk.State == meta.WriteChunkDurable {
+			continue
+		}
+		s.vlogMu.Lock()
+		v := s.vlogs[chunk.VlogID]
+		s.vlogMu.Unlock()
+		if v == nil {
+			return fmt.Errorf("leased vlog %d is not mounted", chunk.VlogID)
+		}
+		ready, err := s.CommitReady(ctx, chunk.VlogID)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return fmt.Errorf("vlog %d is not commit-ready", chunk.VlogID)
+		}
+		if err := v.EnsureWrite(ctx, chunk.VaddrOffset, chunk.Data); err != nil {
+			return err
+		}
+		if err := v.Commit(ctx, op.ID); err != nil {
+			return err
+		}
+		if err := s.db.SetVlogLength(ctx, chunk.VlogID, v.Length()); err != nil {
+			return err
+		}
+		if err := s.db.MarkWriteOpChunkDurable(ctx, op.ID, chunk.Index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResponse, error) {
 	s.handlesMu.Lock()
 	h, ok := s.handles[req.GetHandle()]
+	s.handlesMu.Unlock()
 	if !ok {
-		s.handlesMu.Unlock()
-		return nil, fmt.Errorf("invalid handle")
+		if req.GetIdempotencyKey() == "" {
+			return nil, fmt.Errorf("invalid handle")
+		}
+		op, err := s.db.WriteOpByKey(ctx, req.GetIdempotencyKey())
+		if err != nil {
+			return nil, err
+		}
+		if op.State == meta.WriteOpCommitted {
+			return &pb.CloseResponse{}, nil
+		}
+		return nil, fmt.Errorf("write operation %q has no active handle", req.GetIdempotencyKey())
 	}
-
-	slog.Info("Close", "handle", req.GetHandle(), "path", h.path)
+	if h.writeOpID == 0 {
+		delete(s.handles, req.GetHandle())
+		return &pb.CloseResponse{}, nil
+	}
+	mu := s.writeOperationLock(h.writeOpID)
+	mu.Lock()
+	defer mu.Unlock()
+	op, err := s.db.WriteOpByKey(ctx, h.writeKey)
+	if err != nil {
+		return nil, err
+	}
+	if op.State != meta.WriteOpCommitted {
+		if err := s.flushWriteOp(ctx, op.ID, op.AcknowledgedOffset); err != nil {
+			return nil, err
+		}
+		if _, err := s.db.CommitWriteOp(ctx, op.ID, time.Now().UnixNano()); err != nil {
+			return nil, fmt.Errorf("publish write operation: %w", err)
+		}
+	}
+	s.handlesMu.Lock()
 	delete(s.handles, req.GetHandle())
 	s.handlesMu.Unlock()
-
-	if len(h.buffer) > 0 {
-		// Each file's chunks land in its bucket's vlogs, written under the bucket's
-		// protection policy (EC, N-way DUPLICATE, or the default mirror).
-		bucket := bucketOf(h.path)
-		rd := bytes.NewReader(h.buffer)
-		chunker, err := chunkers.NewChunker("fastcdc", rd, nil)
-		if err != nil {
-			slog.Error("Failed to create chunker", "error", err)
-			return nil, fmt.Errorf("new chunker: %w", err)
-		}
-
-		var placements []meta.ChunkPlacement
-		usedVlogs := make(map[uint32]*storage.Vlog)
-		for {
-			chunkData, err := chunker.Next()
-			if err != nil && err != io.EOF {
-				slog.Error("Chunking error", "error", err)
-				return nil, fmt.Errorf("chunking error: %w", err)
-			}
-			if len(chunkData) > 0 {
-				vlogID, v, err := s.activeVlogForAppend(ctx, bucket, len(chunkData))
-				if err != nil {
-					return nil, fmt.Errorf("select active vlog: %w", err)
-				}
-				hashBytes := sha256.Sum256(chunkData)
-				chunkHash := hashBytes[:15]
-
-				offset, wErr := v.Write(ctx, 0, chunkData)
-				if wErr != nil {
-					slog.Error("Failed to write to vlog", "vlog_id", vlogID, "error", wErr)
-					return nil, fmt.Errorf("write vlog: %w", wErr)
-				}
-
-				placements = append(placements, meta.ChunkPlacement{
-					Hash:          chunkHash,
-					VlogID:        vlogID,
-					VaddrOffset:   offset,
-					LogicalLen:    len(chunkData),
-					CompressedLen: len(chunkData),
-				})
-				usedVlogs[vlogID] = v
-			}
-			if err == io.EOF {
-				break
-			}
-		}
-
-		// Refuse to acknowledge the write unless the vlog still has enough live
-		// shards to hold it durably. With too many backing disks down the server
-		// degrades to read-only instead of claiming durability it cannot provide.
-		for vlogID, v := range usedVlogs {
-			ready, err := s.CommitReady(ctx, vlogID)
-			if err != nil {
-				return nil, fmt.Errorf("check commit readiness: %w", err)
-			}
-			if !ready {
-				return nil, fmt.Errorf("vlog %d degraded: too few live shards to durably commit", vlogID)
-			}
-			if err := v.Commit(ctx, 0); err != nil {
-				return nil, fmt.Errorf("commit vlog: %w", err)
-			}
-			if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
-				return nil, fmt.Errorf("persist vlog cursor: %w", err)
-			}
-		}
-
-		// The vlog bytes are durable before metadata publishes references to
-		// them. A crash here leaves the chunks as orphan log data reclaimed by
-		// later compaction, never a dangling metadata reference.
-		if _, err := s.db.CommitFile(ctx, h.path, time.Now().UnixNano(), placements); err != nil {
-			return nil, fmt.Errorf("publish file metadata: %w", err)
-		}
-	}
-
 	return &pb.CloseResponse{}, nil
 }
 

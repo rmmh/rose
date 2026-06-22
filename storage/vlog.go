@@ -20,6 +20,13 @@ type committingPlogClient interface {
 	Commit(ctx context.Context, txnID int64) error
 }
 
+// positionedPlogClient provides an idempotent physical append at a reserved
+// logical offset.  It is deliberately separate from PlogClient so old read
+// paths and simple test clients do not accidentally claim retry safety.
+type positionedPlogClient interface {
+	EnsureAppend(ctx context.Context, offset int64, data []byte) error
+}
+
 type scrubbablePlogClient interface {
 	Scrub() (ScrubResult, error)
 }
@@ -168,6 +175,68 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 	}
 
 	return 0, fmt.Errorf("unknown protection scheme: %s", v.scheme)
+}
+
+// EnsureWrite makes data durable at an already-reserved virtual offset.  A
+// lease gives one write operation exclusive ownership of a vlog, while this
+// method makes retries safe if a previous fan-out reached only some shards.
+// The caller must Commit before metadata records the chunk as durable.
+func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	v.writeMu.Lock()
+	defer v.writeMu.Unlock()
+	if offset != atomic.LoadInt64(&v.length) {
+		return fmt.Errorf("ensure write vlog %d: offset %d does not match length %d", v.id, offset, v.length)
+	}
+
+	shards := make([][]byte, len(v.clients))
+	physicalOffset := offset
+	advance := int64(len(data))
+	switch v.scheme {
+	case "NONE", "DUPLICATE":
+		for i := range shards {
+			shards[i] = data
+		}
+	case "EC":
+		owned := append([]byte(nil), data...)
+		var err error
+		shards, err = v.encoder.Split(owned)
+		if err != nil {
+			return fmt.Errorf("split for EC: %w", err)
+		}
+		if err := v.encoder.Encode(shards); err != nil {
+			return fmt.Errorf("encode for EC: %w", err)
+		}
+		physicalOffset = offset / int64(v.dataShards)
+		advance = int64(len(shards[0]) * v.dataShards)
+	default:
+		return fmt.Errorf("unknown protection scheme: %s", v.scheme)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(v.clients))
+	for i, client := range v.clients {
+		positioned, ok := client.(positionedPlogClient)
+		if !ok {
+			return fmt.Errorf("vlog %d plog client does not support positioned writes", v.id)
+		}
+		wg.Add(1)
+		go func(c positionedPlogClient, shard []byte) {
+			defer wg.Done()
+			if err := c.EnsureAppend(ctx, physicalOffset, shard); err != nil {
+				errs <- err
+			}
+		}(positioned, shards[i])
+	}
+	wg.Wait()
+	close(errs)
+	if err := <-errs; err != nil {
+		return err
+	}
+	atomic.AddInt64(&v.length, advance)
+	return nil
 }
 
 // Read reads logical 'length' bytes starting from logical 'offset' in the Virtual Log.
