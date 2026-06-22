@@ -31,9 +31,13 @@ func open(path string, durable bool) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite db: %w", err)
 	}
-	if !durable {
-		db.SetMaxOpenConns(1)
-	}
+	// Serialize all access through a single connection. SQLite admits one writer
+	// at a time; with WAL and several pooled connections, concurrent writers from
+	// independent gRPC requests race into SQLITE_BUSY/BUSY_SNAPSHOT, which
+	// busy_timeout does not retry. One connection turns that contention into
+	// in-process queueing instead. Metadata transactions are short, so the
+	// throughput cost is small next to the correctness win.
+	db.SetMaxOpenConns(1)
 
 	if err := initSchema(db, durable); err != nil {
 		db.Close()

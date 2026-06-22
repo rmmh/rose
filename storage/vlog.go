@@ -35,6 +35,14 @@ type Vlog struct {
 	id     uint32
 	length int64 // Atomic tracker of logical length
 
+	// writeMu serializes appends to this vlog. A virtual offset is reserved from
+	// length and the same bytes are appended to every backing plog; those two
+	// steps must be atomic per vlog or two concurrent writers interleave and a
+	// chunk's reserved virtual offset stops matching where its bytes physically
+	// landed. Distinct vlogs (e.g. different buckets' active vlogs) still write
+	// concurrently; reads never take this lock.
+	writeMu sync.Mutex
+
 	scheme       string
 	dataShards   int
 	parityShards int
@@ -75,6 +83,12 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 	if len(data) == 0 {
 		return atomic.LoadInt64(&v.length), nil
 	}
+
+	// Serialize appends: the offset reservation below and the physical plog
+	// appends must happen as one unit, or concurrent writers interleave and a
+	// chunk's virtual offset no longer matches where its bytes landed.
+	v.writeMu.Lock()
+	defer v.writeMu.Unlock()
 
 	logicalLen := int64(len(data))
 
