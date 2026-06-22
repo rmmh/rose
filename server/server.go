@@ -60,6 +60,10 @@ type Server struct {
 	handleCounter     int64
 }
 
+// MaxVlogBytes is the 32-bit byte-addressable virtual-log boundary described
+// in plan.txt. Writers must roll to a fresh vlog before crossing this limit.
+const MaxVlogBytes int64 = 4 << 30
+
 func NewServer(db *meta.DB) *Server {
 	s := &Server{
 		db:               db,

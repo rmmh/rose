@@ -255,6 +255,28 @@ func (s *Server) getOrCreateActiveVlog(ctx context.Context) (uint32, error) {
 	return id, nil
 }
 
+// activeVlogForAppend rolls the active vlog before an append would cross the
+// 32-bit virtual-offset boundary. The caller does not hold vlogMu.
+func (s *Server) activeVlogForAppend(ctx context.Context, n int) (uint32, *storage.Vlog, error) {
+	if int64(n) > MaxVlogBytes {
+		return 0, nil, fmt.Errorf("append of %d bytes exceeds max vlog size %d", n, MaxVlogBytes)
+	}
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	if s.activeVlog != 0 {
+		if v, ok := s.vlogs[s.activeVlog]; ok && v.Length()+int64(n) <= MaxVlogBytes {
+			return s.activeVlog, v, nil
+		}
+		s.activeVlog = 0
+	}
+	id, v, err := s.provisionVlogLocked(ctx, "DUPLICATE", 1, 0)
+	if err != nil {
+		return 0, nil, err
+	}
+	s.activeVlog = id
+	return id, v, nil
+}
+
 func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResponse, error) {
 	s.handlesMu.Lock()
 	h, ok := s.handles[req.GetHandle()]
@@ -268,17 +290,6 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 	s.handlesMu.Unlock()
 
 	if len(h.buffer) > 0 {
-		vlogID, err := s.getOrCreateActiveVlog(ctx)
-		if err != nil {
-			slog.Error("Failed to get active vlog", "error", err)
-			return nil, fmt.Errorf("get active vlog: %w", err)
-		}
-
-		v, ok := s.vlogs[vlogID]
-		if !ok {
-			return nil, fmt.Errorf("active vlog %d not mounted in memory", vlogID)
-		}
-
 		rd := bytes.NewReader(h.buffer)
 		chunker, err := chunkers.NewChunker("fastcdc", rd, nil)
 		if err != nil {
@@ -287,6 +298,7 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 		}
 
 		var placements []meta.ChunkPlacement
+		usedVlogs := make(map[uint32]*storage.Vlog)
 		for {
 			chunkData, err := chunker.Next()
 			if err != nil && err != io.EOF {
@@ -294,6 +306,10 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 				return nil, fmt.Errorf("chunking error: %w", err)
 			}
 			if len(chunkData) > 0 {
+				vlogID, v, err := s.activeVlogForAppend(ctx, len(chunkData))
+				if err != nil {
+					return nil, fmt.Errorf("select active vlog: %w", err)
+				}
 				hashBytes := sha256.Sum256(chunkData)
 				chunkHash := hashBytes[:15]
 
@@ -310,6 +326,7 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 					LogicalLen:    len(chunkData),
 					CompressedLen: len(chunkData),
 				})
+				usedVlogs[vlogID] = v
 			}
 			if err == io.EOF {
 				break
@@ -319,19 +336,20 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 		// Refuse to acknowledge the write unless the vlog still has enough live
 		// shards to hold it durably. With too many backing disks down the server
 		// degrades to read-only instead of claiming durability it cannot provide.
-		ready, err := s.CommitReady(ctx, vlogID)
-		if err != nil {
-			return nil, fmt.Errorf("check commit readiness: %w", err)
-		}
-		if !ready {
-			return nil, fmt.Errorf("vlog %d degraded: too few live shards to durably commit", vlogID)
-		}
-
-		if err := v.Commit(ctx, 0); err != nil {
-			return nil, fmt.Errorf("commit vlog: %w", err)
-		}
-		if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
-			return nil, fmt.Errorf("persist vlog cursor: %w", err)
+		for vlogID, v := range usedVlogs {
+			ready, err := s.CommitReady(ctx, vlogID)
+			if err != nil {
+				return nil, fmt.Errorf("check commit readiness: %w", err)
+			}
+			if !ready {
+				return nil, fmt.Errorf("vlog %d degraded: too few live shards to durably commit", vlogID)
+			}
+			if err := v.Commit(ctx, 0); err != nil {
+				return nil, fmt.Errorf("commit vlog: %w", err)
+			}
+			if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
+				return nil, fmt.Errorf("persist vlog cursor: %w", err)
+			}
 		}
 
 		// The vlog bytes are durable before metadata publishes references to
@@ -420,6 +438,9 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 	v, ok := s.vlogs[req.GetVlogId()]
 	if !ok {
 		return nil, fmt.Errorf("vlog not found")
+	}
+	if v.Length()+int64(len(req.GetBuffer())) > MaxVlogBytes {
+		return nil, fmt.Errorf("vlog %d would exceed max size %d", req.GetVlogId(), MaxVlogBytes)
 	}
 
 	offset, err := v.Write(ctx, req.GetTxnId(), req.GetBuffer())

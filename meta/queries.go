@@ -171,6 +171,14 @@ func (d *DB) SetVlogLength(ctx context.Context, vlogID uint32, length int64) err
 	return err
 }
 
+// SetPlogLength records a logical plog length. Normal byte-backed writes derive
+// this from the file; virtual scale tests use it to model large extents without
+// allocating their contents.
+func (d *DB) SetPlogLength(ctx context.Context, plogID uint32, length int64) error {
+	_, err := d.db.ExecContext(ctx, "UPDATE plog SET length = ? WHERE id = ?", length, plogID)
+	return err
+}
+
 // AssignPlogToVlog maps a plog to a shard of a vlog.
 func (d *DB) AssignPlogToVlog(ctx context.Context, vlogID uint32, shardIdx int, plogID uint32) error {
 	_, err := d.db.ExecContext(ctx, "INSERT INTO vlog_plog (vlog_id, shard_idx, plog_id) VALUES (?, ?, ?)", vlogID, shardIdx, plogID)

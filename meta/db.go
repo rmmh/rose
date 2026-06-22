@@ -15,12 +15,27 @@ type DB struct {
 
 // Open creates or opens a metadata database at the given path.
 func Open(path string) (*DB, error) {
+	return open(path, true)
+}
+
+// OpenEphemeral opens a process-local metadata catalog for simulations and
+// scale tests. It uses SQLite's in-memory database, disables journaling and
+// synchronous writes, and constrains the pool to one connection (required for
+// :memory: databases). It must never be used for production metadata.
+func OpenEphemeral() (*DB, error) {
+	return open(":memory:", false)
+}
+
+func open(path string, durable bool) (*DB, error) {
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite db: %w", err)
 	}
+	if !durable {
+		db.SetMaxOpenConns(1)
+	}
 
-	if err := initSchema(db); err != nil {
+	if err := initSchema(db, durable); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -33,11 +48,12 @@ func (d *DB) Close() error {
 	return d.db.Close()
 }
 
-func initSchema(db *sql.DB) error {
-	_, err := db.Exec(`
-		-- Enable write-ahead logging for better concurrency and durability
-		PRAGMA journal_mode = WAL;
-		PRAGMA synchronous = FULL;
+func initSchema(db *sql.DB, durable bool) error {
+	pragmas := "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;"
+	if !durable {
+		pragmas = "PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY;"
+	}
+	_, err := db.Exec(pragmas + `
 
 		CREATE TABLE IF NOT EXISTS file (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
