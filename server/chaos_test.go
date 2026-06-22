@@ -25,10 +25,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
@@ -47,6 +49,28 @@ const (
 // ramVolumeSeq makes each macOS RAM volume name unique within a process, so two
 // volumes never collide on /Volumes and every one ejects cleanly.
 var ramVolumeSeq atomic.Int64
+
+// chaosDuration returns how long a workload/chaos run should last, from
+// ROSE_CHAOS_DURATION (a Go duration string) or the given default.
+func chaosDuration(def time.Duration) time.Duration {
+	if v := os.Getenv("ROSE_CHAOS_DURATION"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+// chaosSeed returns the deterministic RNG seed, from ROSE_CHAOS_SEED or the
+// given default. The chosen seed is what makes a failing run reproducible.
+func chaosSeed(def int64) int64 {
+	if v := os.Getenv("ROSE_CHAOS_SEED"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
+	}
+	return def
+}
 
 // ramDiskRoot returns a directory backed by RAM when the platform supports it,
 // falling back to t.TempDir() otherwise, and registers cleanup. On Linux it is a
@@ -157,7 +181,7 @@ func newChaosCluster(t *testing.T, nodes, disksPerNode int) *chaosCluster {
 	// modeled by the diskNode map (this is a single process; physically splitting
 	// the volumes would buy nothing), so one volume keeps setup and teardown to a
 	// single attach/eject.
-	base := ramDiskRoot(t, 256)
+	base := ramDiskRoot(t, 2048)
 	diskID := uint32(1)
 	for node := uint32(1); node <= uint32(nodes); node++ {
 		for d := 0; d < disksPerNode; d++ {
@@ -198,6 +222,9 @@ func (c *chaosCluster) start() {
 	for diskID, node := range c.diskNode {
 		srv.SetDiskNode(diskID, node)
 	}
+	// A short interval so the background driver reprotects failed disks and
+	// rebalances promptly under chaos, the way an operator-run control plane would.
+	srv.SetMaintenanceInterval(250 * time.Millisecond)
 	if err := srv.Recover(context.Background()); err != nil {
 		c.t.Fatal(err)
 	}
