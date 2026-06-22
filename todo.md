@@ -33,14 +33,45 @@
 
 ## Bitrot follow-ups
 
-- (done) The open block's sealed sector hashes are now persisted to a per-plog
-  ".openhashes" sidecar on Commit and reloaded on restart, so a sub-1MB trailing
-  block stays verifiable across restarts instead of being recomputed (and thus
-  trusted) from the very sectors it protects. The sidecar is an optimization, not
-  a contract: a missing/stale one falls back to the original recompute behavior.
-  Orphan sidecars are reclaimed by SweepStrayPlogFiles alongside their plog.
+- (done) The open block's sealed sector hashes now ride inline at the tail of the
+  plog: Commit writes them in an HMAC-protected trailer sector immediately after
+  the ragged-edge sector, and continued writes overwrite it as the block grows
+  (the block's real hash sector replaces it once the block completes). reload()
+  recovers the exact committed length and verified hashes from a valid trailer, so
+  a sub-1MB trailing block stays verifiable across restarts instead of being
+  recomputed (and thus trusted) from the very sectors it protects. A torn/absent
+  trailer falls back to recomputing the sectors, the original behavior. No sidecar
+  file, and one fsync per Commit.
+- Close the torn-write fallback gap without trusting the bytes: when reload finds
+  no valid trailer (a crash that overwrote the old trailer before the next
+  Commit), the open block's sealed sector hashes are currently recomputed from the
+  possibly-rotted sectors. Instead, recover them from the chunk rows in the
+  metadata DB whose vaddr range covers those sectors -- validate each covered
+  chunk's bytes against its stored content hash, and recompute the sector hashes
+  only from chunk content that checks out. The chunks were durably committed in
+  the DB before/independently of the lost trailer, so there is no true
+  verification gap on the trailing block, only a fallback that needs the catalog.
+- Anchor each plog's integrity metadata outside the file: store the expected
+  sector hashes (or a root over them) per shard in the metadata DB -- the README's
+  promised "hash tree roots for each log", not yet built. In-file HMACs are
+  self-consistent but unanchored, so block-boundary truncation or rollback to an
+  older consistent state still self-verifies, and (until keys are secret) targeted
+  tampering is undetectable. A DB-anchored root also gives an authoritative
+  committed length per shard, resolving (not just bounding) the post-crash length
+  ambiguity the open-block trailer leaves.
 - Add a Scrub RPC and a repair pass that rewrites corrupt shards from surviving
   redundancy (DUPLICATE copy / EC reconstruct).
+
+## Encryption (not yet implemented)
+
+- The per-block bitrot HMAC is keyed by a single hardcoded global placeholder
+  (storage.bitrotKey = "rose-bitrot-key-todo"), so the hash-of-hashes is only a
+  bitrot checksum, not tamper-evident: anyone with the binary can rewrite a
+  sector, its hash, and re-derive the HMAC. Fold this key into a general
+  encryption story -- per-server and per-bucket keys (encryption on by default?)
+  -- so the integrity HMAC becomes a genuine authenticator and data can be
+  encrypted at rest. Decide the default (encrypt-by-default vs opt-in) and key
+  custody/rotation.
 
 ## Chunk GC and compaction (done)
 

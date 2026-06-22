@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/rmmh/rose/meta"
-	"github.com/rmmh/rose/storage"
 )
 
 // writeVlog writes data through a mounted vlog and persists its cursor, the same
@@ -630,11 +629,6 @@ func TestSweepStrayPlogFilesRemovesUnreferencedFiles(t *testing.T) {
 	if err := os.WriteFile(strayPath, []byte("orphaned copy"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	// An orphan bitrot sidecar (its plog file already gone) must be reclaimed too.
-	straySidecar := s.plogPath(2, 7777) + storage.OpenHashesSuffix
-	if err := os.WriteFile(straySidecar, []byte("orphan hashes"), 0644); err != nil {
-		t.Fatal(err)
-	}
 	// A non-plog file in a disk root must be ignored entirely.
 	otherPath := filepath.Join(filepath.Dir(strayPath), "notaplog")
 	if err := os.WriteFile(otherPath, []byte("leave me"), 0644); err != nil {
@@ -645,14 +639,11 @@ func TestSweepStrayPlogFilesRemovesUnreferencedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if removed != 2 {
-		t.Fatalf("sweep removed %d files, want 2 (stray plog + orphan sidecar)", removed)
+	if removed != 1 {
+		t.Fatalf("sweep removed %d files, want 1", removed)
 	}
 	if _, err := os.Stat(strayPath); !os.IsNotExist(err) {
 		t.Fatalf("stray plog file survived the sweep (err=%v)", err)
-	}
-	if _, err := os.Stat(straySidecar); !os.IsNotExist(err) {
-		t.Fatalf("orphan sidecar survived the sweep (err=%v)", err)
 	}
 	if _, err := os.Stat(livePath); err != nil {
 		t.Fatalf("sweep deleted a catalog-referenced plog file: %v", err)

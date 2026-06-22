@@ -113,10 +113,6 @@ func (s *Server) sweepStrayPlogFilesLocked(ctx context.Context) (int, error) {
 			if !ok {
 				continue
 			}
-			// A plog file is "plog-<id>"; its bitrot sidecar is "plog-<id><suffix>".
-			// Both are keyed by the same id, so an orphan sidecar is reclaimed with
-			// its plog.
-			idStr = strings.TrimSuffix(idStr, storage.OpenHashesSuffix)
 			id, err := strconv.ParseUint(idStr, 10, 32)
 			if err != nil {
 				continue // not a plog file we manage
