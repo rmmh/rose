@@ -24,10 +24,20 @@ type virtualScaleCluster struct {
 	diskNode       map[uint32]uint32
 	diskState      map[uint32]string
 	nodeState      map[uint32]string
-	plogBytes      map[uint32]int64
 	workers        []*Server
 	mu             sync.Mutex
 	placementScans int
+
+	// Incremental readiness tracker. vlogCommit/vlogRead hold each vlog's last
+	// computed commit/read state indexed by its (dense) id; commitReady/readable
+	// are their running totals. initReadiness seeds them with one full scan, after
+	// which a disk or node transition recomputes only the affected vlogs and
+	// adjusts the totals by the delta. nil until initReadiness runs, which leaves
+	// the small distributed-shape tests free of the tracker.
+	vlogCommit  []bool
+	vlogRead    []bool
+	commitReady int
+	readable    int
 }
 
 // scaleTracef writes immediately instead of waiting for Go's verbose test-log
@@ -64,7 +74,7 @@ func newVirtualScaleCluster(t testing.TB, nodes, disksPerNode int) *virtualScale
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	c := &virtualScaleCluster{t: t, db: db, nodes: nodes, disksPerNode: disksPerNode, diskNode: map[uint32]uint32{}, diskState: map[uint32]string{}, nodeState: map[uint32]string{}, plogBytes: map[uint32]int64{}}
+	c := &virtualScaleCluster{t: t, db: db, nodes: nodes, disksPerNode: disksPerNode, diskNode: map[uint32]uint32{}, diskState: map[uint32]string{}, nodeState: map[uint32]string{}}
 	ctx := context.Background()
 	for n := 1; n <= nodes; n++ {
 		if err := db.RegisterNode(ctx, uint32(n)); err != nil {
@@ -138,7 +148,6 @@ func (c *virtualScaleCluster) populateECProgress(count, dataShards, parityShards
 			if err := c.db.AssignPlogToVlog(ctx, vlogID, shard, plogID); err != nil {
 				c.t.Fatal(err)
 			}
-			c.plogBytes[plogID] = shardBytes
 		}
 		if progress != nil && ((i+1)%batch == 0 || i+1 == count) {
 			progress(i + 1)
@@ -146,24 +155,96 @@ func (c *virtualScaleCluster) populateECProgress(count, dataShards, parityShards
 	}
 }
 
-func (c *virtualScaleCluster) failDisk(diskID uint32) {
+func (c *virtualScaleCluster) failDisk(diskID uint32)    { c.setDiskState(diskID, meta.DiskFailed) }
+func (c *virtualScaleCluster) restoreDisk(diskID uint32) { c.setDiskState(diskID, meta.DiskActive) }
+func (c *virtualScaleCluster) failNode(nodeID uint32)    { c.setNodeState(nodeID, meta.NodeFailed) }
+
+func (c *virtualScaleCluster) setDiskState(diskID uint32, state string) {
 	c.t.Helper()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.db.SetDiskState(context.Background(), diskID, meta.DiskFailed); err != nil {
+	if err := c.db.SetDiskState(context.Background(), diskID, state); err != nil {
 		c.t.Fatal(err)
 	}
-	c.diskState[diskID] = meta.DiskFailed
+	c.diskState[diskID] = state
+	c.mu.Unlock()
+	// Only the vlogs with a shard on this disk can change readiness, so the
+	// tracker recomputes those rather than rescanning the whole catalog.
+	c.applyReadiness(func(fn func(uint32, bool, bool)) error {
+		return c.db.EachVlogReadinessOnDisk(context.Background(), diskID, fn)
+	})
 }
 
-func (c *virtualScaleCluster) failNode(nodeID uint32) {
+func (c *virtualScaleCluster) setNodeState(nodeID uint32, state string) {
 	c.t.Helper()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.db.SetNodeState(context.Background(), nodeID, meta.NodeFailed); err != nil {
+	if err := c.db.SetNodeState(context.Background(), nodeID, state); err != nil {
 		c.t.Fatal(err)
 	}
-	c.nodeState[nodeID] = meta.NodeFailed
+	c.nodeState[nodeID] = state
+	c.mu.Unlock()
+	c.applyReadiness(func(fn func(uint32, bool, bool)) error {
+		return c.db.EachVlogReadinessOnNode(context.Background(), nodeID, fn)
+	})
+}
+
+// initReadiness seeds the incremental tracker with one full-catalog scan. Vlog
+// ids are autoincrement from an empty catalog, hence dense, so a slice indexed by
+// id is a compact per-vlog state cache (one bool, ~1 byte each).
+func (c *virtualScaleCluster) initReadiness() {
+	c.commitReady, c.readable = 0, 0
+	c.vlogCommit, c.vlogRead = []bool{}, []bool{}
+	err := c.db.EachVlogReadiness(context.Background(), func(id uint32, commit, readable bool) {
+		c.ensureReadinessSlot(id)
+		c.vlogCommit[id], c.vlogRead[id] = commit, readable
+		if commit {
+			c.commitReady++
+		}
+		if readable {
+			c.readable++
+		}
+	})
+	if err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+func (c *virtualScaleCluster) ensureReadinessSlot(id uint32) {
+	for int(id) >= len(c.vlogCommit) {
+		c.vlogCommit = append(c.vlogCommit, false)
+		c.vlogRead = append(c.vlogRead, false)
+	}
+}
+
+// applyReadiness recomputes readiness for a subset of vlogs (those the scan
+// emits) and folds only the changes into the running totals. It is a no-op until
+// initReadiness establishes the baseline, so the small shape tests that never
+// call it pay nothing.
+func (c *virtualScaleCluster) applyReadiness(scan func(fn func(vlogID uint32, commitReady, readable bool)) error) {
+	if c.vlogCommit == nil {
+		return
+	}
+	err := scan(func(id uint32, commit, readable bool) {
+		c.ensureReadinessSlot(id)
+		if c.vlogCommit[id] != commit {
+			c.vlogCommit[id] = commit
+			if commit {
+				c.commitReady++
+			} else {
+				c.commitReady--
+			}
+		}
+		if c.vlogRead[id] != readable {
+			c.vlogRead[id] = readable
+			if readable {
+				c.readable++
+			} else {
+				c.readable--
+			}
+		}
+	})
+	if err != nil {
+		c.t.Fatal(err)
+	}
 }
 
 func (c *virtualScaleCluster) readiness(vlogID uint32) (commit, readable bool) {
@@ -186,71 +267,62 @@ func (c *virtualScaleCluster) readiness(vlogID uint32) (commit, readable bool) {
 }
 
 // audit walks every persisted vlog/shard mapping and checks the TLA
-// NodeLevelDurability invariant. It deliberately uses catalog queries rather
-// than the in-memory builder state, so its timing exposes metadata lookup cost.
+// NodeLevelDurability invariant. It uses one ordered catalog scan rather than a
+// query per vlog: the rows arrive grouped by vlog, so node colocation is checked
+// from a single reused per-vlog set.
 func (c *virtualScaleCluster) audit() (vlogs, plogs, colocated int) {
-	ctx := context.Background()
-	infos, err := c.db.ListVlogs(ctx)
+	var curVlog uint32
+	first := true
+	seen := map[uint32]bool{}
+	err := c.db.AllShardPlacements(context.Background(), func(s meta.ShardPlacement) {
+		if first || s.VlogID != curVlog {
+			vlogs++
+			curVlog, first = s.VlogID, false
+			clear(seen)
+		}
+		plogs++
+		node := c.diskNode[s.DiskID]
+		if seen[node] {
+			colocated++
+		}
+		seen[node] = true
+	})
 	if err != nil {
 		c.t.Fatal(err)
-	}
-	for _, info := range infos {
-		vlogs++
-		shards, err := c.db.VlogShardDisks(ctx, info.ID)
-		if err != nil {
-			c.t.Fatal(err)
-		}
-		seen := map[uint32]bool{}
-		for _, shard := range shards {
-			plogs++
-			node := c.diskNode[shard.DiskID]
-			if seen[node] {
-				colocated++
-			}
-			seen[node] = true
-		}
 	}
 	return vlogs, plogs, colocated
 }
 
-// readinessAll evaluates commit and read gates across all vlogs. Unlike the
-// small-profile helper above, it derives the EC thresholds from each catalog
-// row so it also covers the 5+2 full-scale profile.
+// readinessAll evaluates commit and read gates across all vlogs. Once the
+// incremental tracker is seeded the totals are O(1); before that it derives the
+// EC thresholds from each catalog row in a single aggregate scan, so it also
+// covers the 5+2 full-scale profile.
 func (c *virtualScaleCluster) readinessAll() (commitReady, readable int) {
-	ctx := context.Background()
-	infos, err := c.db.ListVlogs(ctx)
-	if err != nil {
-		c.t.Fatal(err)
+	if c.vlogCommit != nil {
+		return c.commitReady, c.readable
 	}
-	for _, info := range infos {
-		shards, err := c.db.VlogShardDisks(ctx, info.ID)
-		if err != nil {
-			c.t.Fatal(err)
-		}
-		live := 0
-		for _, shard := range shards {
-			if c.diskState[shard.DiskID] == meta.DiskActive && c.nodeState[c.diskNode[shard.DiskID]] == meta.NodeWorking {
-				live++
-			}
-		}
-		if live == len(shards) {
+	err := c.db.EachVlogReadiness(context.Background(), func(_ uint32, commit, rd bool) {
+		if commit {
 			commitReady++
 		}
-		if live >= int(info.DataShards) {
+		if rd {
 			readable++
 		}
+	})
+	if err != nil {
+		c.t.Fatal(err)
 	}
 	return commitReady, readable
 }
 
 func (c *virtualScaleCluster) scanDiskPlogs() int {
+	counts, err := c.db.PlogCountsByDisk(context.Background())
+	if err != nil {
+		c.t.Fatal(err)
+	}
 	count := 0
-	for disk := uint32(1); disk <= uint32(c.nodes*c.disksPerNode); disk++ {
-		ps, err := c.db.PlogsOnDisk(context.Background(), disk)
-		if err != nil {
-			c.t.Fatal(err)
-		}
-		count += len(ps)
+	for _, n := range counts {
+		count += n
 	}
 	return count
 }
@@ -269,8 +341,8 @@ func scalePostPopulate(t *testing.T, profile string, c *virtualScaleCluster) {
 	}
 
 	started = time.Now()
-	commitReady, readable := c.readinessAll()
-	t.Logf("profile=%s op=readiness-all commit-ready=%d readable=%d elapsed=%s", profile, commitReady, readable, seconds(time.Since(started)))
+	c.initReadiness()
+	t.Logf("profile=%s op=readiness-all commit-ready=%d readable=%d elapsed=%s", profile, c.commitReady, c.readable, seconds(time.Since(started)))
 
 	started = time.Now()
 	moves := c.rebalance(8, 10<<30)
@@ -312,14 +384,12 @@ func (c *virtualScaleCluster) reprotectDisk(diskID uint32) int {
 		if err != nil {
 			c.t.Fatal(err)
 		}
-		if err := c.db.SetPlogLength(ctx, newPlog, c.plogBytes[lost.PlogID]); err != nil {
+		if err := c.db.SetPlogLength(ctx, newPlog, lost.Length); err != nil {
 			c.t.Fatal(err)
 		}
 		if err := c.db.ReplaceShardPlog(ctx, lost.VlogID, lost.ShardIndex, lost.PlogID, newPlog); err != nil {
 			c.t.Fatal(err)
 		}
-		c.plogBytes[newPlog] = c.plogBytes[lost.PlogID]
-		delete(c.plogBytes, lost.PlogID)
 		repaired++
 	}
 	return repaired
@@ -330,17 +400,29 @@ func (c *virtualScaleCluster) reprotectDisk(diskID uint32) int {
 // used to count control-plane work independently of physical copy bandwidth.
 func (c *virtualScaleCluster) rebalance(maxMoves int, minSkew int64) int {
 	ctx := context.Background()
-	usage := make(map[uint32]int64, c.nodes*c.disksPerNode)
-	byDisk := make(map[uint32][]meta.PlogOnDisk, len(usage))
+	usage, err := c.db.DiskUsageBytes(ctx)
+	if err != nil {
+		c.t.Fatal(err)
+	}
 	for disk := uint32(1); disk <= uint32(c.nodes*c.disksPerNode); disk++ {
+		if _, ok := usage[disk]; !ok {
+			usage[disk] = 0 // empty disks remain candidate destinations
+		}
+	}
+	// A disk's plog list is only needed when it is chosen as a move source, and a
+	// capped pass touches at most maxMoves sources. Loading lazily keeps rebalance
+	// O(moves) queries instead of scanning every plog on every disk up front.
+	byDisk := map[uint32][]meta.PlogOnDisk{}
+	plogsOf := func(disk uint32) []meta.PlogOnDisk {
+		if ps, ok := byDisk[disk]; ok {
+			return ps
+		}
 		ps, err := c.db.PlogsOnDisk(ctx, disk)
 		if err != nil {
 			c.t.Fatal(err)
 		}
 		byDisk[disk] = ps
-		for _, p := range ps {
-			usage[disk] += c.plogBytes[p.PlogID]
-		}
+		return ps
 	}
 	extreme := func(high bool) uint32 {
 		var selected uint32 = 1
@@ -358,7 +440,7 @@ func (c *virtualScaleCluster) rebalance(maxMoves int, minSkew int64) int {
 			break
 		}
 		moved := false
-		for _, p := range byDisk[src] {
+		for _, p := range plogsOf(src) {
 			shards, err := c.db.VlogShardDisks(ctx, p.VlogID)
 			if err != nil {
 				c.t.Fatal(err)
@@ -371,14 +453,14 @@ func (c *virtualScaleCluster) rebalance(maxMoves int, minSkew int64) int {
 					break
 				}
 			}
-			if occupied || c.plogBytes[p.PlogID] > usage[src]-usage[dst] {
+			if occupied || p.Length > usage[src]-usage[dst] {
 				continue
 			}
 			if err := c.db.MovePlogToDisk(ctx, p.PlogID, dst); err != nil {
 				c.t.Fatal(err)
 			}
-			usage[src] -= c.plogBytes[p.PlogID]
-			usage[dst] += c.plogBytes[p.PlogID]
+			usage[src] -= p.Length
+			usage[dst] += p.Length
 			moved, moves = true, moves+1
 			break
 		}
@@ -432,8 +514,7 @@ func TestVirtualRebalanceRespectsMoveCap(t *testing.T) {
 		t.Fatal("missing source plogs")
 	}
 	// A logical skew above the policy band; the virtual store never allocates it.
-	c.plogBytes[ps[0].PlogID] += 32 << 30
-	if err := c.db.SetPlogLength(context.Background(), ps[0].PlogID, c.plogBytes[ps[0].PlogID]); err != nil {
+	if err := c.db.SetPlogLength(context.Background(), ps[0].PlogID, ps[0].Length+32<<30); err != nil {
 		t.Fatal(err)
 	}
 	started := time.Now()
@@ -517,10 +598,7 @@ func TestControlPlaneScale100TB(t *testing.T) {
 
 	// Restore the independent disk transition, then measure a node failure from
 	// the same fully populated metadata state.
-	if err := c.db.SetDiskState(context.Background(), c.disk(1, 0), meta.DiskActive); err != nil {
-		t.Fatal(err)
-	}
-	c.diskState[c.disk(1, 0)] = meta.DiskActive
+	c.restoreDisk(c.disk(1, 0))
 	started = time.Now()
 	c.failNode(1)
 	commit, readable = c.readiness(1)

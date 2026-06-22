@@ -87,13 +87,14 @@ type PlogOnDisk struct {
 	PlogID     uint32
 	VlogID     uint32
 	ShardIndex int
+	Length     int64
 }
 
 // PlogsOnDisk lists the plogs physically stored on a disk together with the vlog
 // shard each one backs. Draining a disk migrates exactly these plogs elsewhere.
 func (d *DB) PlogsOnDisk(ctx context.Context, diskID uint32) ([]PlogOnDisk, error) {
 	rows, err := d.db.QueryContext(ctx, `
-		SELECT p.id, vp.vlog_id, vp.shard_idx
+		SELECT p.id, vp.vlog_id, vp.shard_idx, p.length
 		FROM plog p JOIN vlog_plog vp ON vp.plog_id = p.id
 		WHERE p.disk_id = ? ORDER BY p.id`, diskID)
 	if err != nil {
@@ -103,7 +104,7 @@ func (d *DB) PlogsOnDisk(ctx context.Context, diskID uint32) ([]PlogOnDisk, erro
 	var out []PlogOnDisk
 	for rows.Next() {
 		var p PlogOnDisk
-		if err := rows.Scan(&p.PlogID, &p.VlogID, &p.ShardIndex); err != nil {
+		if err := rows.Scan(&p.PlogID, &p.VlogID, &p.ShardIndex, &p.Length); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

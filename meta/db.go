@@ -149,6 +149,14 @@ func initSchema(db *sql.DB, durable bool) error {
 			dest_disk INTEGER NOT NULL DEFAULT 0,   -- replace: the disk to move onto
 			created_at INTEGER NOT NULL
 		);
+
+		-- Reverse lookups for the control plane: a plog -> the vlog shard it backs,
+		-- and a disk -> the plogs it holds.  Without these, PlogsOnDisk and the
+		-- per-disk repair/rebalance scans force SQLite to build a transient
+		-- automatic index on every call, which dominates at multi-million-plog
+		-- scale.
+		CREATE INDEX IF NOT EXISTS idx_vlog_plog_plog ON vlog_plog(plog_id);
+		CREATE INDEX IF NOT EXISTS idx_plog_disk ON plog(disk_id);
 	`)
 	if err != nil {
 		return fmt.Errorf("init schema: %w", err)
