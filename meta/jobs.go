@@ -19,14 +19,15 @@ type Job struct {
 }
 
 const (
-	JobCompact   = "compact"
-	JobDrain     = "drain"
-	JobReprotect = "reprotect"
-	JobReplace   = "replace"
-	JobRebalance = "rebalance"
-	JobRunning   = "running"
-	JobDone      = "done"
-	JobCancelled = "cancelled"
+	JobCompact     = "compact"
+	JobDrain       = "drain"
+	JobReprotect   = "reprotect"
+	JobReplace     = "replace"
+	JobRebalance   = "rebalance"
+	JobScrubRepair = "scrubrepair"
+	JobRunning     = "running"
+	JobDone        = "done"
+	JobCancelled   = "cancelled"
 )
 
 const jobColumns = "id, kind, state, target_vlog, dest_vlog, target_disk, dest_disk"
@@ -61,6 +62,33 @@ func (d *DB) GetOrCreateCompactionJob(ctx context.Context, targetVlog uint32) (J
 		return Job{}, err
 	}
 	return Job{ID: id, Kind: JobCompact, State: JobRunning, TargetVlog: targetVlog}, nil
+}
+
+// GetOrCreateScrubRepairJob returns the running scrub-repair job for a vlog,
+// creating one if none exists. Keyed by target_vlog like compaction, it lets a
+// crash mid-repair resume by re-scrubbing the same vlog and rebuilding whatever
+// shards are still corrupt, rather than leaving a detected-bad shard unhealed.
+func (d *DB) GetOrCreateScrubRepairJob(ctx context.Context, targetVlog uint32) (Job, error) {
+	j, err := scanJob(d.db.QueryRowContext(ctx,
+		"SELECT "+jobColumns+" FROM job WHERE kind = ? AND state = ? AND target_vlog = ?",
+		JobScrubRepair, JobRunning, targetVlog))
+	if err == nil {
+		return j, nil
+	}
+	if err != sql.ErrNoRows {
+		return Job{}, err
+	}
+	res, err := d.db.ExecContext(ctx,
+		"INSERT INTO job (kind, state, target_vlog, created_at) VALUES (?, ?, ?, ?)",
+		JobScrubRepair, JobRunning, targetVlog, time.Now().UnixNano())
+	if err != nil {
+		return Job{}, fmt.Errorf("create scrub-repair job: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Job{}, err
+	}
+	return Job{ID: id, Kind: JobScrubRepair, State: JobRunning, TargetVlog: targetVlog}, nil
 }
 
 // GetOrCreateDrainJob returns the running drain job for a disk, creating one if

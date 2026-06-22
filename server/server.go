@@ -328,6 +328,10 @@ func (s *Server) Recover(ctx context.Context) error {
 			if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
 				return fmt.Errorf("finish resumed rebalance: %w", err)
 			}
+		case meta.JobScrubRepair:
+			if _, err := s.RepairVlog(ctx, job.TargetVlog); err != nil {
+				return fmt.Errorf("resume scrub-repair of vlog %d: %w", job.TargetVlog, err)
+			}
 		}
 	}
 	s.startMaintenanceDriver()

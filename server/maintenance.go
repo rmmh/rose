@@ -261,6 +261,214 @@ func (s *Server) reconstructECShardLocked(ctx context.Context, info meta.VlogInf
 	return shards[lostShard], nil
 }
 
+// ScrubRepairResult summarizes one ScrubAndRepair pass: how many shards were
+// scrubbed, how many corrupt shards were rebuilt from surviving redundancy, and
+// any that could not be repaired because the vlog lacked a readable source
+// quorum (too much other damage). A non-empty Unrepairable means real data loss,
+// not a transient failure.
+type ScrubRepairResult struct {
+	ShardsScrubbed int
+	ShardsRepaired int
+	Unrepairable   []RepairFailure
+}
+
+// RepairFailure records a corrupt shard that ScrubAndRepair could not heal.
+type RepairFailure struct {
+	VlogID uint32
+	Shard  int
+	Reason string
+}
+
+// ScrubAndRepair scrubs every mounted vlog and rebuilds any shard whose bytes
+// fail integrity from the surviving redundancy — the self-healing pass that
+// closes the loop on the bitrot Scrub() only detects. It is the Go reflection of
+// RoseTxnCommit's RepairShard: a corrupt shard is repaired only when a *readable
+// source quorum* survives (the vlog's other shards still meet its read
+// threshold), and the rebuilt bytes are placed on a PlacementAllowed disk via
+// the same regenerate path reprotect uses (RoseStorage ReprotectStep). Each
+// repaired vlog runs under a durable scrubrepair job so a crash mid-repair
+// re-scrubs and re-repairs on recovery rather than leaving a shard silently bad.
+func (s *Server) ScrubAndRepair(ctx context.Context) (ScrubRepairResult, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+
+	ids := make([]uint32, 0, len(s.vlogs))
+	for id := range s.vlogs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	var res ScrubRepairResult
+	for _, id := range ids {
+		scrubbed, repaired, failures, err := s.repairOneVlogLocked(ctx, id)
+		if err != nil {
+			return res, err
+		}
+		res.ShardsScrubbed += scrubbed
+		res.ShardsRepaired += repaired
+		res.Unrepairable = append(res.Unrepairable, failures...)
+	}
+	return res, nil
+}
+
+// RepairVlog scrubs and repairs a single vlog, the unit ScrubAndRepair runs over
+// every vlog and the entry point a resumed scrubrepair job re-enters after a
+// crash.
+func (s *Server) RepairVlog(ctx context.Context, vlogID uint32) (ScrubRepairResult, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+
+	scrubbed, repaired, failures, err := s.repairOneVlogLocked(ctx, vlogID)
+	if err != nil {
+		return ScrubRepairResult{}, err
+	}
+	return ScrubRepairResult{ShardsScrubbed: scrubbed, ShardsRepaired: repaired, Unrepairable: failures}, nil
+}
+
+// repairOneVlogLocked scrubs one vlog and rebuilds its corrupt shards under a
+// durable scrubrepair job. A clean vlog touches no job (the common case stays
+// cheap); the job row only exists while there is real repair to make crash-safe.
+// The caller must hold vlogMu.
+func (s *Server) repairOneVlogLocked(ctx context.Context, vlogID uint32) (scrubbed, repaired int, failures []RepairFailure, err error) {
+	vlog, ok := s.vlogs[vlogID]
+	if !ok {
+		return 0, 0, nil, fmt.Errorf("repair: vlog %d is not mounted", vlogID)
+	}
+	shards, err := vlog.Scrub()
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	var corrupt []int
+	for _, sh := range shards {
+		scrubbed++
+		if !sh.Result.Healthy() {
+			corrupt = append(corrupt, sh.Shard)
+		}
+	}
+	if len(corrupt) == 0 {
+		return scrubbed, 0, nil, nil
+	}
+
+	info, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		return scrubbed, 0, nil, err
+	}
+	job, err := s.db.GetOrCreateScrubRepairJob(ctx, vlogID)
+	if err != nil {
+		return scrubbed, 0, nil, err
+	}
+	repaired, failures, err = s.repairVlogShardsLocked(ctx, info, corrupt)
+	if err != nil {
+		return scrubbed, repaired, failures, err
+	}
+	if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
+		return scrubbed, repaired, failures, err
+	}
+	return scrubbed, repaired, failures, nil
+}
+
+// repairVlogShardsLocked rebuilds the given corrupt shards of one vlog from its
+// surviving redundancy. It first enforces RepairShard's precondition: the shards
+// other than the corrupt ones must still meet the vlog's read threshold (a
+// readable source quorum) — otherwise the bytes are genuinely lost and every
+// corrupt shard is reported unrepairable rather than fabricated. Each repairable
+// shard is regenerated onto a placement-allowed disk and its old (corrupt) plog
+// file removed. The caller must hold vlogMu.
+func (s *Server) repairVlogShardsLocked(ctx context.Context, info meta.VlogInfo, corrupt []int) (repaired int, failures []RepairFailure, err error) {
+	shardDisks, err := s.db.VlogShardDisks(ctx, info.ID)
+	if err != nil {
+		return 0, nil, err
+	}
+	mappings, err := s.db.ListVlogPlogs(ctx, info.ID)
+	if err != nil {
+		return 0, nil, err
+	}
+	diskOf := make(map[int]uint32, len(shardDisks))
+	for _, sd := range shardDisks {
+		diskOf[sd.ShardIndex] = sd.DiskID
+	}
+	plogOf := make(map[int]uint32, len(mappings))
+	for _, m := range mappings {
+		plogOf[m.ShardIndex] = m.PlogID
+	}
+	corruptSet := make(map[int]bool, len(corrupt))
+	for _, c := range corrupt {
+		corruptSet[c] = true
+	}
+
+	// Readable source quorum: count the shards that are both on a live disk and
+	// not themselves corrupt. RepairShard only restores a missing shard while
+	// these still meet the read threshold (EC: data_shards survivors to
+	// reconstruct; DUPLICATE: one intact copy).
+	goodLive := 0
+	for _, sd := range shardDisks {
+		if corruptSet[sd.ShardIndex] {
+			continue
+		}
+		if s.diskLiveLocked(sd.DiskID) {
+			goodLive++
+		}
+	}
+	if goodLive < s.readThreshold(info) {
+		for _, c := range corrupt {
+			failures = append(failures, RepairFailure{VlogID: info.ID, Shard: c, Reason: "no readable source quorum"})
+		}
+		return 0, failures, nil
+	}
+
+	for _, c := range corrupt {
+		corruptDisk := diskOf[c]
+		corruptPlog := plogOf[c]
+		dest, derr := s.pickRepairDestinationLocked(ctx, info.ID, corruptDisk)
+		if derr != nil {
+			failures = append(failures, RepairFailure{VlogID: info.ID, Shard: c, Reason: derr.Error()})
+			continue
+		}
+		// Capture the corrupt plog handle before regenerate unmaps it, so the
+		// stale file can be closed and deleted once the shard is repointed.
+		oldPlog := s.plogs[corruptPlog]
+		if rerr := s.regenerateShardLocked(ctx, info.ID, c, corruptPlog, dest); rerr != nil {
+			failures = append(failures, RepairFailure{VlogID: info.ID, Shard: c, Reason: rerr.Error()})
+			continue
+		}
+		if oldPlog != nil {
+			_ = oldPlog.Close()
+		}
+		_ = os.Remove(s.plogPath(corruptDisk, corruptPlog))
+		repaired++
+	}
+	return repaired, failures, nil
+}
+
+// pickRepairDestinationLocked selects a placement-allowed disk to host a shard
+// rebuilt by ScrubAndRepair. Unlike drain/reprotect, the corrupt shard's own
+// disk is still live — only its bytes are bad — so the shard's current node is a
+// legal home (it holds no other shard of the vlog). It prefers a different disk,
+// so a still-suspect disk is not immediately reused, but falls back to the
+// shard's own disk when that is the only placement-allowed home — the case for
+// EC k+m exactly filling the cluster's nodes. The caller must hold vlogMu.
+func (s *Server) pickRepairDestinationLocked(ctx context.Context, vlogID, corruptDisk uint32) (uint32, error) {
+	occupied, err := s.occupiedNodesLocked(ctx, vlogID, corruptDisk)
+	if err != nil {
+		return 0, err
+	}
+	fallback, haveFallback := uint32(0), false
+	for _, id := range s.activeDiskIDs() {
+		if occupied[s.nodeOf(id)] {
+			continue // another shard of this vlog lives on that node
+		}
+		if id == corruptDisk {
+			fallback, haveFallback = id, true
+			continue
+		}
+		return id, nil
+	}
+	if haveFallback {
+		return fallback, nil
+	}
+	return 0, fmt.Errorf("repair: no placement-allowed destination for vlog %d shard", vlogID)
+}
+
 // AttachDisk configures a new local disk and registers it active in the durable
 // catalog, making it eligible for placement and as a replace destination. It is
 // the operator action that brings fresh capacity online. (AddDisk is reserved by

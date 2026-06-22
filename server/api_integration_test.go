@@ -674,6 +674,179 @@ func corruptFileByte(t *testing.T, path string, off int64) {
 	}
 }
 
+// TestScrubAndRepairHealsBitrot writes an EC 3+1 file, flips a byte in one
+// shard's plog (bitrot), then runs ScrubAndRepair and asserts the shard is
+// rebuilt from the surviving redundancy: the repair reports one shard healed, a
+// follow-up scrub is clean, and the file still reads back byte-identical.
+func TestScrubAndRepairHealsBitrot(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+
+	// Four disks on four nodes so EC 3+1's four shards land on distinct nodes.
+	roots := map[uint32]string{}
+	for id := uint32(1); id <= 4; id++ {
+		roots[id] = filepath.Join(dir, fmt.Sprintf("disk-%d", id))
+	}
+	srv := server.NewServerWithDiskRoots(db, roots)
+	srv.SetMaintenanceInterval(0)
+	if err := srv.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.StopMaintenanceDriver)
+
+	if err := srv.SetBucketPolicy(ctx, meta.BucketPolicy{Name: "ec", ProtectionScheme: "EC", DataShards: 3, ParityShards: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Large enough that every EC shard plog seals several hash-protected blocks,
+	// so scrub validates persisted sectors rather than the open trailing buffer.
+	data := make([]byte, 6<<20)
+	if _, err := rand.New(rand.NewSource(11)).Read(data); err != nil {
+		t.Fatal(err)
+	}
+	open, err := srv.Open(ctx, &pb.OpenRequest{Path: "/ec/file1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: data}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Flip a sealed sector byte in one shard's plog. disk-1 backs exactly one
+	// shard of the single EC vlog, so its lone plog file is that shard.
+	entries, err := os.ReadDir(roots[1])
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("read disk-1: %v", err)
+	}
+	corruptFileByte(t, filepath.Join(roots[1], entries[0].Name()), 4096+100)
+
+	// Confirm the corruption is detectable before repairing it.
+	scrubbed, err := srv.Scrub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawCorruption := false
+	for _, v := range scrubbed {
+		for _, sh := range v.Shards {
+			if !sh.Result.Healthy() {
+				sawCorruption = true
+			}
+		}
+	}
+	if !sawCorruption {
+		t.Fatal("scrub did not detect injected bitrot")
+	}
+
+	res, err := srv.ScrubAndRepair(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ShardsRepaired != 1 {
+		t.Fatalf("ScrubAndRepair healed %d shards, want 1 (result %+v)", res.ShardsRepaired, res)
+	}
+	if len(res.Unrepairable) != 0 {
+		t.Fatalf("ScrubAndRepair reported unrepairable shards: %+v", res.Unrepairable)
+	}
+
+	// A scrub after repair must be clean.
+	clean, err := srv.Scrub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range clean {
+		for _, sh := range v.Shards {
+			if !sh.Result.Healthy() {
+				t.Fatalf("scrub still unhealthy after repair: vlog %d shard %d %+v", v.VlogID, sh.Shard, sh.Result)
+			}
+		}
+	}
+
+	// The file still reads back byte-identical.
+	reopen, err := srv.Open(ctx, &pb.OpenRequest{Path: "/ec/file1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := srv.Read(ctx, &pb.ReadRequest{Handle: reopen.GetHandle(), Offset: 0, Length: int64(len(data))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), data) {
+		t.Fatal("EC file mismatch after scrub-repair")
+	}
+}
+
+// TestScrubAndRepairHealsDuplicate confirms the repair path for DUPLICATE vlogs:
+// a corrupt mirror is rebuilt from a surviving copy (readSurvivingCopyLocked),
+// not EC reconstruct.
+func TestScrubAndRepairHealsDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+
+	disk1 := filepath.Join(dir, "disk1")
+	disk2 := filepath.Join(dir, "disk2")
+	srv := server.NewServerWithDiskRoots(db, map[uint32]string{1: disk1, 2: disk2})
+	srv.SetMaintenanceInterval(0)
+	if err := srv.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.StopMaintenanceDriver)
+
+	// Default policy is 2-copy DUPLICATE across the two nodes.
+	data := make([]byte, 3<<20)
+	if _, err := rand.New(rand.NewSource(13)).Read(data); err != nil {
+		t.Fatal(err)
+	}
+	open, err := srv.Open(ctx, &pb.OpenRequest{Path: "/big"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: data}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(disk1)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("read disk1: %v", err)
+	}
+	corruptFileByte(t, filepath.Join(disk1, entries[0].Name()), 4096+100)
+
+	res, err := srv.ScrubAndRepair(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ShardsRepaired != 1 || len(res.Unrepairable) != 0 {
+		t.Fatalf("DUPLICATE repair = %+v, want 1 healed, 0 unrepairable", res)
+	}
+
+	clean, err := srv.Scrub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range clean {
+		for _, sh := range v.Shards {
+			if !sh.Result.Healthy() {
+				t.Fatalf("DUPLICATE scrub unhealthy after repair: vlog %d shard %d", v.VlogID, sh.Shard)
+			}
+		}
+	}
+}
+
 func TestDuplicatePlacementUsesEveryConfiguredDisk(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
