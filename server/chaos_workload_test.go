@@ -470,7 +470,7 @@ func (w *workload) randomSnapshot(rng *rand.Rand) (uint64, bool) {
 // done — an op interrupted by the run deadline failing with a cancellation is
 // expected shutdown, not a fault.
 func (w *workload) recordOpErr(ctx context.Context, err error) {
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || w.degraded() {
 		return
 	}
 	w.stats.opErrors.Add(1)
