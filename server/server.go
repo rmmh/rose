@@ -338,6 +338,24 @@ func (s *Server) Recover(ctx context.Context) error {
 	return nil
 }
 
+// CloseStorage stops the maintenance driver and closes every open plog file
+// handle, releasing the Server's hold on its disk roots. It is the graceful
+// shutdown to call before discarding a Server — modeling a process restart, or
+// unmounting the disks underneath it — so the abandoned Server's file
+// descriptors do not keep the disks busy or leak across repeated restarts. The
+// metadata DB is the caller's to close; CloseStorage does not touch it.
+func (s *Server) CloseStorage() {
+	s.StopMaintenanceDriver()
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	for id, p := range s.plogs {
+		_ = p.Commit()
+		_ = p.Close()
+		delete(s.plogs, id)
+	}
+	s.vlogs = make(map[uint32]*storage.Vlog)
+}
+
 // bucketOf returns the bucket a path belongs to: its top-level directory (the
 // component the README calls a bucket). A bare file at the root has no top-level
 // directory and belongs to the root bucket "", which carries the default policy.
