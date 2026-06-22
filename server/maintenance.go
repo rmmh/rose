@@ -48,6 +48,22 @@ func (s *Server) SetRebalancePolicy(p RebalancePolicy) {
 	s.rebalance = p
 }
 
+// SetCompactionPolicy replaces the dead-space reclamation tuning the maintenance
+// driver applies each pass. It is the operator knob for the waste ratio, dead-byte
+// floor, and per-pass job cap.
+func (s *Server) SetCompactionPolicy(p CompactionPolicy) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	s.compaction = p
+}
+
+// compactionPolicy returns a snapshot of the current compaction tuning.
+func (s *Server) compactionPolicy() CompactionPolicy {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	return s.compaction
+}
+
 // DrainDisk evacuates every shard off a disk and detaches it, implementing the
 // RoseStorage remove flow (StartRemove -> DrainStep* -> FinishJob). It runs the
 // whole job under a durable `job` row so a crash mid-drain resumes from the

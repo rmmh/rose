@@ -67,21 +67,33 @@ func (s *Server) StopMaintenanceDriver() {
 // reprotected first, preserving the TLA model's requirement that every published
 // object regain its full placement before the normal commit gate re-admits
 // writes. Rebalance then gets a chance to run; its policy enforces the cooldown.
+// Finally GC reclaims refcount-0 chunk rows and compaction physically reclaims
+// the dead space they leave, so dead-space reclamation is driven on the interval
+// rather than only on an explicit call. Each step's errors are independent: a
+// failing repair must not stop space reclamation, and vice versa.
 func (s *Server) RunMaintenanceOnce(ctx context.Context) error {
 	states := s.DiskStates()
 	var firstErr error
+	recordErr := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	for diskID, state := range states {
 		if state != meta.DiskFailed {
 			continue
 		}
-		if err := s.ReprotectDisk(ctx, diskID); err != nil && firstErr == nil {
-			// One unrecoverable vlog must not stop repairs for independent failed
-			// disks. Its failed state remains the durable retry signal.
-			firstErr = err
-		}
+		// One unrecoverable vlog must not stop repairs for independent failed
+		// disks. Its failed state remains the durable retry signal.
+		recordErr(s.ReprotectDisk(ctx, diskID))
 	}
-	if _, err := s.Rebalance(ctx); err != nil && firstErr == nil {
-		firstErr = err
+	_, err := s.Rebalance(ctx)
+	recordErr(err)
+	if _, err := s.GC(ctx); err != nil {
+		recordErr(err)
+	}
+	if _, err := s.Compact(ctx, s.compactionPolicy()); err != nil {
+		recordErr(err)
 	}
 	return firstErr
 }

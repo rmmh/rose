@@ -584,6 +584,69 @@ func TestCompactionResumesAfterRestart(t *testing.T) {
 	}
 }
 
+func TestMaintenancePassDrivesGCAndCompaction(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	diskRoot := filepath.Join(dir, "disk")
+	s := server.NewServerWithDataDir(db, diskRoot)
+	ctx := context.Background()
+
+	// One live file and several deleted ones pile dead space into a single vlog,
+	// the same setup the explicit-compaction test uses.
+	keep := make([]byte, 64*1024)
+	rand.New(rand.NewSource(11)).Read(keep)
+	writeServerFile(t, s, "/keep", keep)
+	for i := 0; i < 4; i++ {
+		dead := make([]byte, 64*1024)
+		rand.New(rand.NewSource(int64(200 + i))).Read(dead)
+		writeServerFile(t, s, fmt.Sprintf("/dead%d", i), dead)
+		if _, err := s.Unlink(ctx, &pb.UnlinkRequest{Path: fmt.Sprintf("/dead%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	usages, err := db.VlogUsages(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usages) != 1 || usages[0].DeadBytes() == 0 {
+		t.Fatalf("expected one vlog with dead space, got %+v", usages)
+	}
+	sourceVlog := usages[0].VlogID
+
+	// Drive reclamation through the maintenance pass rather than an explicit call:
+	// an aggressive policy makes the single wasteful vlog a candidate.
+	s.SetCompactionPolicy(server.CompactionPolicy{MinWasteRatio: 0.1, MinDeadBytes: 1, MaxJobs: 4})
+	if err := s.RunMaintenanceOnce(ctx); err != nil {
+		t.Fatalf("maintenance pass: %v", err)
+	}
+
+	// Compaction retired the source vlog and the survivor carries no dead bytes.
+	after, err := db.VlogUsages(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range after {
+		if u.VlogID == sourceVlog {
+			t.Fatalf("source vlog %d still present after maintenance pass", sourceVlog)
+		}
+		if u.DeadBytes() != 0 {
+			t.Fatalf("compacted vlog %d still has %d dead bytes", u.VlogID, u.DeadBytes())
+		}
+	}
+	// GC already ran in the pass: a follow-up GC finds nothing left to collect.
+	if n, err := s.GC(ctx); err != nil || n != 0 {
+		t.Fatalf("follow-up GC collected %d (err=%v), want 0 -- maintenance pass should have GC'd", n, err)
+	}
+	if got := readServerFile(t, s, "/keep"); !bytes.Equal(got, keep) {
+		t.Fatal("kept file corrupted by maintenance pass")
+	}
+}
+
 func writeServerFile(t *testing.T, s *server.Server, path string, data []byte) {
 	t.Helper()
 	ctx := context.Background()

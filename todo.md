@@ -53,8 +53,11 @@
 
 ## Compaction follow-ups
 
-- Drive Compact from a background goroutine on an interval / dead-space trigger
-  instead of only on explicit call; expose a Compact/GC RPC.
+- The maintenance driver now drives GC then Compact each pass (after
+  reprotect/rebalance), so dead-space reclamation runs on the interval instead of
+  only on an explicit call; SetCompactionPolicy is the operator knob. Still TODO:
+  a dead-space trigger that runs ahead of the tick, and a Compact/GC RPC on the
+  gRPC surface.
 - Stream large chunks instead of buffering whole chunks in memory during the
   rewrite. (Destination commits are now batched: CompactVlog copies every live
   chunk, fsyncs the destination once, then repoints all the chunk rows -- one

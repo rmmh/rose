@@ -59,8 +59,11 @@ type Server struct {
 	// disks: a hysteresis band so minor imbalance is tolerated, a per-pass move
 	// cap, and a cooldown between passes. lastRebalance tracks the cooldown and is
 	// guarded by vlogMu.
-	rebalance         RebalancePolicy
-	lastRebalance     time.Time
+	rebalance     RebalancePolicy
+	lastRebalance time.Time
+	// compaction governs the dead-space reclamation the maintenance driver runs
+	// after GC each pass; see CompactionPolicy.
+	compaction        CompactionPolicy
 	maintenanceMu     sync.Mutex
 	maintenanceEvery  time.Duration
 	maintenanceCancel context.CancelFunc
@@ -90,6 +93,7 @@ func NewServer(db *meta.DB) *Server {
 		nodeState:          make(map[uint32]string),
 		minCopies:          2,
 		rebalance:          DefaultRebalancePolicy(),
+		compaction:         DefaultCompactionPolicy(),
 		maintenanceEvery:   time.Second,
 		handles:            make(map[int64]*FileHandle),
 		writeOps:           make(map[int64]*sync.Mutex),
