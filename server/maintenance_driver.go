@@ -95,5 +95,8 @@ func (s *Server) RunMaintenanceOnce(ctx context.Context) error {
 	if _, err := s.Compact(ctx, s.compactionPolicy()); err != nil {
 		recordErr(err)
 	}
+	if _, err := s.SweepStrayPlogFiles(ctx); err != nil {
+		recordErr(err)
+	}
 	return firstErr
 }

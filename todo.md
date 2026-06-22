@@ -189,13 +189,16 @@
   for a live server (handles never closed) but not across a cold restart while
   the offline node's files are unreachable. Until Recover tolerates absent files,
   cancel-on-return is only sound for a running server.
-- Reclaim the orphan plog files a reprotect leaves on the returning disk when a
-  node-return cancels it: for shards regenerated before the cancel, ReplaceShardPlog
-  deleted the old plog row but the file physically remains on the returned disk
-  (catalog no longer references it). Dead space, not dead metadata; sweep it from
-  the GC/compaction pass (same class as the stray-file items below).
+- (done) SweepStrayPlogFiles, run at the end of each maintenance pass, reclaims
+  plog files no catalog row references on their disk: the orphan a reprotect
+  leaves on a returning disk, a drained disk's stray source file, and the
+  duplicate a crash leaves after a relocation's catalog flip but before os.Remove.
+  Conservative (only files with no plog row for that (disk, id)) and skips
+  unreachable disks (failed disk / failed node).
 - Reclaim the regenerated plog left behind when a crash re-runs a reprotect step
   whose ReplaceShardPlog had not yet committed (same duplicate-bytes-on-crash
   caveat compaction has).
-- Retire a drained disk's stray source files on resume (a crash after the
-  metadata flip can leave a copied-from file on the disk being removed).
+- (done) A drained disk's stray source file -- left when a crash lands after
+  migratePlog's disk_id flip but before os.Remove -- is now reclaimed by
+  SweepStrayPlogFiles, which sees the plog row moved to the destination disk and
+  removes the copy left behind on the old disk.

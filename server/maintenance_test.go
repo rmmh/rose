@@ -607,6 +607,86 @@ func TestRebalanceCooldownBacksOff(t *testing.T) {
 	}
 }
 
+func TestSweepStrayPlogFilesRemovesUnreferencedFiles(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 3)
+	vlogID := provision(t, s, "DUPLICATE", 1, 0)
+	writeVlog(t, s, vlogID, []byte("keep these bytes referenced"))
+
+	// A real, catalog-referenced plog file the sweep must never touch.
+	live := mustPlogsOnDisk(t, s.db, diskOf(t, s, vlogID, 0))
+	if len(live) == 0 {
+		t.Fatal("provisioned vlog left no plog on its first shard's disk")
+	}
+	livePath := s.plogPath(diskOf(t, s, vlogID, 0), live[0].PlogID)
+
+	// A leaked source file: a crash after a relocation's catalog flip but before
+	// the os.Remove leaves a plog file no catalog row references on that disk.
+	strayPath := s.plogPath(2, 9999)
+	if err := os.MkdirAll(filepath.Dir(strayPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(strayPath, []byte("orphaned copy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A non-plog file in a disk root must be ignored entirely.
+	otherPath := filepath.Join(filepath.Dir(strayPath), "notaplog")
+	if err := os.WriteFile(otherPath, []byte("leave me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := s.SweepStrayPlogFiles(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("sweep removed %d files, want 1", removed)
+	}
+	if _, err := os.Stat(strayPath); !os.IsNotExist(err) {
+		t.Fatalf("stray plog file survived the sweep (err=%v)", err)
+	}
+	if _, err := os.Stat(livePath); err != nil {
+		t.Fatalf("sweep deleted a catalog-referenced plog file: %v", err)
+	}
+	if _, err := os.Stat(otherPath); err != nil {
+		t.Fatalf("sweep deleted a non-plog file: %v", err)
+	}
+
+	// Idempotent: a second pass finds nothing.
+	if removed, err := s.SweepStrayPlogFiles(ctx); err != nil || removed != 0 {
+		t.Fatalf("second sweep removed %d (err=%v), want 0", removed, err)
+	}
+}
+
+func TestSweepStrayPlogFilesSkipsFailedDisk(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 3)
+
+	// A stray file on a disk whose media is failed must be left untouched: the
+	// sweep must not reach for unreachable media.
+	strayPath := s.plogPath(2, 8888)
+	if err := os.MkdirAll(filepath.Dir(strayPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(strayPath, []byte("orphan on failed disk"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDiskState(ctx, 2, meta.DiskFailed); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := s.SweepStrayPlogFiles(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("sweep removed %d files on a failed disk, want 0", removed)
+	}
+	if _, err := os.Stat(strayPath); err != nil {
+		t.Fatalf("sweep touched a failed disk's file: %v", err)
+	}
+}
+
 func mustShards(t *testing.T, s *Server, vlogID uint32) []meta.VlogShardDisk {
 	t.Helper()
 	shards, err := s.db.VlogShardDisks(context.Background(), vlogID)

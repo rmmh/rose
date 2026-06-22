@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rmmh/rose/meta"
@@ -62,6 +65,70 @@ func (s *Server) compactionPolicy() CompactionPolicy {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
 	return s.compaction
+}
+
+// SweepStrayPlogFiles removes plog files left on disk that the catalog no longer
+// references on that disk, reclaiming the dead space a crash between a metadata
+// flip and the source file's os.Remove leaks. The relocation primitives all
+// commit the catalog repoint (RetireVlog, ReplaceShardPlog, migratePlog's flip)
+// before deleting the old file, so an interruption strands a durable but
+// unreferenced copy: dead space, not dead metadata. It is deliberately
+// conservative -- a file is removed only when no plog row with its id lives on
+// that disk -- so it never deletes a file the catalog still resolves to, and it
+// skips unreachable disks (failed disk / failed node) whose media must not be
+// touched. It runs under vlogMu so the catalog and on-disk views are consistent
+// against concurrent provisioning and relocation.
+func (s *Server) SweepStrayPlogFiles(ctx context.Context) (int, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	return s.sweepStrayPlogFilesLocked(ctx)
+}
+
+func (s *Server) sweepStrayPlogFilesLocked(ctx context.Context) (int, error) {
+	plogs, err := s.db.ListPlogs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	known := make(map[[2]uint32]bool, len(plogs))
+	for _, p := range plogs {
+		known[[2]uint32{p.DiskID, p.ID}] = true
+	}
+	removed := 0
+	for diskID, root := range s.diskRoots {
+		if !s.diskReachableLocked(diskID) {
+			continue
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // disk root not created yet; nothing to sweep
+			}
+			return removed, fmt.Errorf("sweep disk %d root: %w", diskID, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			idStr, ok := strings.CutPrefix(e.Name(), "plog-")
+			if !ok {
+				continue
+			}
+			id, err := strconv.ParseUint(idStr, 10, 32)
+			if err != nil {
+				continue // not a plog file we manage
+			}
+			if known[[2]uint32{diskID, uint32(id)}] {
+				continue
+			}
+			path := filepath.Join(root, e.Name())
+			if err := os.Remove(path); err != nil {
+				return removed, fmt.Errorf("sweep stray plog %s: %w", path, err)
+			}
+			slog.Info("removed stray plog file", "disk", diskID, "plog", id, "path", path)
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 // DrainDisk evacuates every shard off a disk and detaches it, implementing the
