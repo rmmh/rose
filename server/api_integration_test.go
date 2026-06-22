@@ -123,6 +123,154 @@ func TestFileSnapshotNamespaceLifecycleOverGRPC(t *testing.T) {
 	}
 }
 
+// TestBucketECFileRoundTrip writes a file into a bucket configured for 3+1
+// erasure coding and reads it back, exercising the file API end to end over EC
+// rather than the default mirror. It also asserts the backing vlog really is EC
+// 3+1 with its four shards spread across four distinct nodes (NodeLevelDurability).
+func TestBucketECFileRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+
+	// Four disks, each its own node (disk id == node id), so EC 3+1's four shards
+	// can land on four distinct nodes.
+	roots := map[uint32]string{}
+	for id := uint32(1); id <= 4; id++ {
+		roots[id] = filepath.Join(dir, fmt.Sprintf("disk-%d", id))
+	}
+	srv := server.NewServerWithDiskRoots(db, roots)
+	srv.SetMaintenanceInterval(0)
+	if err := srv.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.StopMaintenanceDriver)
+
+	if err := srv.SetBucketPolicy(ctx, meta.BucketPolicy{Name: "ec", ProtectionScheme: "EC", DataShards: 3, ParityShards: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	data := make([]byte, 200_000)
+	if _, err := rand.New(rand.NewSource(99)).Read(data); err != nil {
+		t.Fatal(err)
+	}
+
+	open, err := srv.Open(ctx, &pb.OpenRequest{Path: "/ec/file1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: data}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+
+	reopen, err := srv.Open(ctx, &pb.OpenRequest{Path: "/ec/file1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := srv.Read(ctx, &pb.ReadRequest{Handle: reopen.GetHandle(), Offset: 0, Length: int64(len(data))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), data) {
+		t.Fatalf("EC file round-trip mismatch: got %d bytes, want %d", len(read.GetBuffer()), len(data))
+	}
+
+	// The file's bytes must have been written under EC 3+1, spread across four nodes.
+	vlogs, err := db.ListVlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawEC := false
+	for _, v := range vlogs {
+		if v.ProtectionScheme != "EC" {
+			continue
+		}
+		sawEC = true
+		if v.DataShards != 3 || v.ParityShards != 1 {
+			t.Fatalf("vlog %d = EC %d+%d, want 3+1", v.ID, v.DataShards, v.ParityShards)
+		}
+		shards, err := db.VlogShardDisks(ctx, v.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(shards) != 4 {
+			t.Fatalf("EC vlog %d has %d shards, want 4", v.ID, len(shards))
+		}
+		nodes := map[uint32]bool{}
+		for _, sh := range shards {
+			nodes[sh.DiskID] = true // disk id == node id here
+		}
+		if len(nodes) != 4 {
+			t.Fatalf("EC vlog %d shards span %d nodes, want 4 (NodeLevelDurability)", v.ID, len(nodes))
+		}
+	}
+	if !sawEC {
+		t.Fatal("no EC vlog provisioned; bucket policy did not take effect")
+	}
+}
+
+// TestVlogECRealPlogVariableLength drives an EC 3+1 vlog backed by real plogs
+// with variable-length writes through the low-level vlog API, isolating the
+// real-plog EC path from the file/chunk layer.
+func TestVlogECRealPlogVariableLength(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	roots := map[uint32]string{}
+	for id := uint32(1); id <= 4; id++ {
+		roots[id] = filepath.Join(dir, fmt.Sprintf("disk-%d", id))
+	}
+	srv := server.NewServerWithDiskRoots(db, roots)
+	srv.SetMaintenanceInterval(0)
+	if err := srv.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.StopMaintenanceDriver)
+
+	mk, err := srv.MakeVlog(ctx, &pb.MakeVlogRequest{ProtectionScheme: "EC", DataShards: 3, ParityShards: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vlogID := mk.GetVlogId()
+
+	rng := rand.New(rand.NewSource(3))
+	lengths := []int{1, 7, 100, 4095, 4096, 5000, 33, 2149, 9086}
+	offs := make([]uint32, len(lengths))
+	payloads := make([][]byte, len(lengths))
+	for i, n := range lengths {
+		data := make([]byte, n)
+		rng.Read(data)
+		payloads[i] = data
+		w, err := srv.WriteVlog(ctx, &pb.WriteVlogRequest{VlogId: vlogID, TxnId: 1, Buffer: data})
+		if err != nil {
+			t.Fatalf("write %d (len %d): %v", i, n, err)
+		}
+		offs[i] = w.GetOffset()
+	}
+	if _, err := srv.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range lengths {
+		r, err := srv.ReadVlog(ctx, &pb.ReadVlogRequest{VlogId: vlogID, Offset: offs[i], Length: uint32(lengths[i])})
+		if err != nil {
+			t.Fatalf("read %d (offset %d len %d): %v", i, offs[i], lengths[i], err)
+		}
+		if !bytes.Equal(r.GetBuffer(), payloads[i]) {
+			t.Fatalf("chunk %d real-plog EC mismatch at offset %d len %d", i, offs[i], lengths[i])
+		}
+	}
+}
+
 func TestPlogCommitOverGRPC(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()

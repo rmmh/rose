@@ -10,8 +10,8 @@ import (
 
 // simulatedPlogClient is an in-memory client that can be instructed to fail
 type simulatedPlogClient struct {
-	id     int
-	data   []byte
+	id          int
+	data        []byte
 	failOnWrite bool
 	failOnRead  bool
 	rng         *rand.Rand
@@ -102,6 +102,53 @@ func TestVlog_DeterministicSimulation_EC(t *testing.T) {
 					t.Fatalf("Expected %q, got %q", payload, readBack)
 				}
 			}
+		}
+	}
+}
+
+// TestVlogECVariableLengthRoundTrip writes variable-length chunks (as the
+// FastCDC file path does) through an EC vlog and reads each back at its returned
+// offset. It guards the stripe-width offset accounting: with unequal chunk
+// lengths, mapping a chunk to its shard piece only works when each chunk's
+// virtual offset is a multiple of dataShards.
+func TestVlogECVariableLengthRoundTrip(t *testing.T) {
+	dataShards, parityShards := 3, 1
+	var clients []PlogClient
+	for i := 0; i < dataShards+parityShards; i++ {
+		clients = append(clients, &simulatedPlogClient{id: i, data: make([]byte, 0)})
+	}
+	vlog, err := NewVlog(7, "EC", dataShards, parityShards, clients, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	rng := rand.New(rand.NewSource(5))
+
+	lengths := []int{1, 7, 100, 4095, 4096, 4097, 5000, 33, 999}
+	type record struct {
+		offset int64
+		data   []byte
+	}
+	var records []record
+	for txn, n := range lengths {
+		data := make([]byte, n)
+		rng.Read(data)
+		offset, err := vlog.Write(ctx, int64(txn+1), data)
+		if err != nil {
+			t.Fatalf("write %d (len %d): %v", txn, n, err)
+		}
+		if offset%int64(dataShards) != 0 {
+			t.Fatalf("write %d offset %d is not a multiple of dataShards %d", txn, offset, dataShards)
+		}
+		records = append(records, record{offset: offset, data: data})
+	}
+	for i, r := range records {
+		got, err := vlog.Read(ctx, r.offset, len(r.data))
+		if err != nil {
+			t.Fatalf("read %d (offset %d, len %d): %v", i, r.offset, len(r.data), err)
+		}
+		if !bytes.Equal(got, r.data) {
+			t.Fatalf("chunk %d round-trip mismatch at offset %d len %d", i, r.offset, len(r.data))
 		}
 	}
 }

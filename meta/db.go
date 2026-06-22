@@ -99,6 +99,16 @@ func initSchema(db *sql.DB, durable bool) error {
 			parity_shards INTEGER NOT NULL
 		);
 
+		-- Per-bucket protection policy.  A bucket is a top-level path component;
+		-- its files are written to vlogs provisioned under this scheme.  Buckets
+		-- with no row fall back to DefaultBucketPolicy (DUPLICATE across every disk).
+		CREATE TABLE IF NOT EXISTS bucket (
+			name TEXT PRIMARY KEY,
+			protection_scheme TEXT NOT NULL,
+			data_shards INTEGER NOT NULL,
+			parity_shards INTEGER NOT NULL
+		);
+
 		-- Maps plogs to their containing vlog
 		CREATE TABLE IF NOT EXISTS vlog_plog (
 			vlog_id INTEGER NOT NULL,

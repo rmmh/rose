@@ -28,10 +28,19 @@ type Server struct {
 	// vlogMu guards the vlog/plog maps, the active-vlog pointer, and the disk
 	// lifecycle cache below, so placement and commit-durability decisions see a
 	// consistent view of which disks are live.
-	vlogMu     sync.Mutex
-	activeVlog uint32
-	dataDir    string
-	diskRoots  map[uint32]string
+	vlogMu sync.Mutex
+	// activeVlogByBucket is the open vlog each bucket currently appends to, keyed
+	// by bucket name (the top-level path component). A bucket's writes roll into a
+	// fresh vlog when its active one fills or is retired/relocated out from under
+	// it; clearActiveVlogLocked drops whichever bucket points at a vlog that a
+	// maintenance step is reworking. Guarded by vlogMu.
+	activeVlogByBucket map[string]uint32
+	// bucketPolicies caches the durable per-bucket protection policy, warmed from
+	// the catalog on Recover and updated by SetBucketPolicy. A bucket absent here
+	// falls back to meta.DefaultBucketPolicy. Guarded by vlogMu.
+	bucketPolicies map[string]meta.BucketPolicy
+	dataDir        string
+	diskRoots      map[uint32]string
 	// diskState caches the lifecycle state of every configured disk, kept in sync
 	// with the durable disk catalog. Configured disks start active.
 	diskState map[uint32]string
@@ -66,19 +75,21 @@ const MaxVlogBytes int64 = 4 << 30
 
 func NewServer(db *meta.DB) *Server {
 	s := &Server{
-		db:               db,
-		plogs:            make(map[uint32]*storage.Plog),
-		vlogs:            make(map[uint32]*storage.Vlog),
-		offlinePlogs:     make(map[uint32]bool),
-		dataDir:          "data",
-		diskRoots:        map[uint32]string{1: "data"},
-		diskState:        make(map[uint32]string),
-		diskNodes:        make(map[uint32]uint32),
-		nodeState:        make(map[uint32]string),
-		minCopies:        2,
-		rebalance:        DefaultRebalancePolicy(),
-		maintenanceEvery: time.Second,
-		handles:          make(map[int64]*FileHandle),
+		db:                 db,
+		plogs:              make(map[uint32]*storage.Plog),
+		vlogs:              make(map[uint32]*storage.Vlog),
+		offlinePlogs:       make(map[uint32]bool),
+		activeVlogByBucket: make(map[string]uint32),
+		bucketPolicies:     make(map[string]meta.BucketPolicy),
+		dataDir:            "data",
+		diskRoots:          map[uint32]string{1: "data"},
+		diskState:          make(map[uint32]string),
+		diskNodes:          make(map[uint32]uint32),
+		nodeState:          make(map[uint32]string),
+		minCopies:          2,
+		rebalance:          DefaultRebalancePolicy(),
+		maintenanceEvery:   time.Second,
+		handles:            make(map[int64]*FileHandle),
 	}
 	s.resetDiskStates()
 	return s
@@ -238,6 +249,17 @@ func (s *Server) Recover(ctx context.Context) error {
 			s.nodeState[n.ID] = n.State
 		}
 	}
+	// Warm the per-bucket protection-policy cache so file writes resume
+	// provisioning each bucket's vlogs under its configured scheme after a restart.
+	policies, err := s.db.ListBucketPolicies(ctx)
+	if err != nil {
+		return err
+	}
+	s.bucketPolicies = make(map[string]meta.BucketPolicy, len(policies))
+	for _, p := range policies {
+		s.bucketPolicies[p.Name] = p
+	}
+	s.activeVlogByBucket = make(map[string]uint32)
 
 	plogInfos, err := s.db.ListPlogs(ctx)
 	if err != nil {
@@ -310,6 +332,59 @@ func (s *Server) Recover(ctx context.Context) error {
 	}
 	s.startMaintenanceDriver()
 	return nil
+}
+
+// bucketOf returns the bucket a path belongs to: its top-level directory (the
+// component the README calls a bucket). A bare file at the root has no top-level
+// directory and belongs to the root bucket "", which carries the default policy.
+func bucketOf(path string) string {
+	for len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+	for i := 0; i < len(path); i++ {
+		if path[i] == '/' {
+			return path[:i]
+		}
+	}
+	return ""
+}
+
+// SetBucketPolicy records a bucket's protection policy durably and updates the
+// in-memory cache. New files in the bucket are written under this scheme; vlogs
+// already provisioned for it are unaffected. It is the operator knob that makes
+// the file path write EC or N-way DUPLICATE instead of the default mirror.
+func (s *Server) SetBucketPolicy(ctx context.Context, p meta.BucketPolicy) error {
+	if err := s.db.SetBucketPolicy(ctx, p); err != nil {
+		return err
+	}
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	s.bucketPolicies[p.Name] = p
+	// Drop the bucket's active vlog so the next append provisions one under the
+	// new scheme rather than continuing to append under the old one.
+	delete(s.activeVlogByBucket, p.Name)
+	return nil
+}
+
+// bucketPolicyLocked returns the protection policy for a bucket, falling back to
+// the default mirror when the bucket has no explicit policy. The caller must
+// hold vlogMu.
+func (s *Server) bucketPolicyLocked(bucket string) meta.BucketPolicy {
+	if p, ok := s.bucketPolicies[bucket]; ok {
+		return p
+	}
+	return meta.DefaultBucketPolicy(bucket)
+}
+
+// clearActiveVlogLocked drops any bucket whose active vlog is vlogID, so a
+// maintenance step retiring or relocating that vlog does not leave a bucket
+// appending into a vlog that is being reworked. The caller must hold vlogMu.
+func (s *Server) clearActiveVlogLocked(vlogID uint32) {
+	for bucket, id := range s.activeVlogByBucket {
+		if id == vlogID {
+			delete(s.activeVlogByBucket, bucket)
+		}
+	}
 }
 
 // provisionVlogLocked creates a vlog, its backing plogs across the configured

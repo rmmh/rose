@@ -238,43 +238,34 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 	return &pb.GetattrResponse{Size: size}, nil
 }
 
-func (s *Server) getOrCreateActiveVlog(ctx context.Context) (uint32, error) {
-	s.vlogMu.Lock()
-	defer s.vlogMu.Unlock()
-
-	if s.activeVlog != 0 {
-		return s.activeVlog, nil
-	}
-
-	// Default protection for now is DUPLICATE across every configured disk.
-	id, _, err := s.provisionVlogLocked(ctx, "DUPLICATE", 1, 0)
+// provisionBucketVlogLocked provisions a fresh vlog under a bucket's protection
+// policy and records it as the bucket's active vlog. The caller must hold vlogMu.
+func (s *Server) provisionBucketVlogLocked(ctx context.Context, bucket string) (uint32, *storage.Vlog, error) {
+	pol := s.bucketPolicyLocked(bucket)
+	id, v, err := s.provisionVlogLocked(ctx, pol.ProtectionScheme, pol.DataShards, pol.ParityShards)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	s.activeVlog = id
-	return id, nil
+	s.activeVlogByBucket[bucket] = id
+	return id, v, nil
 }
 
-// activeVlogForAppend rolls the active vlog before an append would cross the
-// 32-bit virtual-offset boundary. The caller does not hold vlogMu.
-func (s *Server) activeVlogForAppend(ctx context.Context, n int) (uint32, *storage.Vlog, error) {
+// activeVlogForAppend rolls a bucket's active vlog before an append would cross
+// the 32-bit virtual-offset boundary, provisioning a fresh one under the
+// bucket's protection policy when needed. The caller does not hold vlogMu.
+func (s *Server) activeVlogForAppend(ctx context.Context, bucket string, n int) (uint32, *storage.Vlog, error) {
 	if int64(n) > MaxVlogBytes {
 		return 0, nil, fmt.Errorf("append of %d bytes exceeds max vlog size %d", n, MaxVlogBytes)
 	}
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
-	if s.activeVlog != 0 {
-		if v, ok := s.vlogs[s.activeVlog]; ok && v.Length()+int64(n) <= MaxVlogBytes {
-			return s.activeVlog, v, nil
+	if id := s.activeVlogByBucket[bucket]; id != 0 {
+		if v, ok := s.vlogs[id]; ok && v.Length()+int64(n) <= MaxVlogBytes {
+			return id, v, nil
 		}
-		s.activeVlog = 0
+		delete(s.activeVlogByBucket, bucket)
 	}
-	id, v, err := s.provisionVlogLocked(ctx, "DUPLICATE", 1, 0)
-	if err != nil {
-		return 0, nil, err
-	}
-	s.activeVlog = id
-	return id, v, nil
+	return s.provisionBucketVlogLocked(ctx, bucket)
 }
 
 func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResponse, error) {
@@ -290,6 +281,9 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 	s.handlesMu.Unlock()
 
 	if len(h.buffer) > 0 {
+		// Each file's chunks land in its bucket's vlogs, written under the bucket's
+		// protection policy (EC, N-way DUPLICATE, or the default mirror).
+		bucket := bucketOf(h.path)
 		rd := bytes.NewReader(h.buffer)
 		chunker, err := chunkers.NewChunker("fastcdc", rd, nil)
 		if err != nil {
@@ -306,7 +300,7 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 				return nil, fmt.Errorf("chunking error: %w", err)
 			}
 			if len(chunkData) > 0 {
-				vlogID, v, err := s.activeVlogForAppend(ctx, len(chunkData))
+				vlogID, v, err := s.activeVlogForAppend(ctx, bucket, len(chunkData))
 				if err != nil {
 					return nil, fmt.Errorf("select active vlog: %w", err)
 				}

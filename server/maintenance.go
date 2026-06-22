@@ -199,9 +199,7 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	delete(s.plogs, lostPlogID)
 	delete(s.offlinePlogs, lostPlogID)
 
-	if s.activeVlog == vlogID {
-		s.activeVlog = 0
-	}
+	s.clearActiveVlogLocked(vlogID)
 	return s.remountVlogLocked(ctx, vlogID)
 }
 
@@ -613,9 +611,7 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 
 	// The active vlog must not stay pinned to a relocated shard mid-write; force
 	// a fresh active vlog for subsequent writes, as compaction does.
-	if s.activeVlog == vlogID {
-		s.activeVlog = 0
-	}
+	s.clearActiveVlogLocked(vlogID)
 	return s.remountVlogLocked(ctx, vlogID)
 }
 

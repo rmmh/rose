@@ -106,8 +106,14 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 	}
 
 	if v.scheme == "EC" {
-		// Encode into shards
-		shards, err := v.encoder.Split(data)
+		// Split slices its input in place and zero-pads the tail within the input's
+		// capacity, so passing the caller's buffer would corrupt bytes past this
+		// chunk — the FastCDC chunker hands back a slice into a reused buffer, whose
+		// tail holds the next chunk. Copy into a buffer we own so encoding never
+		// writes through to the caller's data.
+		owned := make([]byte, len(data))
+		copy(owned, data)
+		shards, err := v.encoder.Split(owned)
 		if err != nil {
 			return 0, fmt.Errorf("split for EC: %w", err)
 		}
@@ -136,7 +142,14 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 			return 0, <-errs
 		}
 
-		offset := atomic.AddInt64(&v.length, logicalLen) - logicalLen
+		// Each shard plog grew by shardLen = ceil(len/dataShards) bytes (Split pads
+		// the data to equal shards). Advance the virtual length by the padded stripe
+		// width (shardLen*dataShards), not the raw length, so every chunk's virtual
+		// offset is a multiple of dataShards. Read maps a chunk to its shard piece
+		// as offset/dataShards; only a padded-multiple offset makes that exact for
+		// variable-length chunks, where sum(ceil(Lᵢ/d)) != (sum Lᵢ)/d.
+		stripeWidth := int64(len(shards[0]) * v.dataShards)
+		offset := atomic.AddInt64(&v.length, stripeWidth) - stripeWidth
 		return offset, nil
 	}
 
@@ -157,15 +170,11 @@ func (v *Vlog) Read(ctx context.Context, offset int64, length int) ([]byte, erro
 	}
 
 	if v.scheme == "EC" {
-		// A shard length corresponds to (length + padding) / dataShards.
-		// For simplicity in this first pass, we assume writes are perfectly aligned to EC boundaries
-		// or that we can reconstruct easily. However, `reedsolomon` usually requires fixed sizes.
-		// Because we are just wrapping it, let's calculate the shard length assuming the data length was padded.
-		// Actually, reedsolomon Split/Join requires knowing the exact size of the shards written.
-		// To decode, we grab `length / dataShards` bytes per shard. Wait, what if it's not a multiple?
-		// Realistically, the caller must read the exact `logical_len` stored in the chunk DB.
-
-		// Approximate shard read for this chunk.
+		// A chunk of logical size `length` was Split into dataShards pieces of
+		// shardLen = ceil(length/dataShards) bytes each, and Write advanced the
+		// virtual length by the padded stripe width (shardLen*dataShards). So the
+		// chunk's virtual offset is a multiple of dataShards and its shard piece
+		// sits at plog-logical offset offset/dataShards in every shard.
 		shardLen := (length + v.dataShards - 1) / v.dataShards
 		shards := make([][]byte, v.dataShards+v.parityShards)
 

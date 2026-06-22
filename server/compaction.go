@@ -114,9 +114,7 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 	}
 
 	// The active vlog must not be retired out from under future writes.
-	if s.activeVlog == sourceID {
-		s.activeVlog = 0
-	}
+	s.clearActiveVlogLocked(sourceID)
 
 	live, err := s.db.LiveChunksInVlog(ctx, sourceID)
 	if err != nil {
