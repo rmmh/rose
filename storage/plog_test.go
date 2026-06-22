@@ -174,6 +174,103 @@ func TestPlogRaggedEdgeAcrossCommits(t *testing.T) {
 	}
 }
 
+// TestPlogTrailingBlockVerifiableAcrossRestart writes a sub-block payload (sealed
+// sectors but no completed hash sector), commits, and reopens. A sector that rots
+// while the plog is closed must be caught on read after the restart, which is only
+// possible because the open block's sealed hashes were persisted to the sidecar.
+func TestPlogTrailingBlockVerifiableAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plog")
+	p, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Five full sectors plus a ragged tail: well under a full block, so no hash
+	// sector is emitted and the sealed sectors are protected only by the sidecar.
+	payload := make([]byte, 5*SectorSize+200)
+	rand.New(rand.NewSource(7)).Read(payload)
+	if _, err := p.Write(0, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	_ = p.Close()
+
+	// The sidecar exists and exactly covers the five sealed sectors.
+	persisted, err := os.ReadFile(path + OpenHashesSuffix)
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	if len(persisted) != 5*HashSize {
+		t.Fatalf("sidecar holds %d bytes, want %d (5 sealed sectors)", len(persisted), 5*HashSize)
+	}
+
+	// Rot a byte in the second sealed sector while the plog is closed.
+	corruptByte(t, path, SectorSize+100)
+
+	reopened, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Read(0, 3*SectorSize); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("read of rotted trailing sector after restart = %v, want ErrBitrot", err)
+	}
+
+	// Without the sidecar the loader recomputes the hash from the (corrupt) bytes
+	// and cannot tell -- the gap the sidecar closes.
+	if err := os.Remove(path + OpenHashesSuffix); err != nil {
+		t.Fatal(err)
+	}
+	blind, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blind.Close()
+	if _, err := blind.Read(0, 3*SectorSize); err != nil {
+		t.Fatalf("without sidecar the corruption should be undetected, got %v", err)
+	}
+}
+
+// TestPlogSidecarClearedWhenBlockCompletes checks the sidecar is removed once the
+// open block fills and flushes its hash sector into the main file, so a later
+// restart never mistakes a stale hash list for a fresh open block.
+func TestPlogSidecarClearedWhenBlockCompletes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plog")
+	p, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// A few sealed sectors: the sidecar is present.
+	short := make([]byte, 3*SectorSize)
+	rand.New(rand.NewSource(8)).Read(short)
+	if _, err := p.Write(0, short); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + OpenHashesSuffix); err != nil {
+		t.Fatalf("sidecar should exist for an open block: %v", err)
+	}
+
+	// Fill out exactly one full block: its hash sector goes into the main file and
+	// the open block becomes empty, so the sidecar must be cleared.
+	rest := make([]byte, dataPerBlock-3*SectorSize)
+	rand.New(rand.NewSource(9)).Read(rest)
+	if _, err := p.Write(0, rest); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + OpenHashesSuffix); !os.IsNotExist(err) {
+		t.Fatalf("sidecar should be cleared after the block completed, stat err = %v", err)
+	}
+}
+
 // plogClientAdapter wraps a *Plog as a committing PlogClient for vlog tests.
 type plogClientAdapter struct{ p *Plog }
 

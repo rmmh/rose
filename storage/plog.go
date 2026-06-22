@@ -28,16 +28,31 @@ var ErrBitrot = errors.New("bitrot detected")
 // "ragged edge": subsequent writes overwrite it in place so sectors stay 4KB
 // aligned and immutable once sealed. Its hash is only recorded once it fills,
 // so within-session reads of it are trusted from the buffer.
+//
+// The sealed sectors of the still-open block (those before a block completes and
+// emits its hash sector) have their hashes persisted to an ".openhashes" sidecar
+// on Commit. Without it a restart would recompute these hashes from the very
+// sectors they protect and so could never detect a sector that bitrotted while
+// the process was down; with it the sub-1MB trailing block stays verifiable
+// across restarts. The sidecar is an optimization, not a contract: if it is
+// missing or stale the loader falls back to recomputing (trusting) the sectors,
+// exactly the pre-sidecar behavior.
 type Plog struct {
 	mu            sync.Mutex
 	id            uint32
 	file          *os.File
+	path          string
 	logicalLength int64 // total logical bytes, including the open buffered sector
 
 	buf        []byte // open trailing sector, 0..4096 bytes (sealed once full)
 	hashes     []byte // hashes of sealed sectors in the current open block
 	hashSector [SectorSize]byte
 }
+
+// OpenHashesSuffix names the per-plog sidecar holding the open block's sealed
+// sector hashes. It lives beside the plog file so relocation/removal callers can
+// recognize it.
+const OpenHashesSuffix = ".openhashes"
 
 const (
 	SectorSize     = 4096
@@ -76,6 +91,7 @@ func OpenPlog(path string, id uint32) (*Plog, error) {
 	p := &Plog{
 		id:            id,
 		file:          f,
+		path:          path,
 		logicalLength: calcLogical(info.Size()),
 		buf:           make([]byte, 0, SectorSize),
 		hashes:        make([]byte, 0, HashesPerBlock*HashSize),
@@ -100,6 +116,23 @@ func (p *Plog) reload() error {
 		}
 	}
 	blockStart := (sealed / dataPerBlock) * dataPerBlock
+	sealedSectors := (sealed - blockStart) / SectorSize
+
+	// Prefer the durable sidecar: it records the hashes the sectors had when they
+	// were last made durable, so a sector that rotted while we were down no longer
+	// hashes to its recorded value and reads fail with ErrBitrot. The sidecar is
+	// only trusted when it exactly covers the open block's sealed sectors; a stale
+	// or short one (e.g. a crash after sealing sectors but before the next Commit)
+	// falls through to recomputing, which is the original trust-the-bytes behavior.
+	if persisted, err := os.ReadFile(p.path + OpenHashesSuffix); err == nil {
+		if int64(len(persisted)) == sealedSectors*HashSize {
+			p.hashes = append(p.hashes, persisted...)
+			return nil
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("reload plog %d open hashes: %w", p.id, err)
+	}
+
 	for s := blockStart; s < sealed; s += SectorSize {
 		sector := make([]byte, SectorSize)
 		if _, err := p.file.ReadAt(sector, calcPhysical(s)); err != nil {
@@ -387,7 +420,39 @@ func (p *Plog) Commit() error {
 			return fmt.Errorf("commit plog %d ragged edge: %w", p.id, err)
 		}
 	}
-	return p.file.Sync()
+	if err := p.file.Sync(); err != nil {
+		return err
+	}
+	return p.persistOpenHashes()
+}
+
+// persistOpenHashes durably records the open block's sealed sector hashes beside
+// the plog so they survive a restart. It runs after the data fsync, so every
+// sector a recorded hash covers is already durable. When the open block holds no
+// sealed sectors (a fresh block, or one that just completed and flushed its hash
+// sector into the main file) the sidecar is removed so a later restart never
+// mistakes a stale full-block hash list for the current open block.
+func (p *Plog) persistOpenHashes() error {
+	sidecar := p.path + OpenHashesSuffix
+	if len(p.hashes) == 0 {
+		if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("clear plog %d open hashes: %w", p.id, err)
+		}
+		return nil
+	}
+	f, err := os.OpenFile(sidecar, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("write plog %d open hashes: %w", p.id, err)
+	}
+	if _, err := f.Write(p.hashes); err != nil {
+		f.Close()
+		return fmt.Errorf("write plog %d open hashes: %w", p.id, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("sync plog %d open hashes: %w", p.id, err)
+	}
+	return f.Close()
 }
 
 // Sync is retained as the low-level durability primitive.

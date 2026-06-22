@@ -33,9 +33,12 @@
 
 ## Bitrot follow-ups
 
-- Persist sealed sector hashes for the trailing open block so sub-1MB data is
-  verifiable after a restart (currently trusted only within the writing
-  session).
+- (done) The open block's sealed sector hashes are now persisted to a per-plog
+  ".openhashes" sidecar on Commit and reloaded on restart, so a sub-1MB trailing
+  block stays verifiable across restarts instead of being recomputed (and thus
+  trusted) from the very sectors it protects. The sidecar is an optimization, not
+  a contract: a missing/stale one falls back to the original recompute behavior.
+  Orphan sidecars are reclaimed by SweepStrayPlogFiles alongside their plog.
 - Add a Scrub RPC and a repair pass that rewrites corrupt shards from surviving
   redundancy (DUPLICATE copy / EC reconstruct).
 
