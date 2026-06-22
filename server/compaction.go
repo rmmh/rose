@@ -129,6 +129,16 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 	if err != nil {
 		return err
 	}
+	// Copy every live chunk into the destination first, then make the whole
+	// batch durable with a single fsync before repointing any chunk row. This
+	// keeps the crash-safety invariant -- bytes are durable before the metadata
+	// references them -- while spending one fsync per job instead of one per
+	// chunk. A crash before the commit leaves chunks resolving to their old,
+	// intact source location and the job re-runs from scratch.
+	relocations := make([]struct {
+		hash   []byte
+		offset int64
+	}, 0, len(live))
 	for _, c := range live {
 		data, err := source.Read(ctx, c.VaddrOffset, c.LogicalLen)
 		if err != nil {
@@ -138,14 +148,22 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 		if err != nil {
 			return fmt.Errorf("compact: write chunk to vlog %d: %w", destID, err)
 		}
+		relocations = append(relocations, struct {
+			hash   []byte
+			offset int64
+		}{c.Hash, offset})
+	}
+	if len(relocations) > 0 {
 		if err := dest.Commit(ctx, 0); err != nil {
 			return fmt.Errorf("compact: commit destination: %w", err)
 		}
 		if err := s.db.SetVlogLength(ctx, destID, dest.Length()); err != nil {
 			return err
 		}
-		if err := s.db.RelocateChunk(ctx, c.Hash, destID, offset); err != nil {
-			return fmt.Errorf("compact: relocate chunk: %w", err)
+		for _, r := range relocations {
+			if err := s.db.RelocateChunk(ctx, r.hash, destID, r.offset); err != nil {
+				return fmt.Errorf("compact: relocate chunk: %w", err)
+			}
 		}
 	}
 
