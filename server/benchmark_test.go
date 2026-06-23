@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -8,13 +9,14 @@ import (
 	"os"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
 )
 
-func BenchmarkWrite100MB(b *testing.B) {
+func Benchmark100MB(b *testing.B) {
 	const size = 100 << 20
 	const block = 128 << 10
 	base := make([]byte, size)
@@ -68,6 +70,7 @@ func BenchmarkWrite100MB(b *testing.B) {
 				b.Fatal(err)
 			}
 
+			var writeTime, readTime time.Duration
 			data := make([]byte, len(base))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -85,6 +88,7 @@ func BenchmarkWrite100MB(b *testing.B) {
 					b.Fatal(err)
 				}
 				b.StartTimer()
+				writeStart := time.Now()
 				for off := 0; off < len(data); off += block {
 					end := off + block
 					if end > len(data) {
@@ -97,11 +101,42 @@ func BenchmarkWrite100MB(b *testing.B) {
 				if _, err := srv.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle(), IdempotencyKey: key}); err != nil {
 					b.Fatal(err)
 				}
+				writeTime += time.Since(writeStart)
+				b.StopTimer()
+
+				openRead, err := srv.Open(ctx, &pb.OpenRequest{Path: path})
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+				readStart := time.Now()
+				for off := 0; off < len(data); off += block {
+					end := off + block
+					if end > len(data) {
+						end = len(data)
+					}
+					res, err := srv.Read(ctx, &pb.ReadRequest{Handle: openRead.GetHandle(), Offset: int64(off), Length: int64(end - off)})
+					if err != nil {
+						b.Fatal(err)
+					}
+					if !bytes.Equal(res.GetBuffer(), data[off:end]) {
+						b.Fatalf("read mismatch at offset %d: expected %d bytes, got %d", off, end-off, len(res.GetBuffer()))
+					}
+				}
+				readTime += time.Since(readStart)
+				b.StopTimer()
+
+				if _, err := srv.Close(ctx, &pb.CloseRequest{Handle: openRead.GetHandle()}); err != nil {
+					b.Fatal(err)
+				}
 			}
-			elapsed := b.Elapsed()
-			if elapsed > 0 {
+			if writeTime > 0 {
 				totalMiB := float64(size*b.N) / float64(1<<20)
-				b.ReportMetric(totalMiB/elapsed.Seconds(), "MiB/s")
+				b.ReportMetric(totalMiB/writeTime.Seconds(), "write-MiB/s")
+			}
+			if readTime > 0 {
+				totalMiB := float64(size*b.N) / float64(1<<20)
+				b.ReportMetric(totalMiB/readTime.Seconds(), "read-MiB/s")
 			}
 		})
 	}
@@ -119,11 +154,4 @@ func benchmarkDiskRoot(b *testing.B) string {
 		}
 	}
 	return b.TempDir()
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
