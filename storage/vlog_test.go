@@ -51,14 +51,16 @@ func (s *simulatedPlogClient) Read(ctx context.Context, offset int64, length int
 // TestVlog_DeterministicSimulation_Duplicate tests DUPLICATE replication
 func TestVlog_DeterministicSimulation_Duplicate(t *testing.T) {
 	seed := int64(1337)
-	rng := rand.New(rand.NewSource(seed))
 
 	var clients []PlogClient
 	for i := 0; i < 3; i++ {
+		// Each client gets its own RNG: Vlog.Write fans out to all clients
+		// concurrently, and a *rand.Rand is not safe for concurrent use. Seeding
+		// per client off the base seed keeps the simulation deterministic.
 		clients = append(clients, &simulatedPlogClient{
 			id:   i,
 			data: make([]byte, 0),
-			rng:  rng,
+			rng:  rand.New(rand.NewSource(seed + int64(i))),
 		})
 	}
 
