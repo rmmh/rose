@@ -89,6 +89,12 @@ func (s *Server) RunMaintenanceOnce(ctx context.Context) error {
 	}
 	_, err := s.Rebalance(ctx)
 	recordErr(err)
+	// Promote staged chunks into EC before reclamation: it reparents chunks out of
+	// the replicated staging vlogs, turning their old locations into dead space
+	// that the GC/compaction steps below can then reclaim in the same pass.
+	if _, err := s.PromoteStaging(ctx); err != nil {
+		recordErr(err)
+	}
 	if _, err := s.GC(ctx); err != nil {
 		recordErr(err)
 	}

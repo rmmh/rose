@@ -35,6 +35,7 @@ import (
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
+	"github.com/rmmh/rose/storage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
@@ -311,6 +312,7 @@ func (c *chaosCluster) close() {
 // committed data survives a process restart + Recover. It is the harness shake-
 // out the workload and fault injector build on; it runs in the default suite.
 func TestChaosClusterSmoke(t *testing.T) {
+	defer storage.SetECColumnBytesForTest(16 << 10)() // small stripe so the EC file promotes
 	c := newChaosCluster(t, 4, 1)
 	defer c.close()
 
@@ -329,8 +331,15 @@ func TestChaosClusterSmoke(t *testing.T) {
 		t.Fatal("mirror bucket read-back mismatch before restart")
 	}
 
+	// EC is deferred: the write lands replicated in staging and only becomes coded
+	// once the promotion pass packs it into whole stripe rows. Promote explicitly
+	// so the assertion does not race the background maintenance timer.
+	if _, err := c.server().PromoteStaging(context.Background()); err != nil {
+		t.Fatalf("promote staging: %v", err)
+	}
+
 	// Both schemes must be reachable end-to-end: confirm the EC bucket actually
-	// provisioned an EC 3+1 vlog and the mirror bucket a multi-copy DUPLICATE.
+	// promoted into an EC 3+1 vlog and the mirror bucket a multi-copy DUPLICATE.
 	assertSchemePresent(t, c, "EC")
 	assertSchemePresent(t, c, "DUPLICATE")
 

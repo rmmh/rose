@@ -9,15 +9,29 @@ import (
 	"time"
 
 	"github.com/rmmh/rose/meta"
+	"github.com/rmmh/rose/storage"
 )
 
 // writeVlog writes data through a mounted vlog and persists its cursor, the same
-// sequence the Close path uses.
+// sequence the Close path uses. EC vlogs only accept whole stripe rows, so a
+// payload destined for one is padded up to a row boundary; the returned offset
+// still addresses the original bytes, which read back within the written rows.
 func writeVlog(t *testing.T, s *Server, vlogID uint32, data []byte) int64 {
 	t.Helper()
 	ctx := context.Background()
 	v := s.vlogs[vlogID]
-	offset, err := v.Write(ctx, 0, data)
+	info, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		t.Fatalf("load vlog %d: %v", vlogID, err)
+	}
+	payload := data
+	if info.ProtectionScheme == "EC" {
+		sw := storage.ECStripeWidth(int(info.DataShards))
+		if rem := int64(len(payload)) % sw; rem != 0 {
+			payload = append(append([]byte(nil), payload...), make([]byte, sw-rem)...)
+		}
+	}
+	offset, err := v.Write(ctx, 0, payload)
 	if err != nil {
 		t.Fatalf("write vlog: %v", err)
 	}

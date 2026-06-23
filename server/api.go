@@ -347,14 +347,14 @@ func (s *Server) leasedVlogForWrite(ctx context.Context, opID int64, path string
 		if err != nil {
 			continue
 		}
-		if info.ProtectionScheme != pol.ProtectionScheme || int(info.DataShards) != pol.DataShards || int(info.ParityShards) != pol.ParityShards {
+		if !vlogMatchesPolicy(info, pol) {
 			continue
 		}
 		if err := s.db.ClaimVlogLease(ctx, id, opID, len(leases)); err == nil {
 			return id, v, nil
 		}
 	}
-	id, v, err := s.provisionVlogLocked(ctx, pol.ProtectionScheme, pol.DataShards, pol.ParityShards)
+	id, v, err := s.provisionForPolicyLocked(ctx, pol)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -362,6 +362,32 @@ func (s *Server) leasedVlogForWrite(ctx context.Context, opID int64, path string
 		return 0, nil, err
 	}
 	return id, v, nil
+}
+
+// vlogMatchesPolicy reports whether an existing vlog can hold chunks written
+// under pol. An EC policy is served by a replicated staging vlog tagged with the
+// EC scheme as its promotion target, never by writing chunks straight into an EC
+// vlog (which only accepts whole stripe rows).
+func vlogMatchesPolicy(info meta.VlogInfo, pol meta.BucketPolicy) bool {
+	if pol.ProtectionScheme == "EC" {
+		return info.IsStaging() &&
+			int(info.TargetDataShards) == pol.DataShards &&
+			int(info.TargetParityShards) == pol.ParityShards
+	}
+	return !info.IsStaging() &&
+		info.ProtectionScheme == pol.ProtectionScheme &&
+		int(info.DataShards) == pol.DataShards &&
+		int(info.ParityShards) == pol.ParityShards
+}
+
+// provisionForPolicyLocked creates a vlog to receive chunks under pol: a
+// replicated staging vlog for EC, or a plain vlog otherwise. The caller must
+// hold vlogMu.
+func (s *Server) provisionForPolicyLocked(ctx context.Context, pol meta.BucketPolicy) (uint32, *storage.Vlog, error) {
+	if pol.ProtectionScheme == "EC" {
+		return s.provisionStagingVlogLocked(ctx, pol.DataShards, pol.ParityShards)
+	}
+	return s.provisionVlogLocked(ctx, pol.ProtectionScheme, pol.DataShards, pol.ParityShards)
 }
 
 func (s *Server) flushWriteOp(ctx context.Context, opID, acknowledged int64) error {

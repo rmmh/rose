@@ -9,7 +9,14 @@ import (
 
 // MakeVlog creates a new vlog with the specified protection scheme.
 func (d *DB) MakeVlog(ctx context.Context, protectionScheme string, dataShards, parityShards int32) (uint32, error) {
-	res, err := d.db.ExecContext(ctx, "INSERT INTO vlog (protection_scheme, data_shards, parity_shards) VALUES (?, ?, ?)", protectionScheme, dataShards, parityShards)
+	return d.MakeStagingVlog(ctx, protectionScheme, dataShards, parityShards, 0, 0)
+}
+
+// MakeStagingVlog records a vlog and, when targetParityShards is nonzero, marks
+// it as a replicated staging vlog whose chunks will later be promoted into an EC
+// vlog with the given target shard counts.
+func (d *DB) MakeStagingVlog(ctx context.Context, protectionScheme string, dataShards, parityShards, targetDataShards, targetParityShards int32) (uint32, error) {
+	res, err := d.db.ExecContext(ctx, "INSERT INTO vlog (protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards) VALUES (?, ?, ?, ?, ?)", protectionScheme, dataShards, parityShards, targetDataShards, targetParityShards)
 	if err != nil {
 		return 0, fmt.Errorf("make vlog: %w", err)
 	}
@@ -39,7 +46,15 @@ type VlogInfo struct {
 	ProtectionScheme string
 	DataShards       int32
 	ParityShards     int32
+	// TargetDataShards/TargetParityShards are nonzero only on replicated staging
+	// vlogs: they record the EC scheme the staged chunks will be promoted into.
+	TargetDataShards   int32
+	TargetParityShards int32
 }
+
+// IsStaging reports whether this is a replicated staging vlog awaiting promotion
+// into an EC vlog with the recorded target shard counts.
+func (v VlogInfo) IsStaging() bool { return v.TargetParityShards > 0 || v.TargetDataShards > 0 }
 
 type VlogPlogInfo struct {
 	ShardIndex int
@@ -64,7 +79,7 @@ func (d *DB) ListPlogs(ctx context.Context) ([]PlogInfo, error) {
 }
 
 func (d *DB) ListVlogs(ctx context.Context) ([]VlogInfo, error) {
-	rows, err := d.db.QueryContext(ctx, "SELECT id, length, protection_scheme, data_shards, parity_shards FROM vlog ORDER BY id")
+	rows, err := d.db.QueryContext(ctx, "SELECT id, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards FROM vlog ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +87,7 @@ func (d *DB) ListVlogs(ctx context.Context) ([]VlogInfo, error) {
 	var out []VlogInfo
 	for rows.Next() {
 		var info VlogInfo
-		if err := rows.Scan(&info.ID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards); err != nil {
+		if err := rows.Scan(&info.ID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards); err != nil {
 			return nil, err
 		}
 		out = append(out, info)

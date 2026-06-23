@@ -20,6 +20,7 @@ type Job struct {
 
 const (
 	JobCompact     = "compact"
+	JobPromote     = "promote"
 	JobDrain       = "drain"
 	JobReprotect   = "reprotect"
 	JobReplace     = "replace"
@@ -62,6 +63,34 @@ func (d *DB) GetOrCreateCompactionJob(ctx context.Context, targetVlog uint32) (J
 		return Job{}, err
 	}
 	return Job{ID: id, Kind: JobCompact, State: JobRunning, TargetVlog: targetVlog}, nil
+}
+
+// GetOrCreatePromoteJob returns the running promotion job for a staging vlog,
+// creating one if none exists. Keyed by target_vlog (the staging vlog) like
+// compaction, it lets a crash mid-promotion resume against the same destination
+// EC vlog instead of orphaning it: the staged chunks still resolve to the
+// replicated staging vlog until their rows are reparented, so the job re-runs.
+func (d *DB) GetOrCreatePromoteJob(ctx context.Context, stagingVlog uint32) (Job, error) {
+	j, err := scanJob(d.db.QueryRowContext(ctx,
+		"SELECT "+jobColumns+" FROM job WHERE kind = ? AND state = ? AND target_vlog = ?",
+		JobPromote, JobRunning, stagingVlog))
+	if err == nil {
+		return j, nil
+	}
+	if err != sql.ErrNoRows {
+		return Job{}, err
+	}
+	res, err := d.db.ExecContext(ctx,
+		"INSERT INTO job (kind, state, target_vlog, created_at) VALUES (?, ?, ?, ?)",
+		JobPromote, JobRunning, stagingVlog, time.Now().UnixNano())
+	if err != nil {
+		return Job{}, fmt.Errorf("create promotion job: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Job{}, err
+	}
+	return Job{ID: id, Kind: JobPromote, State: JobRunning, TargetVlog: stagingVlog}, nil
 }
 
 // GetOrCreateScrubRepairJob returns the running scrub-repair job for a vlog,
@@ -148,6 +177,25 @@ func (d *DB) getOrCreateDiskJob(ctx context.Context, kind string, targetDisk, de
 func (d *DB) SetJobDest(ctx context.Context, jobID int64, destVlog uint32) error {
 	_, err := d.db.ExecContext(ctx, "UPDATE job SET dest_vlog = ? WHERE id = ?", destVlog, jobID)
 	return err
+}
+
+// FinishRunningPromoteJob marks any running promotion job for a staging vlog
+// done, reporting whether one existed. Promotion resumed after a crash that had
+// already reparented enough chunks to drop the staging vlog below a full stripe
+// row finds nothing left to promote; this retires the orphaned job so it is not
+// re-resumed forever.
+func (d *DB) FinishRunningPromoteJob(ctx context.Context, stagingVlog uint32) (bool, error) {
+	res, err := d.db.ExecContext(ctx,
+		"UPDATE job SET state = ? WHERE kind = ? AND state = ? AND target_vlog = ?",
+		JobDone, JobPromote, JobRunning, stagingVlog)
+	if err != nil {
+		return false, fmt.Errorf("finish promotion job for vlog %d: %w", stagingVlog, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (d *DB) MarkJobDone(ctx context.Context, jobID int64) error {
@@ -303,7 +351,7 @@ func (d *DB) RetireVlog(ctx context.Context, vlogID uint32) ([]PlogInfo, error) 
 func (d *DB) GetVlog(ctx context.Context, vlogID uint32) (VlogInfo, error) {
 	var info VlogInfo
 	err := d.db.QueryRowContext(ctx,
-		"SELECT id, length, protection_scheme, data_shards, parity_shards FROM vlog WHERE id = ?", vlogID).
-		Scan(&info.ID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards)
+		"SELECT id, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards FROM vlog WHERE id = ?", vlogID).
+		Scan(&info.ID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards)
 	return info, err
 }

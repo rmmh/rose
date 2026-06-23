@@ -331,6 +331,10 @@ func (s *Server) Recover(ctx context.Context) error {
 			if err := s.CompactVlog(ctx, job.TargetVlog); err != nil {
 				return fmt.Errorf("resume compaction of vlog %d: %w", job.TargetVlog, err)
 			}
+		case meta.JobPromote:
+			if _, err := s.PromoteStagingVlog(ctx, job.TargetVlog); err != nil {
+				return fmt.Errorf("resume promotion of staging vlog %d: %w", job.TargetVlog, err)
+			}
 		case meta.JobDrain:
 			if err := s.DrainDisk(ctx, job.TargetDisk); err != nil {
 				return fmt.Errorf("resume drain of disk %d: %w", job.TargetDisk, err)
@@ -435,10 +439,6 @@ func (s *Server) clearActiveVlogLocked(vlogID uint32) {
 // disks, and the in-memory clients, registering everything. The caller must
 // hold vlogMu.
 func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataShards, parityShards int) (uint32, *storage.Vlog, error) {
-	id, err := s.db.MakeVlog(ctx, scheme, int32(dataShards), int32(parityShards))
-	if err != nil {
-		return 0, nil, err
-	}
 	// One disk per node fault domain, so no two shards/copies of this vlog share
 	// a node (PlacementAllowed's NodeLevelDurability).
 	diskIDs := s.distinctNodeDisksLocked(0)
@@ -454,6 +454,33 @@ func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataSha
 		if clientCount == 0 || clientCount > len(diskIDs) {
 			return 0, nil, fmt.Errorf("EC vlog needs 1..%d distinct-node disks, got %d", len(diskIDs), clientCount)
 		}
+	}
+	return s.provisionVlogCoreLocked(ctx, scheme, dataShards, parityShards, 0, 0, clientCount, diskIDs)
+}
+
+// provisionStagingVlogLocked creates a replicated staging vlog for an EC bucket:
+// a DUPLICATE vlog with targetParity+1 mirrors (matching the EC scheme's fault
+// tolerance) tagged with the EC scheme its chunks will be promoted into. The
+// caller must hold vlogMu.
+func (s *Server) provisionStagingVlogLocked(ctx context.Context, targetData, targetParity int) (uint32, *storage.Vlog, error) {
+	diskIDs := s.distinctNodeDisksLocked(0)
+	if len(diskIDs) == 0 {
+		return 0, nil, fmt.Errorf("no active disks configured")
+	}
+	mirrors := targetParity + 1
+	if mirrors > len(diskIDs) {
+		return 0, nil, fmt.Errorf("EC staging needs %d distinct-node disks for m+1 mirrors, got %d", mirrors, len(diskIDs))
+	}
+	return s.provisionVlogCoreLocked(ctx, "DUPLICATE", 1, 0, targetData, targetParity, mirrors, diskIDs)
+}
+
+// provisionVlogCoreLocked records a vlog, lays its clientCount shards across the
+// given distinct-node disks, mounts it, and registers it. The caller must hold
+// vlogMu.
+func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dataShards, parityShards, targetData, targetParity, clientCount int, diskIDs []uint32) (uint32, *storage.Vlog, error) {
+	id, err := s.db.MakeStagingVlog(ctx, scheme, int32(dataShards), int32(parityShards), int32(targetData), int32(targetParity))
+	if err != nil {
+		return 0, nil, err
 	}
 	clients := make([]storage.PlogClient, 0, clientCount)
 	for shard := 0; shard < clientCount; shard++ {

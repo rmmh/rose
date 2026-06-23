@@ -13,6 +13,7 @@ import (
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
+	"github.com/rmmh/rose/storage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
@@ -174,9 +175,13 @@ func TestFileSnapshotNamespaceLifecycleOverGRPC(t *testing.T) {
 
 // TestBucketECFileRoundTrip writes a file into a bucket configured for 3+1
 // erasure coding and reads it back, exercising the file API end to end over EC
-// rather than the default mirror. It also asserts the backing vlog really is EC
-// 3+1 with its four shards spread across four distinct nodes (NodeLevelDurability).
+// rather than the default mirror. EC is deferred: the write lands in a replicated
+// staging vlog and only becomes coded once the maintenance promotion pass packs
+// it into whole stripe rows, so the test promotes explicitly and then asserts the
+// promoted vlog really is EC 3+1 with its four shards spread across four distinct
+// nodes (NodeLevelDurability), and that the file still reads back from it.
 func TestBucketECFileRoundTrip(t *testing.T) {
+	defer storage.SetECColumnBytesForTest(16 << 10)() // small stripe so 200 KB promotes
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
 	if err != nil {
@@ -218,6 +223,11 @@ func TestBucketECFileRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Promote the staged chunks into a coded EC vlog, the deferred half of EC.
+	if _, err := srv.PromoteStaging(ctx); err != nil {
+		t.Fatalf("promote staging: %v", err)
+	}
+
 	reopen, err := srv.Open(ctx, &pb.OpenRequest{Path: "/ec/file1"})
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +240,7 @@ func TestBucketECFileRoundTrip(t *testing.T) {
 		t.Fatalf("EC file round-trip mismatch: got %d bytes, want %d", len(read.GetBuffer()), len(data))
 	}
 
-	// The file's bytes must have been written under EC 3+1, spread across four nodes.
+	// After promotion the file's bytes live in an EC 3+1 vlog, spread across four nodes.
 	vlogs, err := db.ListVlogs(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -264,10 +274,13 @@ func TestBucketECFileRoundTrip(t *testing.T) {
 	}
 }
 
-// TestVlogECRealPlogVariableLength drives an EC 3+1 vlog backed by real plogs
-// with variable-length writes through the low-level vlog API, isolating the
-// real-plog EC path from the file/chunk layer.
-func TestVlogECRealPlogVariableLength(t *testing.T) {
+// TestVlogECRealPlogWholeRows drives an EC 3+1 vlog backed by real plogs through
+// the low-level vlog API, isolating the real-plog EC path from the file/chunk
+// layer. EC vlogs only accept whole stripe rows (the deferred-EC model packs
+// chunks into rows during promotion), so the writes here are row-aligned; a
+// shrunk stripe keeps the fixtures small.
+func TestVlogECRealPlogWholeRows(t *testing.T) {
+	defer storage.SetECColumnBytesForTest(4096)() // stripe row = 4096*3 = 12288 bytes
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
 	if err != nil {
@@ -293,7 +306,8 @@ func TestVlogECRealPlogVariableLength(t *testing.T) {
 	vlogID := mk.GetVlogId()
 
 	rng := rand.New(rand.NewSource(3))
-	lengths := []int{1, 7, 100, 4095, 4096, 5000, 33, 2149, 9086}
+	sw := int(storage.ECStripeWidth(3))
+	lengths := []int{sw, 2 * sw, sw, 3 * sw} // whole stripe rows of varying size
 	offs := make([]uint32, len(lengths))
 	payloads := make([][]byte, len(lengths))
 	for i, n := range lengths {

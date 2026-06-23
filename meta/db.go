@@ -135,7 +135,14 @@ func initSchema(db *sql.DB, durable bool) error {
 			length INTEGER NOT NULL DEFAULT 0,
 			protection_scheme TEXT NOT NULL,
 			data_shards INTEGER NOT NULL,
-			parity_shards INTEGER NOT NULL
+			parity_shards INTEGER NOT NULL,
+			-- When nonzero, this is a replicated staging vlog whose chunks are
+			-- destined for an EC vlog with these shard counts. The hot write path
+			-- stages EC-bucket chunks here (replicated, m+1 mirrors) because the EC
+			-- vlog only accepts whole stripe rows; the maintenance promotion pass
+			-- packs complete rows into EC vlogs and reparents the chunks.
+			target_data_shards INTEGER NOT NULL DEFAULT 0,
+			target_parity_shards INTEGER NOT NULL DEFAULT 0
 		);
 
 		-- Per-bucket protection policy.  A bucket is a top-level path component;

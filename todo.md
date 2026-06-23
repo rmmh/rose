@@ -20,6 +20,55 @@
 - Implement multi-disk placement, strict read-only degradation, repair, and
   compaction.
 
+## EC at the vlog level (write path + promotion done)
+
+Erasure coding is off the per-chunk path (which padded every chunk up to a
+dataShards multiple and fanned every tiny chunk across all d+m shards) and onto
+the vlog byte stream as coarse column striping, with EC deferred behind a
+replicated staging vlog and a maintenance-pass promotion step.
+
+- Geometry: stripe column width C = dataPerBlock (255*4096), so each column maps
+  to exactly one hash-protected plog block. Logical offset o -> row o/(C*d),
+  column (o%(C*d))/C, position o%C. Data column j of row r lives in data plog j
+  at plog offset r*C; parity column k in parity plog d+k at r*C. Whole-stream
+  reconstruct still works because each row is exactly C per shard, so parity at
+  global position p is a function of the data shards at global position p.
+- Complete rows only: the EC vlog only ever receives complete C*d stripe rows,
+  so data AND parity are append-only and seal normally -- no mutable parity, no
+  plog format change. (A partial trailing row would force parity to keep changing
+  after its block is already full-and-sealed, since columns fill left-to-right;
+  that collision is why we do not put a partial row in the EC vlog.)
+- (done) Write path: an EC bucket writes through a replicated (m+1) DUPLICATE
+  staging vlog tagged with the target EC scheme (vlog.target_{data,parity}_shards,
+  VlogInfo.IsStaging). leasedVlogForWrite routes EC policies to staging via
+  vlogMatchesPolicy/provisionForPolicyLocked, so chunks are protected by
+  replication until promoted.
+- (done) Promotion: Server.PromoteStaging runs in the maintenance pass (and a
+  durable JobPromote keyed by the staging vlog so a crash resumes from Recover).
+  promotablePrefix packs whole live chunks into complete stripe rows, choosing the
+  prefix whose cumulative size lands closest below a row boundary so the single
+  padded final row stores the fewest zeros; the sub-row remainder stays replicated
+  in staging to coalesce with later writes. Coded rows are made durable in the EC
+  vlog before any chunk is reparented (RelocateChunk), mirroring compaction's
+  crash-safety. Chunks are content-addressed/unsplittable, so promotion reparents
+  whole chunks by hash.
+- TODO (task #3): staging cleanup -- after promotion reparents chunks out, the
+  staging vlog's old regions are dead space; ordinary DUPLICATE compaction
+  reclaims them, but the now-empty staging vlog is not yet retired. Edge case:
+  when the target EC vlog is too full to accept another complete row, seal it,
+  allocate a fresh EC vlog, and retarget the staging remainder so staging never
+  becomes undrainable. Sub-row data that never completes a row stays replicated
+  (long-tail cost) unless a coalescing pass packs it.
+- TODO (compaction): CompactVlog of an EC vlog still does dest.Write per chunk
+  (compaction.go), which an EC dest rejects (whole rows only). EC vlogs are only
+  created by promotion today, so this is not hit until EC vlogs accumulate dead
+  space worth compacting; fix by packing chunks into rows on the EC compaction
+  path (reuse promotablePrefix) or by routing EC compaction through promotion.
+- TODO (perf): block data cache -- keep recently written/promoted column data in
+  memory so promotion and reconstruct avoid re-reading data plogs.
+- TODO (perf): fan out per-row shard writes concurrently (the new path encodes
+  and writes rows sequentially for clarity first).
+
 ## Bitrot and scrubbing (done)
 
 - Plog now keeps 4KB-aligned, immutable sealed sectors with a ragged-edge open
