@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"strings"
+	"time"
 )
 
 // MakeVlog creates a new vlog with the specified protection scheme.
@@ -339,9 +341,13 @@ func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, placement
 	if err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id) VALUES (?, ?)
-		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id`, path, id); err != nil {
+	parent, name := splitPath(path)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id, parent, name) VALUES (?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id`, path, id, parent, name); err != nil {
 		return 0, fmt.Errorf("publish file head: %w", err)
+	}
+	if err := ensureDirs(ctx, tx, path, mtime); err != nil {
+		return 0, fmt.Errorf("ensure parent directories: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit file version: %w", err)
@@ -551,7 +557,12 @@ func (d *DB) UnlinkFile(ctx context.Context, path string) error {
 	return tx.Commit()
 }
 
+// RenameFile moves a file or directory from oldPath to newPath.  A file move is
+// O(1); a directory move is a transactional prefix rewrite of every file_head
+// and dir row under the subtree (O(descendants) -- a true O(1) rename would need
+// the explicit dir-inode model deferred in this cut).
 func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
+	oldPath, newPath = cleanPath(oldPath), cleanPath(newPath)
 	if oldPath == newPath {
 		return nil
 	}
@@ -560,11 +571,26 @@ func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 		return err
 	}
 	defer tx.Rollback()
+
 	var oldID int64
 	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", oldPath).Scan(&oldID)
+	if err == sql.ErrNoRows {
+		// Not a file: it may be a directory subtree.
+		var isDir int
+		if derr := tx.QueryRowContext(ctx, "SELECT 1 FROM dir WHERE path = ?", oldPath).Scan(&isDir); derr == sql.ErrNoRows {
+			return sql.ErrNoRows
+		} else if derr != nil {
+			return derr
+		}
+		if err := renameDirSubtree(ctx, tx, oldPath, newPath); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 	if err != nil {
 		return err
 	}
+
 	var replacedID int64
 	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", newPath).Scan(&replacedID)
 	if err == nil {
@@ -578,12 +604,77 @@ func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 	} else if err != sql.ErrNoRows {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id) VALUES (?, ?)
-		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id`, newPath, oldID); err != nil {
+	parent, name := splitPath(newPath)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id, parent, name) VALUES (?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id, parent = excluded.parent, name = excluded.name`,
+		newPath, oldID, parent, name); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM file_head WHERE path = ?", oldPath); err != nil {
 		return err
 	}
+	if err := ensureDirs(ctx, tx, newPath, time.Now().UnixNano()); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// renameDirSubtree relocates the directory at oldPath, and every file and
+// subdirectory beneath it, to newPath within tx.  Paths are rewritten by
+// replacing the oldPath prefix; parent/name are recomputed for each moved row.
+func renameDirSubtree(ctx context.Context, tx *sql.Tx, oldPath, newPath string) error {
+	if err := ensureDirs(ctx, tx, newPath, time.Now().UnixNano()); err != nil {
+		return err
+	}
+	// Rewrite the moved directory itself plus every descendant directory.
+	if err := rewriteSubtreePaths(ctx, tx, "dir", oldPath, newPath); err != nil {
+		return err
+	}
+	// Rewrite every file beneath the subtree.
+	if err := rewriteSubtreePaths(ctx, tx, "file_head", oldPath, newPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+// rewriteSubtreePaths moves the row at oldPath (if any) and all rows whose path
+// is prefixed by oldPath+"/" to the corresponding path under newPath in the
+// named namespace table (dir or file_head), recomputing parent/name.
+func rewriteSubtreePaths(ctx context.Context, tx *sql.Tx, table, oldPath, newPath string) error {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT path FROM `+table+` WHERE path = ? OR path LIKE ? ESCAPE '\'`,
+		oldPath, escapeLike(oldPath)+`/%`)
+	if err != nil {
+		return err
+	}
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return err
+		}
+		paths = append(paths, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, p := range paths {
+		np := newPath + p[len(oldPath):]
+		parent, name := splitPath(np)
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE `+table+` SET path = ?, parent = ?, name = ? WHERE path = ?`,
+			np, parent, name, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// escapeLike escapes the LIKE metacharacters in a literal path prefix so a
+// directory name containing %, _, or \ does not widen the subtree match.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }

@@ -68,9 +68,25 @@ func initSchema(db *sql.DB, durable bool) error {
 
 		-- The current namespace points at immutable file versions.  Snapshots
 		-- retain those version IDs even after a head is replaced or removed.
+		-- parent/name are derived from path (parent = the containing directory,
+		-- "" for a root entry) so a directory listing is an indexed equality scan
+		-- on parent rather than a path-prefix scan over the whole namespace.
 		CREATE TABLE IF NOT EXISTS file_head (
 			path TEXT PRIMARY KEY,
-			file_id INTEGER NOT NULL REFERENCES file(id)
+			file_id INTEGER NOT NULL REFERENCES file(id),
+			parent TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL DEFAULT ''
+		);
+
+		-- Every directory, explicit (Mkdir) or implicit (an ancestor of a
+		-- committed file), has a row here.  It makes empty directories durable and
+		-- lets intermediate directories appear as children of their parent in a
+		-- ListDir without materializing a file under them.
+		CREATE TABLE IF NOT EXISTS dir (
+			path TEXT PRIMARY KEY,
+			parent TEXT NOT NULL,
+			name TEXT NOT NULL,
+			mtime INTEGER NOT NULL
 		);
 
 		CREATE TABLE IF NOT EXISTS snapshot (
@@ -213,6 +229,12 @@ func initSchema(db *sql.DB, durable bool) error {
 		-- scale.
 		CREATE INDEX IF NOT EXISTS idx_vlog_plog_plog ON vlog_plog(plog_id);
 		CREATE INDEX IF NOT EXISTS idx_plog_disk ON plog(disk_id);
+
+		-- Directory listings resolve children by parent: one indexed equality scan
+		-- per table returns exactly the immediate children, O(children) rather than
+		-- O(subtree).
+		CREATE INDEX IF NOT EXISTS idx_file_head_parent ON file_head(parent);
+		CREATE INDEX IF NOT EXISTS idx_dir_parent ON dir(parent);
 	`)
 	if err != nil {
 		return fmt.Errorf("init schema: %w", err)
@@ -225,6 +247,24 @@ func initSchema(db *sql.DB, durable bool) error {
 		WHERE f.id = (SELECT MAX(latest.id) FROM file AS latest WHERE latest.path = f.path)
 	`); err != nil {
 		return fmt.Errorf("backfill file heads: %w", err)
+	}
+	// file_head predating the parent/name columns: a duplicate-column error just
+	// means the columns already exist.
+	for _, col := range []string{
+		`ALTER TABLE file_head ADD COLUMN parent TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE file_head ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(col); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				return fmt.Errorf("add file_head namespace column: %w", err)
+			}
+		}
+	}
+	// Backfill parent/name and the ancestor dir rows for any namespace that
+	// predates directory-aware listing.  Done in Go so the path splitting matches
+	// splitPath exactly.
+	if err := backfillNamespace(db); err != nil {
+		return fmt.Errorf("backfill namespace: %w", err)
 	}
 	// Disk catalogs predating the lifecycle column default their existing rows to
 	// active; a duplicate-column error just means the column already exists.
