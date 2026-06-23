@@ -49,6 +49,7 @@ type Plog struct {
 
 	buf        []byte // open trailing sector, 0..4096 bytes (sealed once full)
 	hashes     []byte // hashes of sealed sectors in the current open block
+	writeBuf   []byte // reusable batched-write scratch, grown under p.mu
 	hashSector [SectorSize]byte
 }
 
@@ -117,6 +118,7 @@ func openPlogFile(path string, id uint32, flag int) (*Plog, error) {
 		logicalLength: calcLogical(info.Size()),
 		buf:           make([]byte, 0, SectorSize),
 		hashes:        make([]byte, 0, HashesPerBlock*HashSize),
+		writeBuf:      make([]byte, 0, 2*SectorSize),
 	}
 	if err := p.reload(); err != nil {
 		f.Close()
@@ -304,9 +306,14 @@ func (p *Plog) writeLocked(data []byte) (int64, error) {
 	firstSectorLogicalStart := p.logicalLength - int64(len(p.buf))
 	firstSectorPhysicalStart := calcPhysical(firstSectorLogicalStart)
 
-	// Pre-allocate a write buffer.
+	// Reuse the batched-write scratch instead of allocating a fresh buffer for
+	// every EnsureWrite; it stays under p.mu and grows geometrically as needed.
 	estimatedHashSectors := len(data)/dataPerBlock + 2
-	writeBuf := make([]byte, 0, len(p.buf)+len(data)+estimatedHashSectors*SectorSize)
+	writeBuf := p.writeBuf[:0]
+	neededCap := len(p.buf) + len(data) + estimatedHashSectors*SectorSize
+	if cap(writeBuf) < neededCap {
+		writeBuf = make([]byte, 0, neededCap)
+	}
 
 	// Construct the first sector (which seals the current p.buf)
 	var sector [SectorSize]byte
@@ -366,6 +373,7 @@ func (p *Plog) writeLocked(data []byte) (int64, error) {
 			return 0, fmt.Errorf("write plog %d: %w", p.id, err)
 		}
 	}
+	p.writeBuf = writeBuf[:0]
 
 	return offset, nil
 }
