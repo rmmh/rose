@@ -13,13 +13,13 @@ import (
 	"github.com/rmmh/rose/meta"
 )
 
-// TestRecoverFailsDiskWithMissingPlogFile covers true media loss on a disk the
-// catalog still considers active: a committed shard file is gone (deleted out
-// from under the catalog). Recover must mark the whole disk failed -- so it
-// leaves placement and becomes a reprotect target -- and boot degraded with the
-// shard stubbed offline, rather than failing startup or letting OpenPlog's
-// O_CREATE silently resurrect it as an empty shard.
-func TestRecoverFailsDiskWithMissingPlogFile(t *testing.T) {
+// TestRecoverStubsSingleMissingPlogFile covers an individual shard file removed
+// out-of-band while the rest of the disk's directory is intact (e.g. tearing
+// down a bucket's vlogs). Recover must leave the disk active -- not condemn the
+// whole disk for one file -- stub just that shard offline, and boot degraded with
+// reads served from the surviving mirror, rather than failing startup or letting
+// OpenPlog's O_CREATE silently resurrect the shard as an empty file.
+func TestRecoverStubsSingleMissingPlogFile(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
@@ -88,10 +88,10 @@ func TestRecoverFailsDiskWithMissingPlogFile(t *testing.T) {
 	}
 	defer s2.CloseStorage()
 
-	// The disk that lost the file is marked failed, so it is out of placement and
-	// the maintenance driver will reprotect every shard it held.
-	if got := s2.DiskStates()[lostDiskID]; got != meta.DiskFailed {
-		t.Fatalf("disk %d state = %q after losing a shard file, want %q", lostDiskID, got, meta.DiskFailed)
+	// The disk stays active: a single out-of-band file deletion must not condemn
+	// the whole disk, which keeps serving its other shards.
+	if got := s2.DiskStates()[lostDiskID]; got != meta.DiskActive {
+		t.Fatalf("disk %d state = %q after one missing shard file, want %q", lostDiskID, got, meta.DiskActive)
 	}
 	// The lost shard is stubbed offline, not opened...
 	if !s2.offlinePlogs[lostPlogID] {

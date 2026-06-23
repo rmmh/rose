@@ -136,12 +136,17 @@ func NewServerWithDiskRoots(db *meta.DB, diskRoots map[uint32]string) *Server {
 	return s
 }
 
-func (s *Server) plogPath(diskID, plogID uint32) string {
-	root, ok := s.diskRoots[diskID]
-	if !ok {
-		root = filepath.Join(s.dataDir, "disk-"+fmt.Sprint(diskID))
+// diskRoot is the directory holding a disk's plog files: its configured root, or
+// a dataDir-relative default for an unconfigured disk id.
+func (s *Server) diskRoot(diskID uint32) string {
+	if root, ok := s.diskRoots[diskID]; ok {
+		return root
 	}
-	return filepath.Join(root, "plog-"+fmt.Sprint(plogID))
+	return filepath.Join(s.dataDir, "disk-"+fmt.Sprint(diskID))
+}
+
+func (s *Server) plogPath(diskID, plogID uint32) string {
+	return filepath.Join(s.diskRoot(diskID), "plog-"+fmt.Sprint(plogID))
 }
 
 // nodeOf returns the node fault domain a disk belongs to. A disk without an
@@ -222,12 +227,13 @@ func (s *Server) GetDB() *meta.DB {
 }
 
 // Recover rebuilds local plog and vlog clients from persisted metadata. A disk
-// whose backing files are missing or inaccessible (the whole disk unplugged, or
-// a committed shard file gone) is marked failed durably, so it leaves placement
-// and the maintenance driver reprotects the shards it held onto healthy disks;
-// its shards, like those of an already-failed disk or a disk on a failed node,
-// mount offline. The server boots degraded and the surviving redundancy carries
-// reads until reprotect completes, rather than failing startup on the first
+// whose entire backing directory is missing or inaccessible (the disk unplugged)
+// is marked failed durably, so it leaves placement and the maintenance driver
+// reprotects the shards it held onto healthy disks. An individual missing plog
+// file inside an otherwise-accessible disk is tolerated, not failed: that shard
+// mounts offline (it may have been removed out-of-band) while the disk keeps
+// serving its other shards. Either way the server boots degraded and the
+// surviving redundancy carries reads, rather than failing startup on the first
 // absent file.
 func (s *Server) Recover(ctx context.Context) error {
 	// Declare configured disks in the durable catalog (idempotent) and adopt any
@@ -283,43 +289,45 @@ func (s *Server) Recover(ctx context.Context) error {
 	plogByID := make(map[uint32]*storage.Plog, len(plogInfos))
 	s.offlinePlogs = make(map[uint32]bool)
 
-	// Fail any disk that has lost committed data before opening anything. A catalog
-	// plog whose backing file is missing or otherwise inaccessible, on a disk the
-	// catalog still considers reachable, means the disk silently dropped a shard it
-	// was supposed to hold (the whole disk unplugged, or an individual file gone) --
-	// true media loss not yet reflected in its lifecycle state. Mark the disk failed
-	// durably so it leaves placement and the maintenance driver reprotects every
-	// shard it held onto healthy disks, rather than limping along with a silently
-	// incomplete disk (or letting OpenPlog's O_CREATE resurrect the shard empty).
-	// Probing here, before the open loop, keeps the decision order-independent: a
-	// disk found bad by any of its plogs is failed for all of them.
+	// Fail a disk whose entire backing directory is gone or inaccessible (the disk
+	// unplugged or unmounted) before opening anything, so it leaves placement and
+	// the maintenance driver reprotects every shard it held onto healthy disks.
+	// This is disk-granular on purpose: an individual missing plog file inside an
+	// otherwise-accessible directory is NOT a disk failure -- vlog files can be
+	// removed out-of-band (e.g. tearing down a bucket's vlogs) -- so those shards
+	// are stubbed offline in the open loop while the disk keeps serving the rest.
+	// Probing once per disk keeps the decision order-independent.
+	probed := make(map[uint32]bool)
 	for _, info := range plogInfos {
-		if !s.diskReachableLocked(info.DiskID) {
-			continue // already failed/detached, or on a failed node
+		if probed[info.DiskID] || !s.diskReachableLocked(info.DiskID) {
+			continue // unconfigured-default aside, already probed/failed/detached/offline
 		}
-		if _, err := os.Stat(s.plogPath(info.DiskID, info.ID)); err != nil {
+		probed[info.DiskID] = true
+		if fi, err := os.Stat(s.diskRoot(info.DiskID)); err != nil || !fi.IsDir() {
 			if err := s.setDiskStateLocked(ctx, info.DiskID, meta.DiskFailed); err != nil {
-				return fmt.Errorf("fail disk %d holding inaccessible plog %d: %w", info.DiskID, info.ID, err)
+				return fmt.Errorf("fail disk %d with inaccessible root: %w", info.DiskID, err)
 			}
 		}
 	}
 
 	for _, info := range plogInfos {
 		if !s.diskReachableLocked(info.DiskID) {
-			// A failed disk's bytes are gone (failed hardware, an inaccessible file
-			// detected above) and a failed node's disk is offline; either way the
-			// file is unreachable. Stub it offline rather than failing recovery on
-			// the first dead disk, so its vlog mounts degraded and reprotect (or a
-			// returning node) can restore it.
+			// A failed disk's bytes are gone (failed hardware, or an inaccessible
+			// directory detected above) and a failed node's disk is offline; either
+			// way the file is unreachable. Stub it offline rather than failing
+			// recovery on the first dead disk, so its vlog mounts degraded and
+			// reprotect (or a returning node) can restore it.
 			s.offlinePlogs[info.ID] = true
 			continue
 		}
 		plog, err := storage.OpenExistingPlog(s.plogPath(info.DiskID, info.ID), info.ID)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				// The file vanished between the accessibility probe above and this
-				// open (a concurrent loss). The probe already failed any disk it
-				// caught; stub this shard offline so recovery still completes.
+				// The disk's directory is present (the pre-scan did not fail it), but
+				// this individual shard file is gone -- removed out-of-band, or a
+				// stray loss. Stub the shard offline and leave the disk active: reads
+				// fall through to surviving redundancy and the disk keeps serving its
+				// other shards, rather than condemning the whole disk for one file.
 				s.offlinePlogs[info.ID] = true
 				continue
 			}

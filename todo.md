@@ -293,30 +293,37 @@ replicated staging vlog and a maintenance-pass promotion step.
   every published object is fully protected again; plus the gRPC handlers
   (AddDisk/RemoveDisk/ReplaceDisk/StartReprotect/StartRebalance) wired to the
   control-plane methods.
-- (done) Recover now tolerates a catalog plog whose backing file is missing or
-  inaccessible on a disk the catalog still considers reachable (true media loss --
-  the whole disk unplugged, or a committed shard file gone -- not yet reflected in
-  its lifecycle state), and closes the repair loop: an accessibility pre-scan
-  marks any such disk failed durably (setDiskStateLocked) before opening anything,
-  so it leaves placement, its shards mount offline, and the maintenance driver's
-  next pass (RunMaintenanceOnce already reprotects DiskFailed disks) regenerates
-  every shard it held onto a healthy disk -- no operator action. The root cause
-  was OpenPlog's O_CREATE silently resurrecting a missing shard as an empty file
-  (which then either tripped ReconcileShardLengths' "target beyond length" or, for
-  an empty vlog, mounted a bogus zero-length shard reads would trust). Fix: a
-  non-creating storage.OpenExistingPlog (errors.Is(err, fs.ErrNotExist)-
-  detectable) plus the boot-time disk-fail pre-scan in Recover; reopenNodePlogsLocked
+- (done) Recover now tolerates missing/inaccessible plog backing storage, split by
+  granularity, and closes the repair loop for a lost disk:
+  - A disk whose entire backing directory is gone or inaccessible (the disk
+    unplugged/unmounted) is marked failed durably (setDiskStateLocked) by a
+    boot-time pre-scan over s.diskRoot, before anything is opened. It leaves
+    placement, its shards mount offline, and the maintenance driver's next pass
+    (RunMaintenanceOnce already reprotects DiskFailed disks) regenerates every
+    shard it held onto a healthy disk -- no operator action.
+  - An individual missing plog file inside an otherwise-accessible directory is
+    deliberately NOT a disk failure: vlog files can be removed out-of-band (e.g.
+    tearing down a bucket's vlogs), so that shard is stubbed offline and the disk
+    stays active, serving its other shards. Reads fall through to surviving
+    redundancy; the degraded shard is not auto-reprotected (the disk persists).
+  The root cause was OpenPlog's O_CREATE silently resurrecting a missing shard as
+  an empty file (which then either tripped ReconcileShardLengths' "target beyond
+  length" or, for an empty vlog, mounted a bogus zero-length shard reads would
+  trust). Fix: a non-creating storage.OpenExistingPlog (errors.Is(err,
+  fs.ErrNotExist)-detectable) plus the disk-granular pre-scan; reopenNodePlogsLocked
   also uses OpenExistingPlog so a returned node's genuinely-lost file fails the
   durability gate as its comment always intended (O_CREATE had been defeating it
-  too). Covered by TestRecoverFailsDiskWithMissingPlogFile,
+  too). Covered by TestRecoverStubsSingleMissingPlogFile (disk persists active),
   TestRecoverFailsWhollyMissingDisk, and TestRecoverFailedDiskGetsReprotected
   (end-to-end: boot-failed disk reprotected onto a spare in one maintenance pass).
-- Note: failing a disk on a single missing file is deliberately conservative --
-  a disk silently dropping a committed shard is untrustworthy, so reprotecting its
-  shards elsewhere is the safe response; it stays failed until replaced/re-attached.
+- Follow-up: an individual offline-stubbed shard (single out-of-band file loss)
+  has no automatic path back to full redundancy -- ScrubAndRepair errors on offline
+  shards, and reprotect is disk-keyed. A per-shard repair that regenerates an
+  offline hole would close this, if/when out-of-band single-file loss should
+  self-heal rather than persist degraded.
 - Still open: reverting a *failed* disk back to active across a cold restart
-  relies on its original plogs still being openable; a disk failed for genuinely
-  gone files cannot be reactivated (correctly -- the bytes are lost), only
+  relies on its original plogs still being openable; a disk failed for a genuinely
+  gone directory cannot be reactivated (correctly -- the bytes are lost), only
   replaced. Node-return cancel-on-return remains the path for a transiently
   offline node whose files survived.
 - (done) SweepStrayPlogFiles, run at the end of each maintenance pass, reclaims
