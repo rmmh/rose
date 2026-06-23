@@ -572,12 +572,26 @@ type pendingChunk struct {
 	data   []byte
 }
 
+// FastCDC chunk sizing. The target (normal) size is ~1 MB per the design in
+// README.md/plan.txt; the library requires NormalSize to be a power of two and
+// MinSize < NormalSize < MaxSize. Coarser chunks keep metadata small at the cost
+// of finer-grained deduplication.
+const (
+	chunkMinSize    = 256 * 1024
+	chunkNormalSize = 1024 * 1024
+	chunkMaxSize    = 4 * 1024 * 1024
+)
+
 // storeChunks FastCDC-chunks a materialized byte window and stores each chunk
 // durably (or reuses an existing one by content hash), returning the ordered
 // placements. The chunks tile the input exactly, so their logical lengths sum to
 // len(data).
 func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([]meta.ChunkPlacement, error) {
-	chunker, err := chunkers.NewChunker("fastcdc", bytes.NewReader(data), nil)
+	chunker, err := chunkers.NewChunker("fastcdc", bytes.NewReader(data), &chunkers.ChunkerOpts{
+		MinSize:    chunkMinSize,
+		NormalSize: chunkNormalSize,
+		MaxSize:    chunkMaxSize,
+	})
 	if err != nil {
 		return nil, err
 	}
