@@ -72,6 +72,15 @@ func (s *Server) StopMaintenanceDriver() {
 // rather than only on an explicit call. Each step's errors are independent: a
 // failing repair must not stop space reclamation, and vice versa.
 func (s *Server) RunMaintenanceOnce(ctx context.Context) error {
+	// Hold the maintenance lock for the whole pass so reclamation steps that move
+	// chunks across vlogs (promotion repacking staging into EC, then GC and
+	// compaction reclaiming the drained space) cannot interleave with a concurrent
+	// explicit GC/Compact. Without this, two actors plan against the same catalog
+	// snapshot and race to retire/repoint the same vlogs and chunks -- surfacing as
+	// "source vlog N not mounted", "promote: load vlog N: no rows", or, worse,
+	// silently repointing a chunk to the wrong bytes.
+	s.maintRunMu.Lock()
+	defer s.maintRunMu.Unlock()
 	states := s.DiskStates()
 	var firstErr error
 	recordErr := func(err error) {
@@ -103,10 +112,10 @@ func (s *Server) RunMaintenanceOnce(ctx context.Context) error {
 	if _, err := s.PromoteStaging(ctx); err != nil {
 		recordErr(err)
 	}
-	if _, err := s.GC(ctx); err != nil {
+	if _, err := s.gcLocked(ctx); err != nil {
 		recordErr(err)
 	}
-	if _, err := s.Compact(ctx, s.compactionPolicy()); err != nil {
+	if _, err := s.compactLocked(ctx, s.compactionPolicy()); err != nil {
 		recordErr(err)
 	}
 	if _, err := s.SweepStrayPlogFiles(ctx); err != nil {

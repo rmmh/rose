@@ -70,6 +70,13 @@ type Server struct {
 	maintenanceMu     sync.Mutex
 	maintenanceEvery  time.Duration
 	maintenanceCancel context.CancelFunc
+	// maintRunMu serializes control-plane reclamation so two callers never plan
+	// against the same catalog snapshot and then race to retire the same vlog.
+	// The background driver's pass and any explicit GC/Compact invocation all
+	// contend on it, making a whole pass mutually exclusive with an operator (or
+	// test) that drives reclamation directly. It is distinct from maintenanceMu,
+	// which only guards the driver's lifecycle fields above.
+	maintRunMu sync.Mutex
 	handlesMu         sync.Mutex
 	handles           map[int64]*FileHandle
 	handleCounter     int64
@@ -647,6 +654,14 @@ func (c *localPlogClient) TruncateTo(logical int64) error {
 // chunks were collected. The chunks' log bytes become orphan data eligible for
 // later segment compaction.
 func (s *Server) GC(ctx context.Context) (int, error) {
+	s.maintRunMu.Lock()
+	defer s.maintRunMu.Unlock()
+	return s.gcLocked(ctx)
+}
+
+// gcLocked is the body of GC for callers that already hold maintRunMu (the
+// maintenance pass), so a pass does not deadlock on its own GC step.
+func (s *Server) gcLocked(ctx context.Context) (int, error) {
 	collected, err := s.db.GCChunks(ctx)
 	if err != nil {
 		return 0, err

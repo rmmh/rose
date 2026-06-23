@@ -60,6 +60,14 @@ func (p CompactionPolicy) Candidates(usages []meta.VlogUsage) []meta.VlogUsage {
 // Compact plans and runs compaction for every vlog the policy selects, most
 // wasteful first. It is the scheduler entry point a background worker calls.
 func (s *Server) Compact(ctx context.Context, policy CompactionPolicy) (int, error) {
+	s.maintRunMu.Lock()
+	defer s.maintRunMu.Unlock()
+	return s.compactLocked(ctx, policy)
+}
+
+// compactLocked is the body of Compact for callers that already hold maintRunMu
+// (the maintenance pass), so a pass does not deadlock on its own compaction step.
+func (s *Server) compactLocked(ctx context.Context, policy CompactionPolicy) (int, error) {
 	usages, err := s.db.VlogUsages(ctx)
 	if err != nil {
 		return 0, err

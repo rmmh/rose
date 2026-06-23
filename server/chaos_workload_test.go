@@ -63,18 +63,38 @@ type oracle struct {
 	mu    sync.Mutex
 	files map[string]fileState
 	snaps map[uint64]map[string]fileState
+	// hist is a per-path trail of the mutations the workload believes it
+	// committed, dumped only when a read disagrees with the oracle. A content
+	// mismatch is otherwise opaque -- the trail shows whether the last op was a
+	// write or a rename-in and what length/digest it expected, which is what
+	// distinguishes a stale-version bug from byte-level corruption.
+	hist map[string][]string
 }
 
 func newOracle() *oracle {
 	return &oracle{
 		files: make(map[string]fileState),
 		snaps: make(map[uint64]map[string]fileState),
+		hist:  make(map[string][]string),
 	}
+}
+
+// histLocked appends a mutation-trail entry for a path. Caller holds o.mu.
+func (o *oracle) histLocked(path, entry string) {
+	o.hist[path] = append(o.hist[path], entry)
+}
+
+// trail returns a copy of a path's mutation trail for a failure message.
+func (o *oracle) trail(path string) []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.hist[path]...)
 }
 
 func (o *oracle) put(path string, st fileState) {
 	o.mu.Lock()
 	o.files[path] = st
+	o.histLocked(path, fmt.Sprintf("put len=%d sum=%x", st.len, st.sum[:4]))
 	o.mu.Unlock()
 }
 
@@ -88,6 +108,7 @@ func (o *oracle) get(path string) (fileState, bool) {
 func (o *oracle) remove(path string) {
 	o.mu.Lock()
 	delete(o.files, path)
+	o.histLocked(path, "remove")
 	o.mu.Unlock()
 }
 
@@ -96,6 +117,8 @@ func (o *oracle) rename(oldPath, newPath string) {
 	if st, ok := o.files[oldPath]; ok {
 		o.files[newPath] = st
 		delete(o.files, oldPath)
+		o.histLocked(oldPath, fmt.Sprintf("rename-out -> %s (len=%d)", newPath, st.len))
+		o.histLocked(newPath, fmt.Sprintf("rename-in <- %s (len=%d sum=%x)", oldPath, st.len, st.sum[:4]))
 	}
 	o.mu.Unlock()
 }
@@ -522,7 +545,8 @@ func (w *workload) verifyAll(ctx context.Context) {
 			continue
 		}
 		if sha256.Sum256(read.GetBuffer()) != st.sum || len(read.GetBuffer()) != st.len {
-			w.t.Errorf("final sweep: %s content mismatch (got %d bytes, want %d)", path, len(read.GetBuffer()), st.len)
+			w.t.Errorf("final sweep: %s content mismatch (got %d bytes sum %x, want %d sum %x)\n  trail: %v",
+				path, len(read.GetBuffer()), sha256.Sum256(read.GetBuffer()), st.len, st.sum[:4], w.oracle.trail(path))
 		}
 	}
 	w.t.Logf("final sweep verified %d committed files", len(files))
