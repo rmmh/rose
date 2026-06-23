@@ -3,8 +3,9 @@
 ## Client-facing IOPS (namespace + mounts)
 
 The directory-aware namespace (parent-keyed `file_head` + `dir` marker rows),
-`ListDir`/`Mkdir`/`Rmdir` RPCs, a directory-tree FUSE mount, and a WebDAV adapter
-(`--webdav`) are in place. Remaining work:
+`ListDir`/`Mkdir`/`Rmdir` RPCs, a directory-tree FUSE mount (with `Flush` as a
+no-op to prevent premature handle closure on duplicated descriptors), and a
+WebDAV adapter (`--webdav`) are in place. Remaining work:
 
 - O(1) directory rename. `RenameFile` rewrites every descendant path/parent row
   under the old prefix (O(descendants)); the README's "fast directory renames"

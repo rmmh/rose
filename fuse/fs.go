@@ -268,7 +268,9 @@ func (h *roseHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 }
 
 func (h *roseHandle) Flush(ctx context.Context) syscall.Errno {
-	h.srv.Close(ctx, &pb.CloseRequest{Handle: h.handle})
+	// Flush is called on close(2) of every file descriptor, but multiple descriptors (e.g. from dup)
+	// can share the same open handle. We must not close/destroy the server-side handle until
+	// Release is called when the last descriptor is closed, so Flush is a no-op.
 	return 0
 }
 
