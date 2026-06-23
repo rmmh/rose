@@ -111,10 +111,12 @@ func main() {
 	}
 	pb.RegisterRoseServer(grpcServer, roseServer)
 
+	errChan := make(chan error, 3)
+
 	go func() {
 		log.Printf("Starting gRPC server on %s", *rpcAddr)
 		if err := grpcServer.Serve(lis); err != nil {
-			log.Fatalf("gRPC server failed: %v", err)
+			errChan <- fmt.Errorf("gRPC server failed: %w", err)
 		}
 	}()
 
@@ -130,7 +132,7 @@ func main() {
 		go func() {
 			log.Printf("Starting WebDAV server on %s", *webdavAddr)
 			if err := webdavServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("WebDAV server failed: %v", err)
+				errChan <- fmt.Errorf("WebDAV server failed: %w", err)
 			}
 		}()
 	}
@@ -155,28 +157,46 @@ func main() {
 		if err != nil {
 			log.Fatalf("Mount FUSE failed: %v", err)
 		}
+
+		// Wait for the kernel INIT handshake to finish; operations issued before it
+		// completes get spurious ENOSYS/ENOTSUP on macFUSE.
+		if err := fuseServer.WaitMount(); err != nil {
+			log.Fatalf("FUSE mount did not settle: %v", err)
+		}
+
+		go func() {
+			fuseServer.Wait()
+			errChan <- fmt.Errorf("FUSE filesystem unmounted externally")
+		}()
 	}
 
 	if *mountPoint == "" && *webdavAddr == "" {
 		log.Printf("No client mount enabled (--mount and --webdav are unset); serving gRPC only on %s", *rpcAddr)
 	}
 
-	// Wait for termination
+	// Wait for termination signals or server errors/events
 	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 
 	select {
-	case <-stop:
-		log.Println("Received termination signal, shutting down...")
+	case sig := <-stop:
+		log.Printf("Received termination signal %v, shutting down...", sig)
+	case err := <-errChan:
+		log.Printf("Shutting down: %v", err)
 	}
 
 	// Unmount and clean up
 	if fuseServer != nil {
-		fuseServer.Unmount()
+		log.Printf("Unmounting FUSE from %s...", *mountPoint)
+		if err := fuseServer.Unmount(); err != nil {
+			log.Printf("Warning: failed to unmount FUSE: %v", err)
+		}
 	}
 	if webdavServer != nil {
+		log.Println("Shutting down WebDAV server...")
 		webdavServer.Close()
 	}
+	log.Println("Shutting down gRPC server...")
 	grpcServer.GracefulStop()
 	log.Println("Shutdown complete.")
 }
