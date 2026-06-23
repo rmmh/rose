@@ -100,6 +100,9 @@ func NewServer(db *meta.DB) *Server {
 		maintenanceEvery:   time.Second,
 		handles:            make(map[int64]*FileHandle),
 		writeOps:           make(map[int64]*sync.Mutex),
+		// Handle ids start at 1 so 0 is reserved as the "no handle" sentinel used
+		// by OpenResponse and the FUSE layer.
+		handleCounter: 1,
 	}
 	s.resetDiskStates()
 	return s
