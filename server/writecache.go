@@ -85,7 +85,7 @@ func newWriteCache(base []meta.ChunkPlacement, read chunkReader) *writeCache {
 func (c *writeCache) WriteAt(off int64, data []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.writeLocked(off, append([]byte(nil), data...))
+	c.writeLocked(off, data)
 }
 
 func (c *writeCache) writeLocked(off int64, data []byte) {
@@ -143,7 +143,11 @@ func (c *writeCache) writeLocked(off int64, data []byte) {
 			mergeEnd = sp.end()
 		}
 	}
-	buf := make([]byte, mergeEnd-mergeStart)
+	neededCap := mergeEnd - mergeStart
+	if neededCap < spillThreshold+spillCarry+128*1024 {
+		neededCap = spillThreshold + spillCarry + 128*1024
+	}
+	buf := make([]byte, mergeEnd-mergeStart, neededCap)
 	for _, sp := range overlap { // existing bytes first (lower priority)
 		copy(buf[sp.start-mergeStart:], sp.data)
 	}
@@ -268,7 +272,7 @@ func (c *writeCache) spillPrefix() []byte {
 		return nil
 	}
 	n := int64(len(sp.data)) - spillCarry
-	return append([]byte(nil), sp.data[:n]...)
+	return sp.data[:n]
 }
 
 // commitSpill records placements covering [settledLen, settledLen+n) as the new
@@ -281,7 +285,13 @@ func (c *writeCache) commitSpill(placements []meta.ChunkPlacement, n int64) {
 	c.settled = append(c.settled, placements...)
 	c.settledLen += n
 	sp := c.spans[0]
-	rest := append([]byte(nil), sp.data[n:]...)
+	restLen := len(sp.data) - int(n)
+	neededCap := restLen
+	if neededCap < spillThreshold+spillCarry+128*1024 {
+		neededCap = spillThreshold + spillCarry + 128*1024
+	}
+	rest := make([]byte, restLen, neededCap)
+	copy(rest, sp.data[n:])
 	c.spans[0] = span{start: sp.start + n, data: rest}
 }
 
