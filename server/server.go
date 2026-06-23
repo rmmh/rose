@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -220,12 +221,14 @@ func (s *Server) GetDB() *meta.DB {
 	return s.db
 }
 
-// Recover rebuilds local plog and vlog clients from persisted metadata. A shard
-// on an unreachable disk (failed disk / failed node) is stubbed offline, as is a
-// shard whose backing file is gone on an otherwise-reachable disk (true media
-// loss): the server boots degraded and the surviving redundancy carries reads
-// until a reprotect regenerates the shard, rather than failing startup on the
-// first absent file.
+// Recover rebuilds local plog and vlog clients from persisted metadata. A disk
+// whose backing files are missing or inaccessible (the whole disk unplugged, or
+// a committed shard file gone) is marked failed durably, so it leaves placement
+// and the maintenance driver reprotects the shards it held onto healthy disks;
+// its shards, like those of an already-failed disk or a disk on a failed node,
+// mount offline. The server boots degraded and the surviving redundancy carries
+// reads until reprotect completes, rather than failing startup on the first
+// absent file.
 func (s *Server) Recover(ctx context.Context) error {
 	// Declare configured disks in the durable catalog (idempotent) and adopt any
 	// non-active lifecycle state a prior run persisted, so a disk that was
@@ -279,25 +282,44 @@ func (s *Server) Recover(ctx context.Context) error {
 	}
 	plogByID := make(map[uint32]*storage.Plog, len(plogInfos))
 	s.offlinePlogs = make(map[uint32]bool)
+
+	// Fail any disk that has lost committed data before opening anything. A catalog
+	// plog whose backing file is missing or otherwise inaccessible, on a disk the
+	// catalog still considers reachable, means the disk silently dropped a shard it
+	// was supposed to hold (the whole disk unplugged, or an individual file gone) --
+	// true media loss not yet reflected in its lifecycle state. Mark the disk failed
+	// durably so it leaves placement and the maintenance driver reprotects every
+	// shard it held onto healthy disks, rather than limping along with a silently
+	// incomplete disk (or letting OpenPlog's O_CREATE resurrect the shard empty).
+	// Probing here, before the open loop, keeps the decision order-independent: a
+	// disk found bad by any of its plogs is failed for all of them.
 	for _, info := range plogInfos {
 		if !s.diskReachableLocked(info.DiskID) {
-			// A failed disk's bytes are gone and a failed node's disk is offline;
-			// either way the file is unreachable. Stub it offline rather than
-			// failing recovery on the first dead disk, so its vlog mounts degraded
-			// and reprotect (or a returning node) can restore it.
+			continue // already failed/detached, or on a failed node
+		}
+		if _, err := os.Stat(s.plogPath(info.DiskID, info.ID)); err != nil {
+			if err := s.setDiskStateLocked(ctx, info.DiskID, meta.DiskFailed); err != nil {
+				return fmt.Errorf("fail disk %d holding inaccessible plog %d: %w", info.DiskID, info.ID, err)
+			}
+		}
+	}
+
+	for _, info := range plogInfos {
+		if !s.diskReachableLocked(info.DiskID) {
+			// A failed disk's bytes are gone (failed hardware, an inaccessible file
+			// detected above) and a failed node's disk is offline; either way the
+			// file is unreachable. Stub it offline rather than failing recovery on
+			// the first dead disk, so its vlog mounts degraded and reprotect (or a
+			// returning node) can restore it.
 			s.offlinePlogs[info.ID] = true
 			continue
 		}
 		plog, err := storage.OpenExistingPlog(s.plogPath(info.DiskID, info.ID), info.ID)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				// The catalog still considers this disk reachable, but the shard's
-				// backing file is gone -- true media loss not yet reflected as a
-				// failed disk. Stub it offline so the server boots degraded (the
-				// surviving redundancy carries reads and a scheduled reprotect
-				// regenerates the shard) rather than failing startup on the first
-				// absent file -- or, worse, letting O_CREATE silently resurrect it
-				// as an empty shard that reads would trust.
+				// The file vanished between the accessibility probe above and this
+				// open (a concurrent loss). The probe already failed any disk it
+				// caught; stub this shard offline so recovery still completes.
 				s.offlinePlogs[info.ID] = true
 				continue
 			}

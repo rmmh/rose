@@ -13,13 +13,13 @@ import (
 	"github.com/rmmh/rose/meta"
 )
 
-// TestRecoverStubsMissingPlogFile covers true media loss on a still-reachable
-// disk: a shard's backing file is gone (deleted out from under the catalog,
-// which has not yet marked the disk failed). Recover must boot the server
-// degraded -- stubbing the absent shard offline so the surviving DUPLICATE copy
-// carries reads -- rather than failing startup on the first missing file, or
-// letting OpenPlog's O_CREATE silently resurrect it as an empty shard.
-func TestRecoverStubsMissingPlogFile(t *testing.T) {
+// TestRecoverFailsDiskWithMissingPlogFile covers true media loss on a disk the
+// catalog still considers active: a committed shard file is gone (deleted out
+// from under the catalog). Recover must mark the whole disk failed -- so it
+// leaves placement and becomes a reprotect target -- and boot degraded with the
+// shard stubbed offline, rather than failing startup or letting OpenPlog's
+// O_CREATE silently resurrect it as an empty shard.
+func TestRecoverFailsDiskWithMissingPlogFile(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
@@ -88,6 +88,11 @@ func TestRecoverStubsMissingPlogFile(t *testing.T) {
 	}
 	defer s2.CloseStorage()
 
+	// The disk that lost the file is marked failed, so it is out of placement and
+	// the maintenance driver will reprotect every shard it held.
+	if got := s2.DiskStates()[lostDiskID]; got != meta.DiskFailed {
+		t.Fatalf("disk %d state = %q after losing a shard file, want %q", lostDiskID, got, meta.DiskFailed)
+	}
 	// The lost shard is stubbed offline, not opened...
 	if !s2.offlinePlogs[lostPlogID] {
 		t.Fatalf("plog %d should be stubbed offline after its file went missing", lostPlogID)
@@ -106,12 +111,13 @@ func TestRecoverStubsMissingPlogFile(t *testing.T) {
 	}
 }
 
-// TestRecoverStubsWhollyMissingDisk is the disk-granularity case: an entire disk
+// TestRecoverFailsWhollyMissingDisk is the disk-granularity case: an entire disk
 // root is gone (the disk is unplugged, not yet marked failed in the catalog).
-// Every shard on it must stub offline -- the absent parent directory yields the
-// same fs.ErrNotExist as an absent file -- and the server must boot degraded
-// rather than fail or recreate the directory and empty plogs underneath it.
-func TestRecoverStubsWhollyMissingDisk(t *testing.T) {
+// The disk must be marked failed and every shard on it stubbed offline -- the
+// absent parent directory yields the same stat error as an absent file -- and
+// the server must boot degraded rather than fail or recreate the directory and
+// empty plogs underneath it.
+func TestRecoverFailsWhollyMissingDisk(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
@@ -161,6 +167,9 @@ func TestRecoverStubsWhollyMissingDisk(t *testing.T) {
 	}
 	defer s2.CloseStorage()
 
+	if got := s2.DiskStates()[1]; got != meta.DiskFailed {
+		t.Fatalf("disk 1 state = %q after its root vanished, want %q", got, meta.DiskFailed)
+	}
 	for _, id := range onDisk1 {
 		if !s2.offlinePlogs[id] {
 			t.Fatalf("plog %d on the missing disk should be stubbed offline", id)
@@ -173,5 +182,89 @@ func TestRecoverStubsWhollyMissingDisk(t *testing.T) {
 	// Reads still resolve from the mirror on the surviving disk.
 	if got := readServerFileInternal(t, s2, "/mirror/file"); !bytes.Equal(got, payload) {
 		t.Fatal("payload changed after recovering with a wholly missing disk")
+	}
+}
+
+// TestRecoverFailedDiskGetsReprotected closes the loop end to end: a disk lost at
+// boot is marked failed, and the very next maintenance pass regenerates the
+// shards it held onto a healthy spare disk, restoring full redundancy without any
+// operator action.
+func TestRecoverFailedDiskGetsReprotected(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	disk1 := filepath.Join(dir, "disk1")
+	disk2 := filepath.Join(dir, "disk2")
+	disk3 := filepath.Join(dir, "disk3")
+
+	// Provision the mirror across just disks 1 and 2 (2-copy DUPLICATE), leaving
+	// disk 3 unconfigured for now so it is free as a reprotect destination later.
+	s1 := NewServerWithDiskRoots(db, map[uint32]string{1: disk1, 2: disk2})
+	s1.SetMaintenanceInterval(0)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 4096)
+	rand.New(rand.NewSource(23)).Read(payload)
+	writeServerFileInternal(t, s1, "/mirror/file", payload)
+
+	var vlogID uint32
+	vlogs, err := db.ListVlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range vlogs {
+		if v.ProtectionScheme == "DUPLICATE" && !v.IsStaging() {
+			vlogID = v.ID
+			break
+		}
+	}
+	if vlogID == 0 {
+		t.Fatal("no DUPLICATE data vlog provisioned")
+	}
+	s1.CloseStorage()
+
+	// Disk 1 is unplugged, then a spare (disk 3) is brought online on restart.
+	if err := os.RemoveAll(disk1); err != nil {
+		t.Fatal(err)
+	}
+	s2 := NewServerWithDiskRoots(db, map[uint32]string{1: disk1, 2: disk2, 3: disk3})
+	s2.SetMaintenanceInterval(0)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s2.CloseStorage()
+	if got := s2.DiskStates()[1]; got != meta.DiskFailed {
+		t.Fatalf("disk 1 state = %q after its root vanished, want %q", got, meta.DiskFailed)
+	}
+
+	// One maintenance pass reprotects the failed disk onto the spare.
+	if err := s2.RunMaintenanceOnce(ctx); err != nil {
+		t.Fatalf("maintenance pass: %v", err)
+	}
+
+	// The mirror no longer references the failed disk; its copy now lives on the
+	// spare, restoring two healthy copies.
+	shardDisks, err := db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disks := map[uint32]bool{}
+	for _, sd := range shardDisks {
+		disks[sd.DiskID] = true
+	}
+	if disks[1] {
+		t.Fatalf("vlog %d still references failed disk 1 after reprotect: %v", vlogID, disks)
+	}
+	if !disks[2] || !disks[3] {
+		t.Fatalf("vlog %d should be mirrored on disks 2 and 3 after reprotect, got %v", vlogID, disks)
+	}
+	if got := readServerFileInternal(t, s2, "/mirror/file"); !bytes.Equal(got, payload) {
+		t.Fatal("payload changed after reprotect")
 	}
 }
