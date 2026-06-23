@@ -26,6 +26,9 @@ const (
 	Rose_Getattr_FullMethodName           = "/rose.v1.Rose/Getattr"
 	Rose_Unlink_FullMethodName            = "/rose.v1.Rose/Unlink"
 	Rose_Rename_FullMethodName            = "/rose.v1.Rose/Rename"
+	Rose_ListDir_FullMethodName           = "/rose.v1.Rose/ListDir"
+	Rose_Mkdir_FullMethodName             = "/rose.v1.Rose/Mkdir"
+	Rose_Rmdir_FullMethodName             = "/rose.v1.Rose/Rmdir"
 	Rose_CreateSnapshot_FullMethodName    = "/rose.v1.Rose/CreateSnapshot"
 	Rose_DeleteSnapshot_FullMethodName    = "/rose.v1.Rose/DeleteSnapshot"
 	Rose_OpenSnapshot_FullMethodName      = "/rose.v1.Rose/OpenSnapshot"
@@ -57,6 +60,9 @@ type RoseClient interface {
 	Getattr(ctx context.Context, in *GetattrRequest, opts ...grpc.CallOption) (*GetattrResponse, error)
 	Unlink(ctx context.Context, in *UnlinkRequest, opts ...grpc.CallOption) (*UnlinkResponse, error)
 	Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*RenameResponse, error)
+	ListDir(ctx context.Context, in *ListDirRequest, opts ...grpc.CallOption) (*ListDirResponse, error)
+	Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error)
+	Rmdir(ctx context.Context, in *RmdirRequest, opts ...grpc.CallOption) (*RmdirResponse, error)
 	CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error)
 	DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error)
 	OpenSnapshot(ctx context.Context, in *OpenSnapshotRequest, opts ...grpc.CallOption) (*OpenResponse, error)
@@ -152,6 +158,36 @@ func (c *roseClient) Rename(ctx context.Context, in *RenameRequest, opts ...grpc
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RenameResponse)
 	err := c.cc.Invoke(ctx, Rose_Rename_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *roseClient) ListDir(ctx context.Context, in *ListDirRequest, opts ...grpc.CallOption) (*ListDirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListDirResponse)
+	err := c.cc.Invoke(ctx, Rose_ListDir_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *roseClient) Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MkdirResponse)
+	err := c.cc.Invoke(ctx, Rose_Mkdir_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *roseClient) Rmdir(ctx context.Context, in *RmdirRequest, opts ...grpc.CallOption) (*RmdirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RmdirResponse)
+	err := c.cc.Invoke(ctx, Rose_Rmdir_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -340,6 +376,9 @@ type RoseServer interface {
 	Getattr(context.Context, *GetattrRequest) (*GetattrResponse, error)
 	Unlink(context.Context, *UnlinkRequest) (*UnlinkResponse, error)
 	Rename(context.Context, *RenameRequest) (*RenameResponse, error)
+	ListDir(context.Context, *ListDirRequest) (*ListDirResponse, error)
+	Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error)
+	Rmdir(context.Context, *RmdirRequest) (*RmdirResponse, error)
 	CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error)
 	DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error)
 	OpenSnapshot(context.Context, *OpenSnapshotRequest) (*OpenResponse, error)
@@ -391,6 +430,15 @@ func (UnimplementedRoseServer) Unlink(context.Context, *UnlinkRequest) (*UnlinkR
 }
 func (UnimplementedRoseServer) Rename(context.Context, *RenameRequest) (*RenameResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Rename not implemented")
+}
+func (UnimplementedRoseServer) ListDir(context.Context, *ListDirRequest) (*ListDirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListDir not implemented")
+}
+func (UnimplementedRoseServer) Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Mkdir not implemented")
+}
+func (UnimplementedRoseServer) Rmdir(context.Context, *RmdirRequest) (*RmdirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Rmdir not implemented")
 }
 func (UnimplementedRoseServer) CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateSnapshot not implemented")
@@ -586,6 +634,60 @@ func _Rose_Rename_Handler(srv interface{}, ctx context.Context, dec func(interfa
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RoseServer).Rename(ctx, req.(*RenameRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rose_ListDir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListDirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoseServer).ListDir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rose_ListDir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoseServer).ListDir(ctx, req.(*ListDirRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rose_Mkdir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MkdirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoseServer).Mkdir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rose_Mkdir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoseServer).Mkdir(ctx, req.(*MkdirRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rose_Rmdir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RmdirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoseServer).Rmdir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rose_Rmdir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoseServer).Rmdir(ctx, req.(*RmdirRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -930,6 +1032,18 @@ var Rose_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Rename",
 			Handler:    _Rose_Rename_Handler,
+		},
+		{
+			MethodName: "ListDir",
+			Handler:    _Rose_ListDir_Handler,
+		},
+		{
+			MethodName: "Mkdir",
+			Handler:    _Rose_Mkdir_Handler,
+		},
+		{
+			MethodName: "Rmdir",
+			Handler:    _Rose_Rmdir_Handler,
 		},
 		{
 			MethodName: "CreateSnapshot",

@@ -429,6 +429,17 @@ func (s *Server) CloseStorage() {
 	s.vlogs = make(map[uint32]*storage.Vlog)
 }
 
+// cleanPath canonicalizes a client path to the single form stored in the
+// namespace: leading slashes stripped, so "/a/b" and "a/b" resolve to the same
+// file and so a path's stored parent column always matches the directory it
+// lists under.
+func cleanPath(path string) string {
+	for len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+	return path
+}
+
 // bucketOf returns the bucket a path belongs to: its top-level directory (the
 // component the README calls a bucket). A bare file at the root has no top-level
 // directory and belongs to the root bucket "", which carries the default policy.

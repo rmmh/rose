@@ -433,6 +433,8 @@ func (x *GetattrRequest) GetPath() string {
 type GetattrResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Size          int64                  `protobuf:"varint,1,opt,name=size,proto3" json:"size,omitempty"`
+	IsDir         bool                   `protobuf:"varint,2,opt,name=is_dir,json=isDir,proto3" json:"is_dir,omitempty"`
+	Mtime         int64                  `protobuf:"varint,3,opt,name=mtime,proto3" json:"mtime,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -470,6 +472,20 @@ func (*GetattrResponse) Descriptor() ([]byte, []int) {
 func (x *GetattrResponse) GetSize() int64 {
 	if x != nil {
 		return x.Size
+	}
+	return 0
+}
+
+func (x *GetattrResponse) GetIsDir() bool {
+	if x != nil {
+		return x.IsDir
+	}
+	return false
+}
+
+func (x *GetattrResponse) GetMtime() int64 {
+	if x != nil {
+		return x.Mtime
 	}
 	return 0
 }
@@ -642,6 +658,322 @@ func (*RenameResponse) Descriptor() ([]byte, []int) {
 	return file_proto_rose_proto_rawDescGZIP(), []int{11}
 }
 
+type DirEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	IsDir         bool                   `protobuf:"varint,2,opt,name=is_dir,json=isDir,proto3" json:"is_dir,omitempty"`
+	Size          int64                  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	Mtime         int64                  `protobuf:"varint,4,opt,name=mtime,proto3" json:"mtime,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DirEntry) Reset() {
+	*x = DirEntry{}
+	mi := &file_proto_rose_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DirEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DirEntry) ProtoMessage() {}
+
+func (x *DirEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_rose_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DirEntry.ProtoReflect.Descriptor instead.
+func (*DirEntry) Descriptor() ([]byte, []int) {
+	return file_proto_rose_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *DirEntry) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *DirEntry) GetIsDir() bool {
+	if x != nil {
+		return x.IsDir
+	}
+	return false
+}
+
+func (x *DirEntry) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *DirEntry) GetMtime() int64 {
+	if x != nil {
+		return x.Mtime
+	}
+	return 0
+}
+
+type ListDirRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListDirRequest) Reset() {
+	*x = ListDirRequest{}
+	mi := &file_proto_rose_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListDirRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListDirRequest) ProtoMessage() {}
+
+func (x *ListDirRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_rose_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListDirRequest.ProtoReflect.Descriptor instead.
+func (*ListDirRequest) Descriptor() ([]byte, []int) {
+	return file_proto_rose_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ListDirRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+type ListDirResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entries       []*DirEntry            `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListDirResponse) Reset() {
+	*x = ListDirResponse{}
+	mi := &file_proto_rose_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListDirResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListDirResponse) ProtoMessage() {}
+
+func (x *ListDirResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_rose_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListDirResponse.ProtoReflect.Descriptor instead.
+func (*ListDirResponse) Descriptor() ([]byte, []int) {
+	return file_proto_rose_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ListDirResponse) GetEntries() []*DirEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+type MkdirRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MkdirRequest) Reset() {
+	*x = MkdirRequest{}
+	mi := &file_proto_rose_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MkdirRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MkdirRequest) ProtoMessage() {}
+
+func (x *MkdirRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_rose_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MkdirRequest.ProtoReflect.Descriptor instead.
+func (*MkdirRequest) Descriptor() ([]byte, []int) {
+	return file_proto_rose_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *MkdirRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+type MkdirResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MkdirResponse) Reset() {
+	*x = MkdirResponse{}
+	mi := &file_proto_rose_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MkdirResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MkdirResponse) ProtoMessage() {}
+
+func (x *MkdirResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_rose_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MkdirResponse.ProtoReflect.Descriptor instead.
+func (*MkdirResponse) Descriptor() ([]byte, []int) {
+	return file_proto_rose_proto_rawDescGZIP(), []int{16}
+}
+
+type RmdirRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RmdirRequest) Reset() {
+	*x = RmdirRequest{}
+	mi := &file_proto_rose_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RmdirRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RmdirRequest) ProtoMessage() {}
+
+func (x *RmdirRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_rose_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RmdirRequest.ProtoReflect.Descriptor instead.
+func (*RmdirRequest) Descriptor() ([]byte, []int) {
+	return file_proto_rose_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *RmdirRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+type RmdirResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RmdirResponse) Reset() {
+	*x = RmdirResponse{}
+	mi := &file_proto_rose_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RmdirResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RmdirResponse) ProtoMessage() {}
+
+func (x *RmdirResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_rose_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RmdirResponse.ProtoReflect.Descriptor instead.
+func (*RmdirResponse) Descriptor() ([]byte, []int) {
+	return file_proto_rose_proto_rawDescGZIP(), []int{18}
+}
+
 type CreateSnapshotRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -651,7 +983,7 @@ type CreateSnapshotRequest struct {
 
 func (x *CreateSnapshotRequest) Reset() {
 	*x = CreateSnapshotRequest{}
-	mi := &file_proto_rose_proto_msgTypes[12]
+	mi := &file_proto_rose_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -663,7 +995,7 @@ func (x *CreateSnapshotRequest) String() string {
 func (*CreateSnapshotRequest) ProtoMessage() {}
 
 func (x *CreateSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[12]
+	mi := &file_proto_rose_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -676,7 +1008,7 @@ func (x *CreateSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*CreateSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{12}
+	return file_proto_rose_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *CreateSnapshotRequest) GetName() string {
@@ -695,7 +1027,7 @@ type CreateSnapshotResponse struct {
 
 func (x *CreateSnapshotResponse) Reset() {
 	*x = CreateSnapshotResponse{}
-	mi := &file_proto_rose_proto_msgTypes[13]
+	mi := &file_proto_rose_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -707,7 +1039,7 @@ func (x *CreateSnapshotResponse) String() string {
 func (*CreateSnapshotResponse) ProtoMessage() {}
 
 func (x *CreateSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[13]
+	mi := &file_proto_rose_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -720,7 +1052,7 @@ func (x *CreateSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*CreateSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{13}
+	return file_proto_rose_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *CreateSnapshotResponse) GetSnapshotId() uint64 {
@@ -739,7 +1071,7 @@ type DeleteSnapshotRequest struct {
 
 func (x *DeleteSnapshotRequest) Reset() {
 	*x = DeleteSnapshotRequest{}
-	mi := &file_proto_rose_proto_msgTypes[14]
+	mi := &file_proto_rose_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -751,7 +1083,7 @@ func (x *DeleteSnapshotRequest) String() string {
 func (*DeleteSnapshotRequest) ProtoMessage() {}
 
 func (x *DeleteSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[14]
+	mi := &file_proto_rose_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -764,7 +1096,7 @@ func (x *DeleteSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*DeleteSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{14}
+	return file_proto_rose_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *DeleteSnapshotRequest) GetSnapshotId() uint64 {
@@ -782,7 +1114,7 @@ type DeleteSnapshotResponse struct {
 
 func (x *DeleteSnapshotResponse) Reset() {
 	*x = DeleteSnapshotResponse{}
-	mi := &file_proto_rose_proto_msgTypes[15]
+	mi := &file_proto_rose_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -794,7 +1126,7 @@ func (x *DeleteSnapshotResponse) String() string {
 func (*DeleteSnapshotResponse) ProtoMessage() {}
 
 func (x *DeleteSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[15]
+	mi := &file_proto_rose_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -807,7 +1139,7 @@ func (x *DeleteSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*DeleteSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{15}
+	return file_proto_rose_proto_rawDescGZIP(), []int{22}
 }
 
 type OpenSnapshotRequest struct {
@@ -820,7 +1152,7 @@ type OpenSnapshotRequest struct {
 
 func (x *OpenSnapshotRequest) Reset() {
 	*x = OpenSnapshotRequest{}
-	mi := &file_proto_rose_proto_msgTypes[16]
+	mi := &file_proto_rose_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -832,7 +1164,7 @@ func (x *OpenSnapshotRequest) String() string {
 func (*OpenSnapshotRequest) ProtoMessage() {}
 
 func (x *OpenSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[16]
+	mi := &file_proto_rose_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -845,7 +1177,7 @@ func (x *OpenSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*OpenSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{16}
+	return file_proto_rose_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *OpenSnapshotRequest) GetSnapshotId() uint64 {
@@ -874,7 +1206,7 @@ type CloseRequest struct {
 
 func (x *CloseRequest) Reset() {
 	*x = CloseRequest{}
-	mi := &file_proto_rose_proto_msgTypes[17]
+	mi := &file_proto_rose_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -886,7 +1218,7 @@ func (x *CloseRequest) String() string {
 func (*CloseRequest) ProtoMessage() {}
 
 func (x *CloseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[17]
+	mi := &file_proto_rose_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -899,7 +1231,7 @@ func (x *CloseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloseRequest.ProtoReflect.Descriptor instead.
 func (*CloseRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{17}
+	return file_proto_rose_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *CloseRequest) GetHandle() int64 {
@@ -924,7 +1256,7 @@ type CloseResponse struct {
 
 func (x *CloseResponse) Reset() {
 	*x = CloseResponse{}
-	mi := &file_proto_rose_proto_msgTypes[18]
+	mi := &file_proto_rose_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -936,7 +1268,7 @@ func (x *CloseResponse) String() string {
 func (*CloseResponse) ProtoMessage() {}
 
 func (x *CloseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[18]
+	mi := &file_proto_rose_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -949,7 +1281,7 @@ func (x *CloseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloseResponse.ProtoReflect.Descriptor instead.
 func (*CloseResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{18}
+	return file_proto_rose_proto_rawDescGZIP(), []int{25}
 }
 
 // Vlog requests
@@ -964,7 +1296,7 @@ type MakeVlogRequest struct {
 
 func (x *MakeVlogRequest) Reset() {
 	*x = MakeVlogRequest{}
-	mi := &file_proto_rose_proto_msgTypes[19]
+	mi := &file_proto_rose_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -976,7 +1308,7 @@ func (x *MakeVlogRequest) String() string {
 func (*MakeVlogRequest) ProtoMessage() {}
 
 func (x *MakeVlogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[19]
+	mi := &file_proto_rose_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -989,7 +1321,7 @@ func (x *MakeVlogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakeVlogRequest.ProtoReflect.Descriptor instead.
 func (*MakeVlogRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{19}
+	return file_proto_rose_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *MakeVlogRequest) GetProtectionScheme() string {
@@ -1022,7 +1354,7 @@ type MakeVlogResponse struct {
 
 func (x *MakeVlogResponse) Reset() {
 	*x = MakeVlogResponse{}
-	mi := &file_proto_rose_proto_msgTypes[20]
+	mi := &file_proto_rose_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1034,7 +1366,7 @@ func (x *MakeVlogResponse) String() string {
 func (*MakeVlogResponse) ProtoMessage() {}
 
 func (x *MakeVlogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[20]
+	mi := &file_proto_rose_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1047,7 +1379,7 @@ func (x *MakeVlogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakeVlogResponse.ProtoReflect.Descriptor instead.
 func (*MakeVlogResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{20}
+	return file_proto_rose_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *MakeVlogResponse) GetVlogId() uint32 {
@@ -1068,7 +1400,7 @@ type WriteVlogRequest struct {
 
 func (x *WriteVlogRequest) Reset() {
 	*x = WriteVlogRequest{}
-	mi := &file_proto_rose_proto_msgTypes[21]
+	mi := &file_proto_rose_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1080,7 +1412,7 @@ func (x *WriteVlogRequest) String() string {
 func (*WriteVlogRequest) ProtoMessage() {}
 
 func (x *WriteVlogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[21]
+	mi := &file_proto_rose_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1093,7 +1425,7 @@ func (x *WriteVlogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteVlogRequest.ProtoReflect.Descriptor instead.
 func (*WriteVlogRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{21}
+	return file_proto_rose_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *WriteVlogRequest) GetVlogId() uint32 {
@@ -1126,7 +1458,7 @@ type WriteVlogResponse struct {
 
 func (x *WriteVlogResponse) Reset() {
 	*x = WriteVlogResponse{}
-	mi := &file_proto_rose_proto_msgTypes[22]
+	mi := &file_proto_rose_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1138,7 +1470,7 @@ func (x *WriteVlogResponse) String() string {
 func (*WriteVlogResponse) ProtoMessage() {}
 
 func (x *WriteVlogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[22]
+	mi := &file_proto_rose_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1151,7 +1483,7 @@ func (x *WriteVlogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteVlogResponse.ProtoReflect.Descriptor instead.
 func (*WriteVlogResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{22}
+	return file_proto_rose_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *WriteVlogResponse) GetOffset() uint32 {
@@ -1172,7 +1504,7 @@ type ReadVlogRequest struct {
 
 func (x *ReadVlogRequest) Reset() {
 	*x = ReadVlogRequest{}
-	mi := &file_proto_rose_proto_msgTypes[23]
+	mi := &file_proto_rose_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1184,7 +1516,7 @@ func (x *ReadVlogRequest) String() string {
 func (*ReadVlogRequest) ProtoMessage() {}
 
 func (x *ReadVlogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[23]
+	mi := &file_proto_rose_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1197,7 +1529,7 @@ func (x *ReadVlogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadVlogRequest.ProtoReflect.Descriptor instead.
 func (*ReadVlogRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{23}
+	return file_proto_rose_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ReadVlogRequest) GetVlogId() uint32 {
@@ -1230,7 +1562,7 @@ type ReadVlogResponse struct {
 
 func (x *ReadVlogResponse) Reset() {
 	*x = ReadVlogResponse{}
-	mi := &file_proto_rose_proto_msgTypes[24]
+	mi := &file_proto_rose_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1242,7 +1574,7 @@ func (x *ReadVlogResponse) String() string {
 func (*ReadVlogResponse) ProtoMessage() {}
 
 func (x *ReadVlogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[24]
+	mi := &file_proto_rose_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1255,7 +1587,7 @@ func (x *ReadVlogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadVlogResponse.ProtoReflect.Descriptor instead.
 func (*ReadVlogResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{24}
+	return file_proto_rose_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ReadVlogResponse) GetBuffer() []byte {
@@ -1274,7 +1606,7 @@ type CommitVlogRequest struct {
 
 func (x *CommitVlogRequest) Reset() {
 	*x = CommitVlogRequest{}
-	mi := &file_proto_rose_proto_msgTypes[25]
+	mi := &file_proto_rose_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1286,7 +1618,7 @@ func (x *CommitVlogRequest) String() string {
 func (*CommitVlogRequest) ProtoMessage() {}
 
 func (x *CommitVlogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[25]
+	mi := &file_proto_rose_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1299,7 +1631,7 @@ func (x *CommitVlogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitVlogRequest.ProtoReflect.Descriptor instead.
 func (*CommitVlogRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{25}
+	return file_proto_rose_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *CommitVlogRequest) GetTxnId() int64 {
@@ -1317,7 +1649,7 @@ type CommitVlogResponse struct {
 
 func (x *CommitVlogResponse) Reset() {
 	*x = CommitVlogResponse{}
-	mi := &file_proto_rose_proto_msgTypes[26]
+	mi := &file_proto_rose_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1329,7 +1661,7 @@ func (x *CommitVlogResponse) String() string {
 func (*CommitVlogResponse) ProtoMessage() {}
 
 func (x *CommitVlogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[26]
+	mi := &file_proto_rose_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1342,7 +1674,7 @@ func (x *CommitVlogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitVlogResponse.ProtoReflect.Descriptor instead.
 func (*CommitVlogResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{26}
+	return file_proto_rose_proto_rawDescGZIP(), []int{33}
 }
 
 // Plog requests
@@ -1355,7 +1687,7 @@ type MakePlogRequest struct {
 
 func (x *MakePlogRequest) Reset() {
 	*x = MakePlogRequest{}
-	mi := &file_proto_rose_proto_msgTypes[27]
+	mi := &file_proto_rose_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1367,7 +1699,7 @@ func (x *MakePlogRequest) String() string {
 func (*MakePlogRequest) ProtoMessage() {}
 
 func (x *MakePlogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[27]
+	mi := &file_proto_rose_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1380,7 +1712,7 @@ func (x *MakePlogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakePlogRequest.ProtoReflect.Descriptor instead.
 func (*MakePlogRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{27}
+	return file_proto_rose_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *MakePlogRequest) GetDiskId() uint32 {
@@ -1399,7 +1731,7 @@ type MakePlogResponse struct {
 
 func (x *MakePlogResponse) Reset() {
 	*x = MakePlogResponse{}
-	mi := &file_proto_rose_proto_msgTypes[28]
+	mi := &file_proto_rose_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1411,7 +1743,7 @@ func (x *MakePlogResponse) String() string {
 func (*MakePlogResponse) ProtoMessage() {}
 
 func (x *MakePlogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[28]
+	mi := &file_proto_rose_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1424,7 +1756,7 @@ func (x *MakePlogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakePlogResponse.ProtoReflect.Descriptor instead.
 func (*MakePlogResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{28}
+	return file_proto_rose_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *MakePlogResponse) GetPlogId() uint32 {
@@ -1446,7 +1778,7 @@ type WritePlogRequest struct {
 
 func (x *WritePlogRequest) Reset() {
 	*x = WritePlogRequest{}
-	mi := &file_proto_rose_proto_msgTypes[29]
+	mi := &file_proto_rose_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1458,7 +1790,7 @@ func (x *WritePlogRequest) String() string {
 func (*WritePlogRequest) ProtoMessage() {}
 
 func (x *WritePlogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[29]
+	mi := &file_proto_rose_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1471,7 +1803,7 @@ func (x *WritePlogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WritePlogRequest.ProtoReflect.Descriptor instead.
 func (*WritePlogRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{29}
+	return file_proto_rose_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *WritePlogRequest) GetPlogId() uint32 {
@@ -1511,7 +1843,7 @@ type WritePlogResponse struct {
 
 func (x *WritePlogResponse) Reset() {
 	*x = WritePlogResponse{}
-	mi := &file_proto_rose_proto_msgTypes[30]
+	mi := &file_proto_rose_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1523,7 +1855,7 @@ func (x *WritePlogResponse) String() string {
 func (*WritePlogResponse) ProtoMessage() {}
 
 func (x *WritePlogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[30]
+	mi := &file_proto_rose_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1536,7 +1868,7 @@ func (x *WritePlogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WritePlogResponse.ProtoReflect.Descriptor instead.
 func (*WritePlogResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{30}
+	return file_proto_rose_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *WritePlogResponse) GetOffset() uint32 {
@@ -1557,7 +1889,7 @@ type ReadPlogRequest struct {
 
 func (x *ReadPlogRequest) Reset() {
 	*x = ReadPlogRequest{}
-	mi := &file_proto_rose_proto_msgTypes[31]
+	mi := &file_proto_rose_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1569,7 +1901,7 @@ func (x *ReadPlogRequest) String() string {
 func (*ReadPlogRequest) ProtoMessage() {}
 
 func (x *ReadPlogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[31]
+	mi := &file_proto_rose_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1582,7 +1914,7 @@ func (x *ReadPlogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadPlogRequest.ProtoReflect.Descriptor instead.
 func (*ReadPlogRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{31}
+	return file_proto_rose_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ReadPlogRequest) GetPlogId() uint32 {
@@ -1615,7 +1947,7 @@ type ReadPlogResponse struct {
 
 func (x *ReadPlogResponse) Reset() {
 	*x = ReadPlogResponse{}
-	mi := &file_proto_rose_proto_msgTypes[32]
+	mi := &file_proto_rose_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1627,7 +1959,7 @@ func (x *ReadPlogResponse) String() string {
 func (*ReadPlogResponse) ProtoMessage() {}
 
 func (x *ReadPlogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[32]
+	mi := &file_proto_rose_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1640,7 +1972,7 @@ func (x *ReadPlogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadPlogResponse.ProtoReflect.Descriptor instead.
 func (*ReadPlogResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{32}
+	return file_proto_rose_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ReadPlogResponse) GetBuffer() []byte {
@@ -1659,7 +1991,7 @@ type CommitPlogRequest struct {
 
 func (x *CommitPlogRequest) Reset() {
 	*x = CommitPlogRequest{}
-	mi := &file_proto_rose_proto_msgTypes[33]
+	mi := &file_proto_rose_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1671,7 +2003,7 @@ func (x *CommitPlogRequest) String() string {
 func (*CommitPlogRequest) ProtoMessage() {}
 
 func (x *CommitPlogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[33]
+	mi := &file_proto_rose_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1684,7 +2016,7 @@ func (x *CommitPlogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitPlogRequest.ProtoReflect.Descriptor instead.
 func (*CommitPlogRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{33}
+	return file_proto_rose_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *CommitPlogRequest) GetTxnId() int64 {
@@ -1702,7 +2034,7 @@ type CommitPlogResponse struct {
 
 func (x *CommitPlogResponse) Reset() {
 	*x = CommitPlogResponse{}
-	mi := &file_proto_rose_proto_msgTypes[34]
+	mi := &file_proto_rose_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1714,7 +2046,7 @@ func (x *CommitPlogResponse) String() string {
 func (*CommitPlogResponse) ProtoMessage() {}
 
 func (x *CommitPlogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[34]
+	mi := &file_proto_rose_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1727,7 +2059,7 @@ func (x *CommitPlogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitPlogResponse.ProtoReflect.Descriptor instead.
 func (*CommitPlogResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{34}
+	return file_proto_rose_proto_rawDescGZIP(), []int{41}
 }
 
 // Disk management requests
@@ -1742,7 +2074,7 @@ type AddDiskRequest struct {
 
 func (x *AddDiskRequest) Reset() {
 	*x = AddDiskRequest{}
-	mi := &file_proto_rose_proto_msgTypes[35]
+	mi := &file_proto_rose_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1754,7 +2086,7 @@ func (x *AddDiskRequest) String() string {
 func (*AddDiskRequest) ProtoMessage() {}
 
 func (x *AddDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[35]
+	mi := &file_proto_rose_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1767,7 +2099,7 @@ func (x *AddDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddDiskRequest.ProtoReflect.Descriptor instead.
 func (*AddDiskRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{35}
+	return file_proto_rose_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *AddDiskRequest) GetDiskId() uint32 {
@@ -1799,7 +2131,7 @@ type AddDiskResponse struct {
 
 func (x *AddDiskResponse) Reset() {
 	*x = AddDiskResponse{}
-	mi := &file_proto_rose_proto_msgTypes[36]
+	mi := &file_proto_rose_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1811,7 +2143,7 @@ func (x *AddDiskResponse) String() string {
 func (*AddDiskResponse) ProtoMessage() {}
 
 func (x *AddDiskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[36]
+	mi := &file_proto_rose_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1824,7 +2156,7 @@ func (x *AddDiskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddDiskResponse.ProtoReflect.Descriptor instead.
 func (*AddDiskResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{36}
+	return file_proto_rose_proto_rawDescGZIP(), []int{43}
 }
 
 type RemoveDiskRequest struct {
@@ -1836,7 +2168,7 @@ type RemoveDiskRequest struct {
 
 func (x *RemoveDiskRequest) Reset() {
 	*x = RemoveDiskRequest{}
-	mi := &file_proto_rose_proto_msgTypes[37]
+	mi := &file_proto_rose_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1848,7 +2180,7 @@ func (x *RemoveDiskRequest) String() string {
 func (*RemoveDiskRequest) ProtoMessage() {}
 
 func (x *RemoveDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[37]
+	mi := &file_proto_rose_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1861,7 +2193,7 @@ func (x *RemoveDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveDiskRequest.ProtoReflect.Descriptor instead.
 func (*RemoveDiskRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{37}
+	return file_proto_rose_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *RemoveDiskRequest) GetDiskId() uint32 {
@@ -1883,7 +2215,7 @@ type ReplaceDiskRequest struct {
 
 func (x *ReplaceDiskRequest) Reset() {
 	*x = ReplaceDiskRequest{}
-	mi := &file_proto_rose_proto_msgTypes[38]
+	mi := &file_proto_rose_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1895,7 +2227,7 @@ func (x *ReplaceDiskRequest) String() string {
 func (*ReplaceDiskRequest) ProtoMessage() {}
 
 func (x *ReplaceDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[38]
+	mi := &file_proto_rose_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1908,7 +2240,7 @@ func (x *ReplaceDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplaceDiskRequest.ProtoReflect.Descriptor instead.
 func (*ReplaceDiskRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{38}
+	return file_proto_rose_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ReplaceDiskRequest) GetOldDiskId() uint32 {
@@ -1948,7 +2280,7 @@ type StartReprotectRequest struct {
 
 func (x *StartReprotectRequest) Reset() {
 	*x = StartReprotectRequest{}
-	mi := &file_proto_rose_proto_msgTypes[39]
+	mi := &file_proto_rose_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1960,7 +2292,7 @@ func (x *StartReprotectRequest) String() string {
 func (*StartReprotectRequest) ProtoMessage() {}
 
 func (x *StartReprotectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[39]
+	mi := &file_proto_rose_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1973,7 +2305,7 @@ func (x *StartReprotectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartReprotectRequest.ProtoReflect.Descriptor instead.
 func (*StartReprotectRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{39}
+	return file_proto_rose_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *StartReprotectRequest) GetDiskId() uint32 {
@@ -1991,7 +2323,7 @@ type StartRebalanceRequest struct {
 
 func (x *StartRebalanceRequest) Reset() {
 	*x = StartRebalanceRequest{}
-	mi := &file_proto_rose_proto_msgTypes[40]
+	mi := &file_proto_rose_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2003,7 +2335,7 @@ func (x *StartRebalanceRequest) String() string {
 func (*StartRebalanceRequest) ProtoMessage() {}
 
 func (x *StartRebalanceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[40]
+	mi := &file_proto_rose_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2016,7 +2348,7 @@ func (x *StartRebalanceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartRebalanceRequest.ProtoReflect.Descriptor instead.
 func (*StartRebalanceRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{40}
+	return file_proto_rose_proto_rawDescGZIP(), []int{47}
 }
 
 type MaintenanceJobResponse struct {
@@ -2028,7 +2360,7 @@ type MaintenanceJobResponse struct {
 
 func (x *MaintenanceJobResponse) Reset() {
 	*x = MaintenanceJobResponse{}
-	mi := &file_proto_rose_proto_msgTypes[41]
+	mi := &file_proto_rose_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2040,7 +2372,7 @@ func (x *MaintenanceJobResponse) String() string {
 func (*MaintenanceJobResponse) ProtoMessage() {}
 
 func (x *MaintenanceJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[41]
+	mi := &file_proto_rose_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2053,7 +2385,7 @@ func (x *MaintenanceJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MaintenanceJobResponse.ProtoReflect.Descriptor instead.
 func (*MaintenanceJobResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{41}
+	return file_proto_rose_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *MaintenanceJobResponse) GetJobId() uint64 {
@@ -2072,7 +2404,7 @@ type GetMaintenanceJobRequest struct {
 
 func (x *GetMaintenanceJobRequest) Reset() {
 	*x = GetMaintenanceJobRequest{}
-	mi := &file_proto_rose_proto_msgTypes[42]
+	mi := &file_proto_rose_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2084,7 +2416,7 @@ func (x *GetMaintenanceJobRequest) String() string {
 func (*GetMaintenanceJobRequest) ProtoMessage() {}
 
 func (x *GetMaintenanceJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[42]
+	mi := &file_proto_rose_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2097,7 +2429,7 @@ func (x *GetMaintenanceJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMaintenanceJobRequest.ProtoReflect.Descriptor instead.
 func (*GetMaintenanceJobRequest) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{42}
+	return file_proto_rose_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *GetMaintenanceJobRequest) GetJobId() uint64 {
@@ -2119,7 +2451,7 @@ type GetMaintenanceJobResponse struct {
 
 func (x *GetMaintenanceJobResponse) Reset() {
 	*x = GetMaintenanceJobResponse{}
-	mi := &file_proto_rose_proto_msgTypes[43]
+	mi := &file_proto_rose_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2131,7 +2463,7 @@ func (x *GetMaintenanceJobResponse) String() string {
 func (*GetMaintenanceJobResponse) ProtoMessage() {}
 
 func (x *GetMaintenanceJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rose_proto_msgTypes[43]
+	mi := &file_proto_rose_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2144,7 +2476,7 @@ func (x *GetMaintenanceJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMaintenanceJobResponse.ProtoReflect.Descriptor instead.
 func (*GetMaintenanceJobResponse) Descriptor() ([]byte, []int) {
-	return file_proto_rose_proto_rawDescGZIP(), []int{43}
+	return file_proto_rose_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *GetMaintenanceJobResponse) GetJobId() uint64 {
@@ -2199,16 +2531,33 @@ const file_proto_rose_proto_rawDesc = "" +
 	"\fReadResponse\x12\x16\n" +
 	"\x06buffer\x18\x01 \x01(\fR\x06buffer\"$\n" +
 	"\x0eGetattrRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"%\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"R\n" +
 	"\x0fGetattrResponse\x12\x12\n" +
-	"\x04size\x18\x01 \x01(\x03R\x04size\"#\n" +
+	"\x04size\x18\x01 \x01(\x03R\x04size\x12\x15\n" +
+	"\x06is_dir\x18\x02 \x01(\bR\x05isDir\x12\x14\n" +
+	"\x05mtime\x18\x03 \x01(\x03R\x05mtime\"#\n" +
 	"\rUnlinkRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x10\n" +
 	"\x0eUnlinkResponse\"E\n" +
 	"\rRenameRequest\x12\x19\n" +
 	"\bold_path\x18\x01 \x01(\tR\aoldPath\x12\x19\n" +
 	"\bnew_path\x18\x02 \x01(\tR\anewPath\"\x10\n" +
-	"\x0eRenameResponse\"+\n" +
+	"\x0eRenameResponse\"_\n" +
+	"\bDirEntry\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x15\n" +
+	"\x06is_dir\x18\x02 \x01(\bR\x05isDir\x12\x12\n" +
+	"\x04size\x18\x03 \x01(\x03R\x04size\x12\x14\n" +
+	"\x05mtime\x18\x04 \x01(\x03R\x05mtime\"$\n" +
+	"\x0eListDirRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\">\n" +
+	"\x0fListDirResponse\x12+\n" +
+	"\aentries\x18\x01 \x03(\v2\x11.rose.v1.DirEntryR\aentries\"\"\n" +
+	"\fMkdirRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\x0f\n" +
+	"\rMkdirResponse\"\"\n" +
+	"\fRmdirRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\x0f\n" +
+	"\rRmdirResponse\"+\n" +
 	"\x15CreateSnapshotRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"9\n" +
 	"\x16CreateSnapshotResponse\x12\x1f\n" +
@@ -2299,7 +2648,7 @@ const file_proto_rose_proto_rawDesc = "" +
 	"!MAINTENANCE_JOB_STATE_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dMAINTENANCE_JOB_STATE_RUNNING\x10\x01\x12#\n" +
 	"\x1fMAINTENANCE_JOB_STATE_COMPLETED\x10\x02\x12 \n" +
-	"\x1cMAINTENANCE_JOB_STATE_FAILED\x10\x032\xf1\f\n" +
+	"\x1cMAINTENANCE_JOB_STATE_FAILED\x10\x032\x9f\x0e\n" +
 	"\x04Rose\x123\n" +
 	"\x04Open\x12\x14.rose.v1.OpenRequest\x1a\x15.rose.v1.OpenResponse\x126\n" +
 	"\x05Write\x12\x15.rose.v1.WriteRequest\x1a\x16.rose.v1.WriteResponse\x123\n" +
@@ -2307,7 +2656,10 @@ const file_proto_rose_proto_rawDesc = "" +
 	"\x05Close\x12\x15.rose.v1.CloseRequest\x1a\x16.rose.v1.CloseResponse\x12<\n" +
 	"\aGetattr\x12\x17.rose.v1.GetattrRequest\x1a\x18.rose.v1.GetattrResponse\x129\n" +
 	"\x06Unlink\x12\x16.rose.v1.UnlinkRequest\x1a\x17.rose.v1.UnlinkResponse\x129\n" +
-	"\x06Rename\x12\x16.rose.v1.RenameRequest\x1a\x17.rose.v1.RenameResponse\x12Q\n" +
+	"\x06Rename\x12\x16.rose.v1.RenameRequest\x1a\x17.rose.v1.RenameResponse\x12<\n" +
+	"\aListDir\x12\x17.rose.v1.ListDirRequest\x1a\x18.rose.v1.ListDirResponse\x126\n" +
+	"\x05Mkdir\x12\x15.rose.v1.MkdirRequest\x1a\x16.rose.v1.MkdirResponse\x126\n" +
+	"\x05Rmdir\x12\x15.rose.v1.RmdirRequest\x1a\x16.rose.v1.RmdirResponse\x12Q\n" +
 	"\x0eCreateSnapshot\x12\x1e.rose.v1.CreateSnapshotRequest\x1a\x1f.rose.v1.CreateSnapshotResponse\x12Q\n" +
 	"\x0eDeleteSnapshot\x12\x1e.rose.v1.DeleteSnapshotRequest\x1a\x1f.rose.v1.DeleteSnapshotResponse\x12C\n" +
 	"\fOpenSnapshot\x12\x1c.rose.v1.OpenSnapshotRequest\x1a\x15.rose.v1.OpenResponse\x12?\n" +
@@ -2342,7 +2694,7 @@ func file_proto_rose_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_rose_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_rose_proto_msgTypes = make([]protoimpl.MessageInfo, 44)
+var file_proto_rose_proto_msgTypes = make([]protoimpl.MessageInfo, 51)
 var file_proto_rose_proto_goTypes = []any{
 	(MaintenanceJobState)(0),          // 0: rose.v1.MaintenanceJobState
 	(*OpenRequest)(nil),               // 1: rose.v1.OpenRequest
@@ -2357,94 +2709,108 @@ var file_proto_rose_proto_goTypes = []any{
 	(*UnlinkResponse)(nil),            // 10: rose.v1.UnlinkResponse
 	(*RenameRequest)(nil),             // 11: rose.v1.RenameRequest
 	(*RenameResponse)(nil),            // 12: rose.v1.RenameResponse
-	(*CreateSnapshotRequest)(nil),     // 13: rose.v1.CreateSnapshotRequest
-	(*CreateSnapshotResponse)(nil),    // 14: rose.v1.CreateSnapshotResponse
-	(*DeleteSnapshotRequest)(nil),     // 15: rose.v1.DeleteSnapshotRequest
-	(*DeleteSnapshotResponse)(nil),    // 16: rose.v1.DeleteSnapshotResponse
-	(*OpenSnapshotRequest)(nil),       // 17: rose.v1.OpenSnapshotRequest
-	(*CloseRequest)(nil),              // 18: rose.v1.CloseRequest
-	(*CloseResponse)(nil),             // 19: rose.v1.CloseResponse
-	(*MakeVlogRequest)(nil),           // 20: rose.v1.MakeVlogRequest
-	(*MakeVlogResponse)(nil),          // 21: rose.v1.MakeVlogResponse
-	(*WriteVlogRequest)(nil),          // 22: rose.v1.WriteVlogRequest
-	(*WriteVlogResponse)(nil),         // 23: rose.v1.WriteVlogResponse
-	(*ReadVlogRequest)(nil),           // 24: rose.v1.ReadVlogRequest
-	(*ReadVlogResponse)(nil),          // 25: rose.v1.ReadVlogResponse
-	(*CommitVlogRequest)(nil),         // 26: rose.v1.CommitVlogRequest
-	(*CommitVlogResponse)(nil),        // 27: rose.v1.CommitVlogResponse
-	(*MakePlogRequest)(nil),           // 28: rose.v1.MakePlogRequest
-	(*MakePlogResponse)(nil),          // 29: rose.v1.MakePlogResponse
-	(*WritePlogRequest)(nil),          // 30: rose.v1.WritePlogRequest
-	(*WritePlogResponse)(nil),         // 31: rose.v1.WritePlogResponse
-	(*ReadPlogRequest)(nil),           // 32: rose.v1.ReadPlogRequest
-	(*ReadPlogResponse)(nil),          // 33: rose.v1.ReadPlogResponse
-	(*CommitPlogRequest)(nil),         // 34: rose.v1.CommitPlogRequest
-	(*CommitPlogResponse)(nil),        // 35: rose.v1.CommitPlogResponse
-	(*AddDiskRequest)(nil),            // 36: rose.v1.AddDiskRequest
-	(*AddDiskResponse)(nil),           // 37: rose.v1.AddDiskResponse
-	(*RemoveDiskRequest)(nil),         // 38: rose.v1.RemoveDiskRequest
-	(*ReplaceDiskRequest)(nil),        // 39: rose.v1.ReplaceDiskRequest
-	(*StartReprotectRequest)(nil),     // 40: rose.v1.StartReprotectRequest
-	(*StartRebalanceRequest)(nil),     // 41: rose.v1.StartRebalanceRequest
-	(*MaintenanceJobResponse)(nil),    // 42: rose.v1.MaintenanceJobResponse
-	(*GetMaintenanceJobRequest)(nil),  // 43: rose.v1.GetMaintenanceJobRequest
-	(*GetMaintenanceJobResponse)(nil), // 44: rose.v1.GetMaintenanceJobResponse
+	(*DirEntry)(nil),                  // 13: rose.v1.DirEntry
+	(*ListDirRequest)(nil),            // 14: rose.v1.ListDirRequest
+	(*ListDirResponse)(nil),           // 15: rose.v1.ListDirResponse
+	(*MkdirRequest)(nil),              // 16: rose.v1.MkdirRequest
+	(*MkdirResponse)(nil),             // 17: rose.v1.MkdirResponse
+	(*RmdirRequest)(nil),              // 18: rose.v1.RmdirRequest
+	(*RmdirResponse)(nil),             // 19: rose.v1.RmdirResponse
+	(*CreateSnapshotRequest)(nil),     // 20: rose.v1.CreateSnapshotRequest
+	(*CreateSnapshotResponse)(nil),    // 21: rose.v1.CreateSnapshotResponse
+	(*DeleteSnapshotRequest)(nil),     // 22: rose.v1.DeleteSnapshotRequest
+	(*DeleteSnapshotResponse)(nil),    // 23: rose.v1.DeleteSnapshotResponse
+	(*OpenSnapshotRequest)(nil),       // 24: rose.v1.OpenSnapshotRequest
+	(*CloseRequest)(nil),              // 25: rose.v1.CloseRequest
+	(*CloseResponse)(nil),             // 26: rose.v1.CloseResponse
+	(*MakeVlogRequest)(nil),           // 27: rose.v1.MakeVlogRequest
+	(*MakeVlogResponse)(nil),          // 28: rose.v1.MakeVlogResponse
+	(*WriteVlogRequest)(nil),          // 29: rose.v1.WriteVlogRequest
+	(*WriteVlogResponse)(nil),         // 30: rose.v1.WriteVlogResponse
+	(*ReadVlogRequest)(nil),           // 31: rose.v1.ReadVlogRequest
+	(*ReadVlogResponse)(nil),          // 32: rose.v1.ReadVlogResponse
+	(*CommitVlogRequest)(nil),         // 33: rose.v1.CommitVlogRequest
+	(*CommitVlogResponse)(nil),        // 34: rose.v1.CommitVlogResponse
+	(*MakePlogRequest)(nil),           // 35: rose.v1.MakePlogRequest
+	(*MakePlogResponse)(nil),          // 36: rose.v1.MakePlogResponse
+	(*WritePlogRequest)(nil),          // 37: rose.v1.WritePlogRequest
+	(*WritePlogResponse)(nil),         // 38: rose.v1.WritePlogResponse
+	(*ReadPlogRequest)(nil),           // 39: rose.v1.ReadPlogRequest
+	(*ReadPlogResponse)(nil),          // 40: rose.v1.ReadPlogResponse
+	(*CommitPlogRequest)(nil),         // 41: rose.v1.CommitPlogRequest
+	(*CommitPlogResponse)(nil),        // 42: rose.v1.CommitPlogResponse
+	(*AddDiskRequest)(nil),            // 43: rose.v1.AddDiskRequest
+	(*AddDiskResponse)(nil),           // 44: rose.v1.AddDiskResponse
+	(*RemoveDiskRequest)(nil),         // 45: rose.v1.RemoveDiskRequest
+	(*ReplaceDiskRequest)(nil),        // 46: rose.v1.ReplaceDiskRequest
+	(*StartReprotectRequest)(nil),     // 47: rose.v1.StartReprotectRequest
+	(*StartRebalanceRequest)(nil),     // 48: rose.v1.StartRebalanceRequest
+	(*MaintenanceJobResponse)(nil),    // 49: rose.v1.MaintenanceJobResponse
+	(*GetMaintenanceJobRequest)(nil),  // 50: rose.v1.GetMaintenanceJobRequest
+	(*GetMaintenanceJobResponse)(nil), // 51: rose.v1.GetMaintenanceJobResponse
 }
 var file_proto_rose_proto_depIdxs = []int32{
-	0,  // 0: rose.v1.GetMaintenanceJobResponse.state:type_name -> rose.v1.MaintenanceJobState
-	1,  // 1: rose.v1.Rose.Open:input_type -> rose.v1.OpenRequest
-	3,  // 2: rose.v1.Rose.Write:input_type -> rose.v1.WriteRequest
-	5,  // 3: rose.v1.Rose.Read:input_type -> rose.v1.ReadRequest
-	18, // 4: rose.v1.Rose.Close:input_type -> rose.v1.CloseRequest
-	7,  // 5: rose.v1.Rose.Getattr:input_type -> rose.v1.GetattrRequest
-	9,  // 6: rose.v1.Rose.Unlink:input_type -> rose.v1.UnlinkRequest
-	11, // 7: rose.v1.Rose.Rename:input_type -> rose.v1.RenameRequest
-	13, // 8: rose.v1.Rose.CreateSnapshot:input_type -> rose.v1.CreateSnapshotRequest
-	15, // 9: rose.v1.Rose.DeleteSnapshot:input_type -> rose.v1.DeleteSnapshotRequest
-	17, // 10: rose.v1.Rose.OpenSnapshot:input_type -> rose.v1.OpenSnapshotRequest
-	20, // 11: rose.v1.Rose.MakeVlog:input_type -> rose.v1.MakeVlogRequest
-	22, // 12: rose.v1.Rose.WriteVlog:input_type -> rose.v1.WriteVlogRequest
-	24, // 13: rose.v1.Rose.ReadVlog:input_type -> rose.v1.ReadVlogRequest
-	26, // 14: rose.v1.Rose.CommitVlog:input_type -> rose.v1.CommitVlogRequest
-	28, // 15: rose.v1.Rose.MakePlog:input_type -> rose.v1.MakePlogRequest
-	30, // 16: rose.v1.Rose.WritePlog:input_type -> rose.v1.WritePlogRequest
-	32, // 17: rose.v1.Rose.ReadPlog:input_type -> rose.v1.ReadPlogRequest
-	34, // 18: rose.v1.Rose.CommitPlog:input_type -> rose.v1.CommitPlogRequest
-	36, // 19: rose.v1.Rose.AddDisk:input_type -> rose.v1.AddDiskRequest
-	38, // 20: rose.v1.Rose.RemoveDisk:input_type -> rose.v1.RemoveDiskRequest
-	39, // 21: rose.v1.Rose.ReplaceDisk:input_type -> rose.v1.ReplaceDiskRequest
-	40, // 22: rose.v1.Rose.StartReprotect:input_type -> rose.v1.StartReprotectRequest
-	41, // 23: rose.v1.Rose.StartRebalance:input_type -> rose.v1.StartRebalanceRequest
-	43, // 24: rose.v1.Rose.GetMaintenanceJob:input_type -> rose.v1.GetMaintenanceJobRequest
-	2,  // 25: rose.v1.Rose.Open:output_type -> rose.v1.OpenResponse
-	4,  // 26: rose.v1.Rose.Write:output_type -> rose.v1.WriteResponse
-	6,  // 27: rose.v1.Rose.Read:output_type -> rose.v1.ReadResponse
-	19, // 28: rose.v1.Rose.Close:output_type -> rose.v1.CloseResponse
-	8,  // 29: rose.v1.Rose.Getattr:output_type -> rose.v1.GetattrResponse
-	10, // 30: rose.v1.Rose.Unlink:output_type -> rose.v1.UnlinkResponse
-	12, // 31: rose.v1.Rose.Rename:output_type -> rose.v1.RenameResponse
-	14, // 32: rose.v1.Rose.CreateSnapshot:output_type -> rose.v1.CreateSnapshotResponse
-	16, // 33: rose.v1.Rose.DeleteSnapshot:output_type -> rose.v1.DeleteSnapshotResponse
-	2,  // 34: rose.v1.Rose.OpenSnapshot:output_type -> rose.v1.OpenResponse
-	21, // 35: rose.v1.Rose.MakeVlog:output_type -> rose.v1.MakeVlogResponse
-	23, // 36: rose.v1.Rose.WriteVlog:output_type -> rose.v1.WriteVlogResponse
-	25, // 37: rose.v1.Rose.ReadVlog:output_type -> rose.v1.ReadVlogResponse
-	27, // 38: rose.v1.Rose.CommitVlog:output_type -> rose.v1.CommitVlogResponse
-	29, // 39: rose.v1.Rose.MakePlog:output_type -> rose.v1.MakePlogResponse
-	31, // 40: rose.v1.Rose.WritePlog:output_type -> rose.v1.WritePlogResponse
-	33, // 41: rose.v1.Rose.ReadPlog:output_type -> rose.v1.ReadPlogResponse
-	35, // 42: rose.v1.Rose.CommitPlog:output_type -> rose.v1.CommitPlogResponse
-	37, // 43: rose.v1.Rose.AddDisk:output_type -> rose.v1.AddDiskResponse
-	42, // 44: rose.v1.Rose.RemoveDisk:output_type -> rose.v1.MaintenanceJobResponse
-	42, // 45: rose.v1.Rose.ReplaceDisk:output_type -> rose.v1.MaintenanceJobResponse
-	42, // 46: rose.v1.Rose.StartReprotect:output_type -> rose.v1.MaintenanceJobResponse
-	42, // 47: rose.v1.Rose.StartRebalance:output_type -> rose.v1.MaintenanceJobResponse
-	44, // 48: rose.v1.Rose.GetMaintenanceJob:output_type -> rose.v1.GetMaintenanceJobResponse
-	25, // [25:49] is the sub-list for method output_type
-	1,  // [1:25] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	13, // 0: rose.v1.ListDirResponse.entries:type_name -> rose.v1.DirEntry
+	0,  // 1: rose.v1.GetMaintenanceJobResponse.state:type_name -> rose.v1.MaintenanceJobState
+	1,  // 2: rose.v1.Rose.Open:input_type -> rose.v1.OpenRequest
+	3,  // 3: rose.v1.Rose.Write:input_type -> rose.v1.WriteRequest
+	5,  // 4: rose.v1.Rose.Read:input_type -> rose.v1.ReadRequest
+	25, // 5: rose.v1.Rose.Close:input_type -> rose.v1.CloseRequest
+	7,  // 6: rose.v1.Rose.Getattr:input_type -> rose.v1.GetattrRequest
+	9,  // 7: rose.v1.Rose.Unlink:input_type -> rose.v1.UnlinkRequest
+	11, // 8: rose.v1.Rose.Rename:input_type -> rose.v1.RenameRequest
+	14, // 9: rose.v1.Rose.ListDir:input_type -> rose.v1.ListDirRequest
+	16, // 10: rose.v1.Rose.Mkdir:input_type -> rose.v1.MkdirRequest
+	18, // 11: rose.v1.Rose.Rmdir:input_type -> rose.v1.RmdirRequest
+	20, // 12: rose.v1.Rose.CreateSnapshot:input_type -> rose.v1.CreateSnapshotRequest
+	22, // 13: rose.v1.Rose.DeleteSnapshot:input_type -> rose.v1.DeleteSnapshotRequest
+	24, // 14: rose.v1.Rose.OpenSnapshot:input_type -> rose.v1.OpenSnapshotRequest
+	27, // 15: rose.v1.Rose.MakeVlog:input_type -> rose.v1.MakeVlogRequest
+	29, // 16: rose.v1.Rose.WriteVlog:input_type -> rose.v1.WriteVlogRequest
+	31, // 17: rose.v1.Rose.ReadVlog:input_type -> rose.v1.ReadVlogRequest
+	33, // 18: rose.v1.Rose.CommitVlog:input_type -> rose.v1.CommitVlogRequest
+	35, // 19: rose.v1.Rose.MakePlog:input_type -> rose.v1.MakePlogRequest
+	37, // 20: rose.v1.Rose.WritePlog:input_type -> rose.v1.WritePlogRequest
+	39, // 21: rose.v1.Rose.ReadPlog:input_type -> rose.v1.ReadPlogRequest
+	41, // 22: rose.v1.Rose.CommitPlog:input_type -> rose.v1.CommitPlogRequest
+	43, // 23: rose.v1.Rose.AddDisk:input_type -> rose.v1.AddDiskRequest
+	45, // 24: rose.v1.Rose.RemoveDisk:input_type -> rose.v1.RemoveDiskRequest
+	46, // 25: rose.v1.Rose.ReplaceDisk:input_type -> rose.v1.ReplaceDiskRequest
+	47, // 26: rose.v1.Rose.StartReprotect:input_type -> rose.v1.StartReprotectRequest
+	48, // 27: rose.v1.Rose.StartRebalance:input_type -> rose.v1.StartRebalanceRequest
+	50, // 28: rose.v1.Rose.GetMaintenanceJob:input_type -> rose.v1.GetMaintenanceJobRequest
+	2,  // 29: rose.v1.Rose.Open:output_type -> rose.v1.OpenResponse
+	4,  // 30: rose.v1.Rose.Write:output_type -> rose.v1.WriteResponse
+	6,  // 31: rose.v1.Rose.Read:output_type -> rose.v1.ReadResponse
+	26, // 32: rose.v1.Rose.Close:output_type -> rose.v1.CloseResponse
+	8,  // 33: rose.v1.Rose.Getattr:output_type -> rose.v1.GetattrResponse
+	10, // 34: rose.v1.Rose.Unlink:output_type -> rose.v1.UnlinkResponse
+	12, // 35: rose.v1.Rose.Rename:output_type -> rose.v1.RenameResponse
+	15, // 36: rose.v1.Rose.ListDir:output_type -> rose.v1.ListDirResponse
+	17, // 37: rose.v1.Rose.Mkdir:output_type -> rose.v1.MkdirResponse
+	19, // 38: rose.v1.Rose.Rmdir:output_type -> rose.v1.RmdirResponse
+	21, // 39: rose.v1.Rose.CreateSnapshot:output_type -> rose.v1.CreateSnapshotResponse
+	23, // 40: rose.v1.Rose.DeleteSnapshot:output_type -> rose.v1.DeleteSnapshotResponse
+	2,  // 41: rose.v1.Rose.OpenSnapshot:output_type -> rose.v1.OpenResponse
+	28, // 42: rose.v1.Rose.MakeVlog:output_type -> rose.v1.MakeVlogResponse
+	30, // 43: rose.v1.Rose.WriteVlog:output_type -> rose.v1.WriteVlogResponse
+	32, // 44: rose.v1.Rose.ReadVlog:output_type -> rose.v1.ReadVlogResponse
+	34, // 45: rose.v1.Rose.CommitVlog:output_type -> rose.v1.CommitVlogResponse
+	36, // 46: rose.v1.Rose.MakePlog:output_type -> rose.v1.MakePlogResponse
+	38, // 47: rose.v1.Rose.WritePlog:output_type -> rose.v1.WritePlogResponse
+	40, // 48: rose.v1.Rose.ReadPlog:output_type -> rose.v1.ReadPlogResponse
+	42, // 49: rose.v1.Rose.CommitPlog:output_type -> rose.v1.CommitPlogResponse
+	44, // 50: rose.v1.Rose.AddDisk:output_type -> rose.v1.AddDiskResponse
+	49, // 51: rose.v1.Rose.RemoveDisk:output_type -> rose.v1.MaintenanceJobResponse
+	49, // 52: rose.v1.Rose.ReplaceDisk:output_type -> rose.v1.MaintenanceJobResponse
+	49, // 53: rose.v1.Rose.StartReprotect:output_type -> rose.v1.MaintenanceJobResponse
+	49, // 54: rose.v1.Rose.StartRebalance:output_type -> rose.v1.MaintenanceJobResponse
+	51, // 55: rose.v1.Rose.GetMaintenanceJob:output_type -> rose.v1.GetMaintenanceJobResponse
+	29, // [29:56] is the sub-list for method output_type
+	2,  // [2:29] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_proto_rose_proto_init() }
@@ -2458,7 +2824,7 @@ func file_proto_rose_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_rose_proto_rawDesc), len(file_proto_rose_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   44,
+			NumMessages:   51,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

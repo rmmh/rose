@@ -326,7 +326,11 @@ func (d *DB) CommitWriteOp(ctx context.Context, opID int64, mtime int64) (int64,
 	if err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id) VALUES (?, ?) ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id`, op.Path, fileID); err != nil {
+	parent, name := splitPath(op.Path)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id, parent, name) VALUES (?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id, parent = excluded.parent, name = excluded.name`, op.Path, fileID, parent, name); err != nil {
+		return 0, err
+	}
+	if err := ensureDirs(ctx, tx, op.Path, mtime); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE write_op SET state = ?, file_id = ?, tail = X'' WHERE id = ?", WriteOpCommitted, fileID, opID); err != nil {

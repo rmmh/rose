@@ -27,7 +27,7 @@ type FileHandle struct {
 
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	// Simple implementation
-	path := req.GetPath()
+	path := cleanPath(req.GetPath())
 	if path == "" {
 		return nil, fmt.Errorf("path cannot be empty")
 	}
@@ -75,7 +75,7 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 	if req.GetPath() == "" || req.GetSnapshotId() == 0 {
 		return nil, fmt.Errorf("snapshot_id and path are required")
 	}
-	id, err := s.db.OpenSnapshotFile(ctx, req.GetSnapshotId(), req.GetPath())
+	id, err := s.db.OpenSnapshotFile(ctx, req.GetSnapshotId(), cleanPath(req.GetPath()))
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +94,7 @@ func (s *Server) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.UnlinkR
 	if req.GetPath() == "" {
 		return nil, fmt.Errorf("path cannot be empty")
 	}
-	if err := s.db.UnlinkFile(ctx, req.GetPath()); err != nil {
+	if err := s.db.UnlinkFile(ctx, cleanPath(req.GetPath())); err != nil {
 		return nil, err
 	}
 	return &pb.UnlinkResponse{}, nil
@@ -104,7 +104,7 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 	if req.GetOldPath() == "" || req.GetNewPath() == "" {
 		return nil, fmt.Errorf("old_path and new_path are required")
 	}
-	if err := s.db.RenameFile(ctx, req.GetOldPath(), req.GetNewPath()); err != nil {
+	if err := s.db.RenameFile(ctx, cleanPath(req.GetOldPath()), cleanPath(req.GetNewPath())); err != nil {
 		return nil, err
 	}
 	return &pb.RenameResponse{}, nil
@@ -250,12 +250,47 @@ func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRespons
 	return &pb.ReadResponse{Buffer: out}, nil
 }
 func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.GetattrResponse, error) {
-	size, err := s.db.GetFileSize(ctx, req.GetPath())
+	entry, ok, err := s.db.StatPath(ctx, req.GetPath())
 	if err != nil {
 		slog.Error("Getattr failed", "path", req.GetPath(), "error", err)
 		return nil, err
 	}
-	return &pb.GetattrResponse{Size: size}, nil
+	if !ok {
+		return nil, fmt.Errorf("path not found: %q", req.GetPath())
+	}
+	return &pb.GetattrResponse{Size: entry.Size, IsDir: entry.IsDir, Mtime: entry.Mtime}, nil
+}
+
+func (s *Server) ListDir(ctx context.Context, req *pb.ListDirRequest) (*pb.ListDirResponse, error) {
+	entries, err := s.db.ListDir(ctx, req.GetPath())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*pb.DirEntry, len(entries))
+	for i, e := range entries {
+		out[i] = &pb.DirEntry{Name: e.Name, IsDir: e.IsDir, Size: e.Size, Mtime: e.Mtime}
+	}
+	return &pb.ListDirResponse{Entries: out}, nil
+}
+
+func (s *Server) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.MkdirResponse, error) {
+	if req.GetPath() == "" {
+		return nil, fmt.Errorf("path cannot be empty")
+	}
+	if err := s.db.Mkdir(ctx, req.GetPath(), time.Now().UnixNano()); err != nil {
+		return nil, err
+	}
+	return &pb.MkdirResponse{}, nil
+}
+
+func (s *Server) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.RmdirResponse, error) {
+	if req.GetPath() == "" {
+		return nil, fmt.Errorf("path cannot be empty")
+	}
+	if err := s.db.Rmdir(ctx, req.GetPath()); err != nil {
+		return nil, err
+	}
+	return &pb.RmdirResponse{}, nil
 }
 
 // provisionBucketVlogLocked provisions a fresh vlog under a bucket's protection

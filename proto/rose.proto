@@ -12,6 +12,9 @@ service Rose {
   rpc Getattr(GetattrRequest) returns (GetattrResponse);
   rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
   rpc Rename(RenameRequest) returns (RenameResponse);
+  rpc ListDir(ListDirRequest) returns (ListDirResponse);
+  rpc Mkdir(MkdirRequest) returns (MkdirResponse);
+  rpc Rmdir(RmdirRequest) returns (RmdirResponse);
   rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
   rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
   rpc OpenSnapshot(OpenSnapshotRequest) returns (OpenResponse);
@@ -75,6 +78,8 @@ message GetattrRequest {
 
 message GetattrResponse {
   int64 size = 1;
+  bool is_dir = 2;
+  int64 mtime = 3;
 }
 
 message UnlinkRequest {
@@ -90,6 +95,35 @@ message RenameRequest {
 }
 
 message RenameResponse {
+}
+
+message DirEntry {
+  string name = 1;
+  bool is_dir = 2;
+  int64 size = 3;
+  int64 mtime = 4;
+}
+
+message ListDirRequest {
+  string path = 1;
+}
+
+message ListDirResponse {
+  repeated DirEntry entries = 1;
+}
+
+message MkdirRequest {
+  string path = 1;
+}
+
+message MkdirResponse {
+}
+
+message RmdirRequest {
+  string path = 1;
+}
+
+message RmdirResponse {
 }
 
 message CreateSnapshotRequest {
