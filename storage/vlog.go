@@ -320,13 +320,15 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) er
 func (v *Vlog) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
 		// Try reading from the first available client
+		var lastErr error
 		for _, c := range v.clients {
 			data, err := c.Read(ctx, offset, length)
 			if err == nil {
 				return data, nil
 			}
+			lastErr = err
 		}
-		return nil, fmt.Errorf("all clients failed to read from DUPLICATE vlog %d", v.id)
+		return nil, fmt.Errorf("all clients failed to read from DUPLICATE vlog %d: %w", v.id, lastErr)
 	}
 
 	if v.scheme == "EC" {

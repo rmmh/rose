@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/rmmh/rose/meta"
 	"github.com/rmmh/rose/storage"
@@ -87,6 +88,7 @@ func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error
 		return err
 	}
 	affected := make(map[uint32]bool)
+	var reopenedIDs []uint32
 	for _, info := range infos {
 		if s.nodeOf(info.DiskID) != nodeID || !s.offlinePlogs[info.ID] {
 			continue
@@ -99,6 +101,7 @@ func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error
 			return fmt.Errorf("reopen plog %d on returned node %d: %w", info.ID, nodeID, err)
 		}
 		s.plogs[info.ID] = p
+		reopenedIDs = append(reopenedIDs, info.ID)
 		delete(s.offlinePlogs, info.ID)
 		mappings, err := s.db.VlogsForPlog(ctx, info.ID)
 		if err != nil {
@@ -111,6 +114,13 @@ func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error
 	for vlogID := range affected {
 		if err := s.remountVlogLocked(ctx, vlogID); err != nil {
 			return err
+		}
+	}
+	for _, id := range reopenedIDs {
+		if p, ok := s.plogs[id]; ok {
+			if err := p.RecoverHashes(ctx, s); err != nil {
+				slog.Warn("failed to recover hashes for reopened plog, continuing", "plogID", id, "error", err)
+			}
 		}
 	}
 	return nil

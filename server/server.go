@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -423,6 +425,11 @@ func (s *Server) Recover(ctx context.Context) error {
 			}
 		}
 	}
+	for id, plog := range s.plogs {
+		if err := plog.RecoverHashes(ctx, s); err != nil {
+			slog.Warn("failed to recover hashes for plog, continuing", "plogID", id, "error", err)
+		}
+	}
 	s.startMaintenanceDriver()
 	return nil
 }
@@ -772,3 +779,84 @@ var (
 	_ storage.PlogClient = &localPlogClient{}
 	_ storage.PlogClient = offlinePlogClient{}
 )
+
+// RecoverChunks retrieves expected chunk placements from DB for a physical log range,
+// mapping virtual addresses to logical physical offsets in the plog.
+func (s *Server) RecoverChunks(ctx context.Context, plogID uint32, blockStartPhys, sealedPhys int64) ([]storage.RecoveredChunk, error) {
+	// 1. Find the vlog ID and shard index for this plog ID in the database
+	var vlogID uint32
+	var shardIdx int
+	err := s.db.GetDB().QueryRowContext(ctx,
+		"SELECT vlog_id, shard_idx FROM vlog_plog WHERE plog_id = ?", plogID).
+		Scan(&vlogID, &shardIdx)
+	if err == sql.ErrNoRows {
+		return nil, nil // no mapping found
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Look up the vlog's protection scheme and data shards count
+	vlogInfo, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Map physical range [blockStartPhys, sealedPhys) to logical limits
+	logicalStart := storage.CalcLogical(blockStartPhys)
+	logicalEnd := storage.CalcLogical(sealedPhys)
+
+	var startVaddr, endVaddr int64
+	var stripeWidth int64
+	var ecColumnBytes int64
+
+	switch vlogInfo.ProtectionScheme {
+	case "NONE", "DUPLICATE":
+		startVaddr = logicalStart
+		endVaddr = logicalEnd
+	case "EC":
+		if shardIdx >= int(vlogInfo.DataShards) {
+			// Parity shard: cannot recover from client-facing chunk rows directly
+			return nil, nil
+		}
+		// In EC scheme, columns map to DataPerBlock
+		ecColumnBytes = int64(storage.DataPerBlock)
+		stripeWidth = ecColumnBytes * int64(vlogInfo.DataShards)
+
+		rowIdx := logicalStart / ecColumnBytes
+		startVaddr = rowIdx*stripeWidth + int64(shardIdx)*ecColumnBytes + (logicalStart % ecColumnBytes)
+		endVaddr = startVaddr + (logicalEnd - logicalStart)
+	default:
+		return nil, fmt.Errorf("unsupported protection scheme: %s", vlogInfo.ProtectionScheme)
+	}
+
+	// 4. Fetch overlapping chunks from the DB
+	chunks, err := s.db.GetChunksInVlogRange(ctx, vlogID, startVaddr, endVaddr)
+	if err != nil {
+		return nil, err
+	}
+	if len(chunks) == 0 {
+		return nil, nil // No database chunk rows exist for this range
+	}
+
+	// 5. Translate each chunk's virtual offset to the logical offset in this plog
+	out := make([]storage.RecoveredChunk, len(chunks))
+	for i, c := range chunks {
+		var chunkLogicalStart int64
+		switch vlogInfo.ProtectionScheme {
+		case "NONE", "DUPLICATE":
+			chunkLogicalStart = c.VaddrOffset
+		case "EC":
+			rowIdx := c.VaddrOffset / stripeWidth
+			offsetInCol := c.VaddrOffset % ecColumnBytes
+			chunkLogicalStart = rowIdx*ecColumnBytes + offsetInCol
+		}
+		out[i] = storage.RecoveredChunk{
+			Hash:         c.Hash,
+			LogicalStart: chunkLogicalStart,
+			Length:       c.LogicalLen,
+		}
+	}
+
+	return out, nil
+}

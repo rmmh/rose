@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
@@ -46,6 +47,7 @@ type Plog struct {
 	id            uint32
 	file          *os.File
 	logicalLength int64 // total logical bytes, including the open buffered sector
+	loadedFromTrailer bool  // set to true if loaded from a valid open-block trailer
 
 	buf        []byte // open trailing sector, 0..4096 bytes (sealed once full)
 	hashes     []byte // hashes of sealed sectors in the current open block
@@ -67,11 +69,27 @@ const (
 	HashesPerBlock = 255
 	HashSize       = 16
 
+	BlockPhysical = (HashesPerBlock + 1) * SectorSize
+	DataPerBlock  = HashesPerBlock * SectorSize
+
 	// blockPhysical is the on-disk span of a full hash-protected block: 255
 	// data sectors followed by a single hash sector.
-	blockPhysical = (HashesPerBlock + 1) * SectorSize
-	dataPerBlock  = HashesPerBlock * SectorSize
+	blockPhysical = BlockPhysical
+	dataPerBlock  = DataPerBlock
 )
+
+// RecoveredChunk describes a chunk's location and expected content hash.
+type RecoveredChunk struct {
+	Hash         []byte
+	LogicalStart int64
+	Length       int
+}
+
+// ChunkRecoverer is called when reload finds no valid trailer to recover the expected sector hashes
+// for the open block of a plog.
+type ChunkRecoverer interface {
+	RecoverChunks(ctx context.Context, plogID uint32, blockStartPhys, sealedPhys int64) ([]RecoveredChunk, error)
+}
 
 // bitrotKey keys the HMAC stored alongside each block of sector hashes. It is a
 // placeholder until per-volume keys are provisioned.
@@ -115,7 +133,7 @@ func openPlogFile(path string, id uint32, flag int) (*Plog, error) {
 	p := &Plog{
 		id:            id,
 		file:          f,
-		logicalLength: calcLogical(info.Size()),
+		logicalLength: CalcLogical(info.Size()),
 		buf:           make([]byte, 0, SectorSize),
 		hashes:        make([]byte, 0, HashesPerBlock*HashSize),
 		writeBuf:      make([]byte, 0, 2*SectorSize),
@@ -143,9 +161,11 @@ func (p *Plog) reload() error {
 	// sectors had when last made durable, so a sector that rotted while we were
 	// down no longer matches its recorded hash and reads fail with ErrBitrot.
 	if p.recoverFromTrailer(info.Size()) {
+		p.loadedFromTrailer = true
 		return nil
 	}
 
+	p.loadedFromTrailer = false
 	// No valid trailer (a fresh/just-completed block, or a torn write that
 	// overwrote the old trailer before the next Commit): trust the bytes. The
 	// length is the size-derived value OpenPlog already set; recompute the open
@@ -166,14 +186,14 @@ func (p *Plog) rebuildOpenBlock() error {
 	sealed := p.logicalLength - partial
 	if partial > 0 {
 		p.buf = p.buf[:partial]
-		if _, err := p.file.ReadAt(p.buf, calcPhysical(sealed)); err != nil {
+		if _, err := p.file.ReadAt(p.buf, CalcPhysical(sealed)); err != nil {
 			return fmt.Errorf("reload plog %d open sector: %w", p.id, err)
 		}
 	}
 	blockStart := (sealed / dataPerBlock) * dataPerBlock
 	for s := blockStart; s < sealed; s += SectorSize {
 		sector := make([]byte, SectorSize)
-		if _, err := p.file.ReadAt(sector, calcPhysical(s)); err != nil {
+		if _, err := p.file.ReadAt(sector, CalcPhysical(s)); err != nil {
 			return fmt.Errorf("reload plog %d sector at %d: %w", p.id, s, err)
 		}
 		h := sectorHash(sector)
@@ -204,7 +224,7 @@ func (p *Plog) TruncateTo(logical int64) error {
 	if logical == p.logicalLength {
 		return nil
 	}
-	if err := p.file.Truncate(calcPhysical(logical)); err != nil {
+	if err := p.file.Truncate(CalcPhysical(logical)); err != nil {
 		return fmt.Errorf("truncate plog %d: %w", p.id, err)
 	}
 	p.logicalLength = logical
@@ -252,7 +272,7 @@ func (p *Plog) recoverFromTrailer(size int64) bool {
 	sealed := blockStartLogical + int64(c)*SectorSize
 	if raggedLen > 0 {
 		p.buf = p.buf[:raggedLen]
-		if _, err := p.file.ReadAt(p.buf, calcPhysical(sealed)); err != nil {
+		if _, err := p.file.ReadAt(p.buf, CalcPhysical(sealed)); err != nil {
 			p.buf = p.buf[:0]
 			return false
 		}
@@ -262,7 +282,8 @@ func (p *Plog) recoverFromTrailer(size int64) bool {
 	return true
 }
 
-func calcLogical(phys int64) int64 {
+// CalcLogical converts physical plog bytes to logical data bytes.
+func CalcLogical(phys int64) int64 {
 	// Every 255 * 4096 bytes of data is followed by 1 * 4096 bytes of hashes.
 	// We need to calculate how many data bytes are in `phys` bytes.
 	chunks := phys / blockPhysical
@@ -277,7 +298,8 @@ func calcLogical(phys int64) int64 {
 	return logical
 }
 
-func calcPhysical(logical int64) int64 {
+// CalcPhysical converts logical data bytes to physical plog bytes.
+func CalcPhysical(logical int64) int64 {
 	chunks := logical / dataPerBlock
 	rem := logical % dataPerBlock
 	return chunks*blockPhysical + rem
@@ -304,7 +326,7 @@ func (p *Plog) writeLocked(data []byte) (int64, error) {
 
 	// We are going to seal at least one sector.
 	firstSectorLogicalStart := p.logicalLength - int64(len(p.buf))
-	firstSectorPhysicalStart := calcPhysical(firstSectorLogicalStart)
+	firstSectorPhysicalStart := CalcPhysical(firstSectorLogicalStart)
 
 	// Reuse the batched-write scratch instead of allocating a fresh buffer for
 	// every EnsureWrite; it stays under p.mu and grows geometrically as needed.
@@ -413,7 +435,7 @@ func (p *Plog) EnsureAppend(offset int64, data []byte) error {
 // records its hash, emitting a hash sector when the block completes.
 func (p *Plog) sealSector() error {
 	sectorStart := p.logicalLength - int64(len(p.buf))
-	if _, err := p.file.WriteAt(p.buf, calcPhysical(sectorStart)); err != nil {
+	if _, err := p.file.WriteAt(p.buf, CalcPhysical(sectorStart)); err != nil {
 		return fmt.Errorf("seal plog %d sector: %w", p.id, err)
 	}
 	h := sectorHash(p.buf)
@@ -500,7 +522,7 @@ func (p *Plog) readDataSector(sectorIdx, sealed int64) ([]byte, error) {
 		size = sealed - sectorStart
 	}
 	sector := make([]byte, size)
-	if _, err := p.file.ReadAt(sector, calcPhysical(sectorStart)); err != nil {
+	if _, err := p.file.ReadAt(sector, CalcPhysical(sectorStart)); err != nil {
 		return nil, fmt.Errorf("read plog %d sector %d: %w", p.id, sectorIdx, err)
 	}
 	expected, ok, err := p.sectorHashFor(sectorIdx, sealed)
@@ -582,7 +604,7 @@ func (p *Plog) Scrub() (ScrubResult, error) {
 		for pos := int64(0); pos < HashesPerBlock; pos++ {
 			sectorIdx := blockIdx*HashesPerBlock + pos
 			sector := make([]byte, SectorSize)
-			if _, err := p.file.ReadAt(sector, calcPhysical(sectorIdx*SectorSize)); err != nil {
+			if _, err := p.file.ReadAt(sector, CalcPhysical(sectorIdx*SectorSize)); err != nil {
 				return res, fmt.Errorf("scrub plog %d sector %d: %w", p.id, sectorIdx, err)
 			}
 			res.SectorsChecked++
@@ -606,7 +628,7 @@ func (p *Plog) Commit() error {
 	raggedLen := len(p.buf)
 	sealed := p.logicalLength - int64(raggedLen)
 	if raggedLen > 0 {
-		if _, err := p.file.WriteAt(p.buf, calcPhysical(sealed)); err != nil {
+		if _, err := p.file.WriteAt(p.buf, CalcPhysical(sealed)); err != nil {
 			return fmt.Errorf("commit plog %d ragged edge: %w", p.id, err)
 		}
 	}
@@ -619,7 +641,7 @@ func (p *Plog) Commit() error {
 	// holds no sealed sectors, so nothing to protect and no trailer; c only rises
 	// within a block, so no stale trailer can survive for the loader to mistake.
 	if len(p.hashes) > 0 {
-		if _, err := p.file.WriteAt(p.buildOpenTrailer(raggedLen), calcPhysical(sealed)+SectorSize); err != nil {
+		if _, err := p.file.WriteAt(p.buildOpenTrailer(raggedLen), CalcPhysical(sealed)+SectorSize); err != nil {
 			return fmt.Errorf("commit plog %d open trailer: %w", p.id, err)
 		}
 	}
@@ -660,3 +682,165 @@ func (p *Plog) Close() error {
 	defer p.mu.Unlock()
 	return p.file.Close()
 }
+
+// ReadLogicalUnverified reads logical bytes from the plog file without verifying sector hashes.
+func (p *Plog) ReadLogicalUnverified(offset int64, length int) ([]byte, error) {
+	out := make([]byte, 0, length)
+	end := offset + int64(length)
+	for cur := offset; cur < end; {
+		sectorIdx := cur / SectorSize
+		sectorStart := sectorIdx * SectorSize
+		posInSector := cur - sectorStart
+		n := SectorSize - posInSector
+		if cur+n > end {
+			n = end - cur
+		}
+
+		buf := make([]byte, n)
+		physOffset := CalcPhysical(sectorStart) + posInSector
+		if _, err := p.file.ReadAt(buf, physOffset); err != nil {
+			return nil, err
+		}
+		out = append(out, buf...)
+		cur += n
+	}
+	return out, nil
+}
+
+// RecoverHashes verifies and recovers the open block's hashes using a recoverer if the plog fell back to trust-the-bytes.
+func (p *Plog) RecoverHashes(ctx context.Context, recoverer ChunkRecoverer) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.loadedFromTrailer {
+		return nil
+	}
+
+	partial := p.logicalLength % SectorSize
+	sealed := p.logicalLength - partial
+	blockStart := (sealed / dataPerBlock) * dataPerBlock
+
+	if blockStart >= sealed {
+		return nil
+	}
+
+	blockStartPhys := CalcPhysical(blockStart)
+	sealedPhys := CalcPhysical(sealed)
+
+	chunks, err := recoverer.RecoverChunks(ctx, p.id, blockStartPhys, sealedPhys)
+	if err != nil {
+		return err
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	numSectors := int((sealed - blockStart) / SectorSize)
+	newHashes := make([]byte, 0, numSectors*HashSize)
+
+	// Cache read chunks by their Hash to avoid redundant physical reads and validation
+	type cachedChunk struct {
+		data  []byte
+		valid bool
+	}
+	chunkCache := make(map[string]cachedChunk)
+
+	for i := 0; i < numSectors; i++ {
+		secLogicalStart := blockStart + int64(i)*SectorSize
+		secLogicalEnd := secLogicalStart + SectorSize
+
+		// Find the chunks that overlap this sector
+		var overlapping []RecoveredChunk
+		for _, c := range chunks {
+			cEnd := c.LogicalStart + int64(c.Length)
+			if c.LogicalStart < secLogicalEnd && cEnd > secLogicalStart {
+				overlapping = append(overlapping, c)
+			}
+		}
+
+		if len(overlapping) == 0 {
+			// No overlapping chunks found in the DB for this sector.
+			// We can't validate it using chunks, fall back to the disk sector hash.
+			sector := make([]byte, SectorSize)
+			if _, err := p.file.ReadAt(sector, CalcPhysical(secLogicalStart)); err != nil {
+				return fmt.Errorf("recover hashes: read fallback sector %d: %w", secLogicalStart/SectorSize, err)
+			}
+			h := sectorHash(sector)
+			newHashes = append(newHashes, h[:]...)
+			continue
+		}
+
+		secBuf := make([]byte, SectorSize)
+		filled := make([]bool, SectorSize)
+
+		sectorCorrupt := false
+		for _, c := range overlapping {
+			hashKey := string(c.Hash)
+			cc, ok := chunkCache[hashKey]
+			if !ok {
+				// Read chunk bytes bypassing verification
+				chunkBytes, readErr := p.ReadLogicalUnverified(c.LogicalStart, c.Length)
+				if readErr != nil {
+					sectorCorrupt = true
+					break
+				}
+				sum := sha256.Sum256(chunkBytes)
+				if bytes.Equal(sum[:15], c.Hash) {
+					cc = cachedChunk{data: chunkBytes, valid: true}
+				} else {
+					cc = cachedChunk{valid: false}
+				}
+				chunkCache[hashKey] = cc
+			}
+
+			if !cc.valid {
+				sectorCorrupt = true
+				break
+			}
+
+			// Copy the overlapping part of the chunk into the sector buffer
+			cEnd := c.LogicalStart + int64(c.Length)
+			overlapStart := max(c.LogicalStart, secLogicalStart)
+			overlapEnd := min(cEnd, secLogicalEnd)
+			overlapLen := int(overlapEnd - overlapStart)
+
+			chunkOffset := int(overlapStart - c.LogicalStart)
+			secOffset := int(overlapStart - secLogicalStart)
+
+			copy(secBuf[secOffset:secOffset+overlapLen], cc.data[chunkOffset:chunkOffset+overlapLen])
+			for k := secOffset; k < secOffset+overlapLen; k++ {
+				filled[k] = true
+			}
+		}
+
+		if sectorCorrupt {
+			// Sector has rotted/failed validation. Use all-zeros dummy hash.
+			dummy := make([]byte, HashSize)
+			newHashes = append(newHashes, dummy...)
+			continue
+		}
+
+		// Verify if the sector is fully tiled/filled
+		fullyFilled := true
+		for _, f := range filled {
+			if !f {
+				fullyFilled = false
+				break
+			}
+		}
+
+		if !fullyFilled {
+			// Gap in chunks for this sector, use all-zeros dummy hash
+			dummy := make([]byte, HashSize)
+			newHashes = append(newHashes, dummy...)
+			continue
+		}
+
+		// Compute sector hash of the reconstructed/validated sector
+		h := sectorHash(secBuf)
+		newHashes = append(newHashes, h[:]...)
+	}
+
+	p.hashes = newHashes
+	return nil
+}
+

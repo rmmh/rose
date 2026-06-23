@@ -718,3 +718,30 @@ func escapeLike(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return r.Replace(s)
 }
+
+// ChunkInfo describes metadata for one chunk in a virtual log.
+type ChunkInfo struct {
+	Hash        []byte
+	VaddrOffset int64
+	LogicalLen  int
+}
+
+// GetChunksInVlogRange returns all chunks in a vlog that overlap the virtual address range [startVaddr, endVaddr).
+func (d *DB) GetChunksInVlogRange(ctx context.Context, vlogID uint32, startVaddr, endVaddr int64) ([]ChunkInfo, error) {
+	rows, err := d.db.QueryContext(ctx,
+		"SELECT hash, vaddr_offset, logical_len FROM chunk WHERE vlog_id = ? AND (vaddr_offset + logical_len) > ? AND vaddr_offset < ? ORDER BY vaddr_offset",
+		vlogID, startVaddr, endVaddr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChunkInfo
+	for rows.Next() {
+		var c ChunkInfo
+		if err := rows.Scan(&c.Hash, &c.VaddrOffset, &c.LogicalLen); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}

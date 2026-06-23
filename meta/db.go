@@ -236,6 +236,7 @@ func initSchema(db *sql.DB, durable bool) error {
 		-- scale.
 		CREATE INDEX IF NOT EXISTS idx_vlog_plog_plog ON vlog_plog(plog_id);
 		CREATE INDEX IF NOT EXISTS idx_plog_disk ON plog(disk_id);
+		CREATE INDEX IF NOT EXISTS idx_chunk_vlog ON chunk(vlog_id, vaddr_offset);
 
 		-- Directory listings resolve children by parent: one indexed equality scan
 		-- per table returns exactly the immediate children, O(children) rather than

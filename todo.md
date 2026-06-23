@@ -120,7 +120,7 @@ replicated staging vlog and a maintenance-pass promotion step.
   recomputed (and thus trusted) from the very sectors it protects. A torn/absent
   trailer falls back to recomputing the sectors, the original behavior. No sidecar
   file, and one fsync per Commit.
-- Close the torn-write fallback gap without trusting the bytes: when reload finds
+- (done) Close the torn-write fallback gap without trusting the bytes: when reload finds
   no valid trailer (a crash that overwrote the old trailer before the next
   Commit), the open block's sealed sector hashes are currently recomputed from the
   possibly-rotted sectors. Instead, recover them from the chunk rows in the

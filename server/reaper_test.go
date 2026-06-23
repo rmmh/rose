@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
+	"github.com/rmmh/rose/storage"
 )
 
 func TestReapAbandonedWriteOps(t *testing.T) {
@@ -259,5 +262,99 @@ func TestReapReleaseLeaseAndCompaction(t *testing.T) {
 	s.vlogMu.Unlock()
 	if mounted {
 		t.Fatal("expected vlog to be retired after compaction")
+	}
+}
+
+func TestRecoverTornWriteFromCatalog(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	roots := map[uint32]string{1: filepath.Join(dir, "disk-1")}
+	if err := os.MkdirAll(roots[1], 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s1 := NewServerWithDiskRoots(db, roots)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s1.SetMaintenanceInterval(0)
+
+	// Write a file. 15000 bytes covers multiple sectors but fits within the open block.
+	payload := make([]byte, 15000)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+	writeServerFileInternal(t, s1, "/f1", payload)
+
+	plogs, err := db.ListPlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plogs) == 0 {
+		t.Fatal("expected at least 1 plog")
+	}
+	plogID := plogs[0].ID
+	plogPath := s1.plogPath(plogs[0].DiskID, plogID)
+
+	s1.CloseStorage()
+
+	// Simulate torn write + bitrot in the open block:
+	// 1. Overwrite/trash the trailer sector (last sector of the file) so recoverFromTrailer fails.
+	info, err := os.Stat(plogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(plogPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	trailerOffset := info.Size() - 4096
+	zeros := make([]byte, 4096)
+	if _, err := f.WriteAt(zeros, trailerOffset); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Corrupt a byte in the first data sector (logical offset 100)
+	corruptByte := []byte{0xFF}
+	if _, err := f.WriteAt(corruptByte, 100); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// Recover on a fresh server. It should boot successfully and apply our recovery.
+	s2 := NewServerWithDiskRoots(db, roots)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s2.CloseStorage()
+
+	p2, ok := s2.plogs[plogID]
+	if !ok {
+		t.Fatal("plog not found in s2")
+	}
+	t.Logf("s2 plog logical length: %d", p2.LogicalLength())
+
+	// Try reading the file. Because sector 0 failed chunk validation, it got a dummy hash,
+	// so reading it now must detect bitrot and fail (instead of returning corrupt bytes).
+	openResp, err := s2.Open(ctx, &pb.OpenRequest{Path: "/f1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := openResp.GetHandle()
+	readResp, err := s2.Read(ctx, &pb.ReadRequest{Handle: h, Offset: 0, Length: 1000})
+	if err == nil {
+		t.Logf("Read succeeded! Returned buffer length: %d, first 20 bytes: %v", len(readResp.GetBuffer()), readResp.GetBuffer()[:20])
+		t.Fatal("expected read to fail with bitrot error, but it succeeded")
+	}
+	// Verify it returns a bitrot-related error message/error
+	if !errors.Is(err, storage.ErrBitrot) && !bytes.Contains([]byte(err.Error()), []byte("bitrot")) {
+		t.Fatalf("expected bitrot error, got %v", err)
 	}
 }
