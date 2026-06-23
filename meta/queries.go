@@ -255,16 +255,37 @@ type ChunkPlacement struct {
 	CompressedLen int
 }
 
-// insertChunk records immutable chunk placement at refcount 0. The reference is
-// taken in the same transaction that publishes the file, so a committed chunk is
-// never durably visible at refcount 0 while it is about to be referenced.
-func insertChunk(ctx context.Context, tx *sql.Tx, p ChunkPlacement) error {
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO chunk (hash, refcount, vlog_id, vaddr_offset, logical_len, compressed_len)
-		VALUES (?, 0, ?, ?, ?, ?)
-		ON CONFLICT(hash) DO NOTHING
-	`, p.Hash, p.VlogID, p.VaddrOffset, p.LogicalLen, p.CompressedLen)
-	return err
+const maxChunkUpsertRows = 150
+
+// upsertChunkRefs records chunk placement rows and takes their file references in
+// the same statement. New chunks are inserted at refcount 1; existing chunks
+// reuse their placement row and increment its refcount.
+func upsertChunkRefs(ctx context.Context, tx *sql.Tx, placements []ChunkPlacement) error {
+	for start := 0; start < len(placements); start += maxChunkUpsertRows {
+		end := start + maxChunkUpsertRows
+		if end > len(placements) {
+			end = len(placements)
+		}
+		batch := placements[start:end]
+
+		var sqlText strings.Builder
+		sqlText.Grow(128 + len(batch)*24)
+		sqlText.WriteString("INSERT INTO chunk (hash, refcount, vlog_id, vaddr_offset, logical_len, compressed_len) VALUES ")
+		args := make([]any, 0, len(batch)*5)
+		for i, p := range batch {
+			if i > 0 {
+				sqlText.WriteByte(',')
+			}
+			sqlText.WriteString("(?, 1, ?, ?, ?, ?)")
+			args = append(args, p.Hash, p.VlogID, p.VaddrOffset, p.LogicalLen, p.CompressedLen)
+		}
+		sqlText.WriteString(" ON CONFLICT(hash) DO UPDATE SET refcount = refcount + 1")
+
+		if _, err := tx.ExecContext(ctx, sqlText.String(), args...); err != nil {
+			return fmt.Errorf("upsert chunk refs batch %d-%d: %w", start, end, err)
+		}
+	}
+	return nil
 }
 
 func chunkHashes(chunks []byte) [][]byte {
@@ -308,12 +329,6 @@ func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int6
 		chunks = append(chunks, lenBytes...)
 	}
 
-	for _, p := range placements {
-		if err := insertChunk(ctx, tx, p); err != nil {
-			return 0, fmt.Errorf("insert chunk: %w", err)
-		}
-	}
-
 	var oldID int64
 	err := tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", path).Scan(&oldID)
 	if err != nil && err != sql.ErrNoRows {
@@ -329,8 +344,8 @@ func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int6
 		}
 	}
 
-	if err := adjustChunkRefs(ctx, tx, chunks, 1); err != nil {
-		return 0, fmt.Errorf("increment new chunk refs: %w", err)
+	if err := upsertChunkRefs(ctx, tx, placements); err != nil {
+		return 0, fmt.Errorf("upsert new chunk refs: %w", err)
 	}
 	res, err := tx.ExecContext(ctx, "INSERT INTO file (path, mtime, chunks) VALUES (?, ?, ?)", path, mtime, chunks)
 	if err != nil {
@@ -440,7 +455,7 @@ func (d *DB) FileVersionChunks(ctx context.Context, fileID int64) ([]ChunkPlacem
 // is already present reuses that placement instead of writing its bytes again.
 func (d *DB) ChunkByHash(ctx context.Context, hash []byte) (ChunkPlacement, bool, error) {
 	p := ChunkPlacement{Hash: append([]byte(nil), hash...)}
-	err := d.db.QueryRowContext(ctx, "SELECT vlog_id, vaddr_offset, logical_len, compressed_len FROM chunk WHERE hash = ?", hash).Scan(&p.VlogID, &p.VaddrOffset, &p.LogicalLen, &p.CompressedLen)
+	err := d.chunkByHashStmt.QueryRowContext(ctx, hash).Scan(&p.VlogID, &p.VaddrOffset, &p.LogicalLen, &p.CompressedLen)
 	if err == sql.ErrNoRows {
 		return ChunkPlacement{}, false, nil
 	}

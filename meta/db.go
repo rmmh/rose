@@ -10,7 +10,8 @@ import (
 
 // DB provides thread-safe access to the Rose metadata.
 type DB struct {
-	db *sql.DB
+	db              *sql.DB
+	chunkByHashStmt *sql.Stmt
 }
 
 // Open creates or opens a metadata database at the given path.
@@ -44,11 +45,23 @@ func open(path string, durable bool) (*DB, error) {
 		return nil, err
 	}
 
-	return &DB{db: db}, nil
+	chunkByHashStmt, err := db.Prepare("SELECT vlog_id, vaddr_offset, logical_len, compressed_len FROM chunk WHERE hash = ?")
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("prepare chunk-by-hash query: %w", err)
+	}
+
+	return &DB{db: db, chunkByHashStmt: chunkByHashStmt}, nil
 }
 
 // Close closes the database connection.
 func (d *DB) Close() error {
+	if d.chunkByHashStmt != nil {
+		if err := d.chunkByHashStmt.Close(); err != nil {
+			_ = d.db.Close()
+			return err
+		}
+	}
 	return d.db.Close()
 }
 
