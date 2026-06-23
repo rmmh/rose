@@ -78,7 +78,7 @@ func intsToBytes(v []int) []byte {
 	return out
 }
 
-func TestSealChunksWritesAdjacentPendingChunksWithoutConcatenation(t *testing.T) {
+func TestSealChunksWritesAdjacentPendingChunksAsVectors(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
 	if err != nil {

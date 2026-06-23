@@ -81,12 +81,12 @@ type Server struct {
 	// contend on it, making a whole pass mutually exclusive with an operator (or
 	// test) that drives reclamation directly. It is distinct from maintenanceMu,
 	// which only guards the driver's lifecycle fields above.
-	maintRunMu sync.Mutex
-	handlesMu         sync.Mutex
-	handles           map[int64]*FileHandle
-	handleCounter     int64
-	writeOpsMu        sync.Mutex
-	writeOps          map[int64]*sync.Mutex
+	maintRunMu    sync.Mutex
+	handlesMu     sync.Mutex
+	handles       map[int64]*FileHandle
+	handleCounter int64
+	writeOpsMu    sync.Mutex
+	writeOps      map[int64]*sync.Mutex
 }
 
 // MaxVlogBytes is the 32-bit byte-addressable virtual-log boundary described

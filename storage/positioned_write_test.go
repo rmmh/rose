@@ -55,10 +55,10 @@ func TestVlogEnsureWriteRetriesPartialReplicaFanout(t *testing.T) {
 	if _, err := a.Write(1, data); err != nil {
 		t.Fatal(err)
 	} // simulate a prior partial fan-out
-	if err := v.EnsureWrite(context.Background(), 0, data); err != nil {
+	if err := v.EnsureWrite(context.Background(), 0, [][]byte{data}); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.EnsureWrite(context.Background(), v.Length(), data); err != nil {
+	if err := v.EnsureWrite(context.Background(), v.Length(), [][]byte{data}); err != nil {
 		t.Fatal(err)
 	}
 	if got := v.Length(); got != int64(2*len(data)) {

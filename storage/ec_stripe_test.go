@@ -96,7 +96,7 @@ func TestECStripeRejectsPartialRow(t *testing.T) {
 		if _, err := v.Write(ctx, 1, make([]byte, n)); err == nil {
 			t.Fatalf("Write of %d bytes (stripe width %d) should have failed", n, sw)
 		}
-		if err := v.EnsureWrite(ctx, 0, make([]byte, n)); err == nil {
+		if err := v.EnsureWrite(ctx, 0, [][]byte{make([]byte, n)}); err == nil {
 			t.Fatalf("EnsureWrite of %d bytes should have failed", n)
 		}
 	}
@@ -164,7 +164,7 @@ func TestECStripeEnsureWriteRetriesPartialFanout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := v.EnsureWrite(ctx, 0, src); err != nil {
+	if err := v.EnsureWrite(ctx, 0, [][]byte{src}); err != nil {
 		t.Fatalf("ensure write: %v", err)
 	}
 	if err := v.Commit(ctx, 1); err != nil {
@@ -173,7 +173,7 @@ func TestECStripeEnsureWriteRetriesPartialFanout(t *testing.T) {
 	// A second identical replay after restart must converge against the persisted
 	// bytes rather than appending duplicates.
 	v2, _ := reopenEC(t, plogs, 4, 2, 0)
-	if err := v2.EnsureWrite(ctx, 0, src); err != nil {
+	if err := v2.EnsureWrite(ctx, 0, [][]byte{src}); err != nil {
 		t.Fatalf("ensure write replay: %v", err)
 	}
 	if got := v2.Length(); got != int64(len(src)) {

@@ -225,12 +225,21 @@ func (v *Vlog) fanout(op func(idx int, client PlogClient) error) error {
 	return <-errs
 }
 
+func totalPartsLen(parts [][]byte) int {
+	total := 0
+	for _, part := range parts {
+		total += len(part)
+	}
+	return total
+}
+
 // EnsureWrite makes data durable at an already-reserved virtual offset.  A
 // lease gives one write operation exclusive ownership of a vlog, while this
 // method makes retries safe if a previous fan-out reached only some shards.
 // The caller must Commit before metadata records the chunk as durable.
-func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, data []byte) error {
-	if len(data) == 0 {
+func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) error {
+	total := totalPartsLen(parts)
+	if total == 0 {
 		return nil
 	}
 	v.writeMu.Lock()
@@ -241,28 +250,42 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, data []byte) error
 
 	if v.scheme == "EC" {
 		sw := v.stripeWidth()
-		if int64(len(data))%sw != 0 {
-			return fmt.Errorf("EC vlog %d ensure write: length %d is not a multiple of stripe width %d", v.id, len(data), sw)
+		if int64(total)%sw != 0 {
+			return fmt.Errorf("EC vlog %d ensure write: length %d is not a multiple of stripe width %d", v.id, total, sw)
 		}
-		for rowOff := int64(0); rowOff < int64(len(data)); rowOff += sw {
-			shards, err := v.encodeRow(data[rowOff : rowOff+sw])
-			if err != nil {
-				return err
-			}
-			// Every column of row r occupies plog-logical offset r*ecColumnBytes in
-			// its shard plog; EnsureAppend makes the retry idempotent.
-			plogOffset := (offset + rowOff) / sw * ecColumnBytes
-			if err := v.fanout(func(idx int, client PlogClient) error {
-				positioned, ok := client.(positionedPlogClient)
-				if !ok {
-					return fmt.Errorf("vlog %d plog client does not support positioned writes", v.id)
+		rowBuf := make([]byte, sw)
+		rowFill := 0
+		rowOff := int64(0)
+		for _, part := range parts {
+			for len(part) > 0 {
+				n := copy(rowBuf[rowFill:], part)
+				rowFill += n
+				part = part[n:]
+				if rowFill != int(sw) {
+					continue
 				}
-				return positioned.EnsureAppend(ctx, plogOffset, shards[idx])
-			}); err != nil {
-				return err
+				shards, err := v.encodeRow(rowBuf)
+				if err != nil {
+					return err
+				}
+				plogOffset := (offset + rowOff) / sw * ecColumnBytes
+				if err := v.fanout(func(idx int, client PlogClient) error {
+					positioned, ok := client.(positionedPlogClient)
+					if !ok {
+						return fmt.Errorf("vlog %d plog client does not support positioned writes", v.id)
+					}
+					return positioned.EnsureAppend(ctx, plogOffset, shards[idx])
+				}); err != nil {
+					return err
+				}
+				rowFill = 0
+				rowOff += sw
 			}
 		}
-		atomic.AddInt64(&v.length, int64(len(data)))
+		if rowFill != 0 {
+			return fmt.Errorf("EC vlog %d ensure write: short trailing row %d", v.id, rowFill)
+		}
+		atomic.AddInt64(&v.length, int64(total))
 		return nil
 	}
 
@@ -275,11 +298,21 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, data []byte) error
 		if !ok {
 			return fmt.Errorf("vlog %d plog client does not support positioned writes", v.id)
 		}
-		return positioned.EnsureAppend(ctx, offset, data)
+		partOffset := offset
+		for _, part := range parts {
+			if len(part) == 0 {
+				continue
+			}
+			if err := positioned.EnsureAppend(ctx, partOffset, part); err != nil {
+				return err
+			}
+			partOffset += int64(len(part))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
-	atomic.AddInt64(&v.length, int64(len(data)))
+	atomic.AddInt64(&v.length, int64(total))
 	return nil
 }
 

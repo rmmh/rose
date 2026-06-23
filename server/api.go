@@ -743,11 +743,13 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 }
 
 // sealChunks writes each new chunk's reserved bytes into its leased vlog,
-// grouped by vlog and ordered by reserved offset. It does not fsync or record
-// vlog lengths: a single Commit per leased vlog, followed by SetVlogLength, runs
-// once at Close before the file version is published, so the whole operation
-// pays one durability barrier per vlog rather than one per spill. No chunk
-// bytes are written to the metadata DB.
+// grouped by vlog and coalesced by contiguous reserved offset. Each contiguous
+// run is passed to the vlog as a vectored write (`[][]byte`), avoiding the
+// merge-concatenation copy while still issuing one logical EnsureWrite per run.
+// It does not fsync or record vlog lengths: a single Commit per leased vlog,
+// followed by SetVlogLength, runs once at Close before the file version is
+// published, so the whole operation pays one durability barrier per vlog rather
+// than one per spill. No chunk bytes are written to the metadata DB.
 func (s *Server) sealChunks(ctx context.Context, chunks []pendingChunk) error {
 	if len(chunks) == 0 {
 		return nil
@@ -776,10 +778,22 @@ func (s *Server) sealChunks(ctx context.Context, chunks []pendingChunk) error {
 		if !ready {
 			return fmt.Errorf("vlog %d is not commit-ready", vlogID)
 		}
-		for _, chunk := range group {
-			if err := v.EnsureWrite(ctx, chunk.vaddr, chunk.data); err != nil {
-				return err
+		runStart := group[0].vaddr
+		runEnd := runStart
+		runParts := make([][]byte, 0, len(group))
+		for i, chunk := range group {
+			if i > 0 && chunk.vaddr != runEnd {
+				if err := v.EnsureWrite(ctx, runStart, runParts); err != nil {
+					return err
+				}
+				runStart = chunk.vaddr
+				runParts = runParts[:0]
 			}
+			runParts = append(runParts, chunk.data)
+			runEnd = chunk.vaddr + int64(len(chunk.data))
+		}
+		if err := v.EnsureWrite(ctx, runStart, runParts); err != nil {
+			return err
 		}
 	}
 	return nil
