@@ -6,6 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -13,26 +14,29 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"golang.org/x/net/webdav"
 	"google.golang.org/grpc"
 
 	rosefuse "github.com/rmmh/rose/fuse"
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
+	rosewebdav "github.com/rmmh/rose/webdav"
 )
 
 var (
-	mountPoint = flag.String("mount", "", "Mount point for FUSE")
+	mountPoint = flag.String("mount", "", "Mount point for FUSE (optional)")
 	metaDir    = flag.String("metadir", "", "Directory for SQLite metadata storage")
 	dataDirs   = flag.String("datadirs", "", "Comma-separated list of directories for physical logs")
 	rpcAddr    = flag.String("rpc", ":50051", "RPC listen address")
+	webdavAddr = flag.String("webdav", "", "WebDAV listen address (e.g. :8080); empty disables it")
 )
 
 func main() {
 	flag.Parse()
 
-	if *mountPoint == "" || *metaDir == "" || *dataDirs == "" {
-		log.Fatalf("Missing required arguments. Usage: ./rose --mount <dir> --metadir <dir> --datadirs <dir1,dir2>")
+	if *metaDir == "" || *dataDirs == "" {
+		log.Fatalf("Missing required arguments. Usage: ./rose --metadir <dir> --datadirs <dir1,dir2> [--mount <dir>] [--webdav :8080]")
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -75,21 +79,42 @@ func main() {
 		}
 	}()
 
-	// Initialize FUSE API Client (connects back to its own gRPC server for simplicity,
-	// though it bypasses network if we pass in roseServer directly. Let's pass the server locally for this single-binary pass.)
-	fuseRoot := rosefuse.NewRoseRoot(roseServer)
-
-	serverOptions := &fs.Options{
-		MountOptions: fuse.MountOptions{
-			Debug: true,
-		},
+	// Optionally serve WebDAV over the same server: a userspace mount path that
+	// needs no kernel extension (mount_webdav on macOS, davfs/Explorer elsewhere).
+	var webdavServer *http.Server
+	if *webdavAddr != "" {
+		handler := &webdav.Handler{
+			FileSystem: rosewebdav.New(roseServer),
+			LockSystem: webdav.NewMemLS(),
+		}
+		webdavServer = &http.Server{Addr: *webdavAddr, Handler: handler}
+		go func() {
+			log.Printf("Starting WebDAV server on %s", *webdavAddr)
+			if err := webdavServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("WebDAV server failed: %v", err)
+			}
+		}()
 	}
 
-	log.Printf("Mounting FUSE on %s...", *mountPoint)
-	os.MkdirAll(*mountPoint, 0755)
-	fuseServer, err := fs.Mount(*mountPoint, fuseRoot, serverOptions)
-	if err != nil {
-		log.Fatalf("Mount FUSE failed: %v", err)
+	// Optionally mount a FUSE filesystem backed by the same server.
+	var fuseServer *fuse.Server
+	if *mountPoint != "" {
+		fuseRoot := rosefuse.NewRoseRoot(roseServer)
+		serverOptions := &fs.Options{
+			MountOptions: fuse.MountOptions{
+				Debug: true,
+			},
+		}
+		log.Printf("Mounting FUSE on %s...", *mountPoint)
+		os.MkdirAll(*mountPoint, 0755)
+		fuseServer, err = fs.Mount(*mountPoint, fuseRoot, serverOptions)
+		if err != nil {
+			log.Fatalf("Mount FUSE failed: %v", err)
+		}
+	}
+
+	if *mountPoint == "" && *webdavAddr == "" {
+		log.Printf("No client mount enabled (--mount and --webdav are unset); serving gRPC only on %s", *rpcAddr)
 	}
 
 	// Wait for termination
@@ -102,7 +127,12 @@ func main() {
 	}
 
 	// Unmount and clean up
-	fuseServer.Unmount()
+	if fuseServer != nil {
+		fuseServer.Unmount()
+	}
+	if webdavServer != nil {
+		webdavServer.Close()
+	}
 	grpcServer.GracefulStop()
 	log.Println("Shutdown complete.")
 }

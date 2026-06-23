@@ -1,5 +1,25 @@
 # TODO
 
+## Client-facing IOPS (namespace + mounts)
+
+The directory-aware namespace (parent-keyed `file_head` + `dir` marker rows),
+`ListDir`/`Mkdir`/`Rmdir` RPCs, a directory-tree FUSE mount, and a WebDAV adapter
+(`--webdav`) are in place. Remaining work:
+
+- O(1) directory rename. `RenameFile` rewrites every descendant path/parent row
+  under the old prefix (O(descendants)); the README's "fast directory renames"
+  wants the explicit dir-inode model (rename relinks one row) deferred in this cut.
+- Snapshot-aware `ListDir`. ListDir/StatPath read the live head only; the
+  `OpenSnapshot` path has no directory listing yet.
+- WebDAV random-access / partial writes. PUT is whole-file sequential (append),
+  committed on Close; range/partial PUT and in-place rewrite are unsupported.
+- FUSE truncate of existing data. `RoseFile.Setattr` accepts the size O_TRUNC
+  sets but the append-only write path cannot shrink committed data; only
+  truncate-on-create round-trips.
+- macFUSE emits spurious ENOSYS/ENOTSUP/EINTR on private opcodes; the FUSE test
+  retries to isolate FS logic from the platform. Revisit if go-fuse gains
+  handling for those darwin opcodes.
+
 ## Deterministic simulation
 
 - Make virtual disk, metadata, and transaction state cheaply cloneable with
