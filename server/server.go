@@ -58,6 +58,11 @@ type Server struct {
 	// minCopies is the DUPLICATE commit gate: how many live copies a write must
 	// land on before it is acknowledged durable (capped at the copies provisioned).
 	minCopies int
+	// defaultBucketPolicy overrides meta.DefaultBucketPolicy as the fallback for
+	// buckets with no explicit policy, letting the operator pick the cluster-wide
+	// scheme (the --protection flag). Nil means use meta.DefaultBucketPolicy.
+	// Guarded by vlogMu.
+	defaultBucketPolicy *meta.BucketPolicy
 	// rebalance bounds how aggressively shard counts are evened across active
 	// disks: a hysteresis band so minor imbalance is tolerated, a per-pass move
 	// cap, and a cooldown between passes. lastRebalance tracks the cooldown and is
@@ -156,7 +161,7 @@ func (s *Server) diskRoot(diskID uint32) string {
 }
 
 func (s *Server) plogPath(diskID, plogID uint32) string {
-	return filepath.Join(s.diskRoot(diskID), "plog-"+fmt.Sprint(plogID))
+	return filepath.Join(s.diskRoot(diskID), fmt.Sprintf("plog-%05d", plogID))
 }
 
 // nodeOf returns the node fault domain a disk belongs to. A disk without an
@@ -480,7 +485,25 @@ func (s *Server) bucketPolicyLocked(bucket string) meta.BucketPolicy {
 	if p, ok := s.bucketPolicies[bucket]; ok {
 		return p
 	}
+	if s.defaultBucketPolicy != nil {
+		p := *s.defaultBucketPolicy
+		p.Name = bucket
+		return p
+	}
 	return meta.DefaultBucketPolicy(bucket)
+}
+
+// SetDefaultProtection overrides the fallback protection policy used for buckets
+// without an explicit policy. For DUPLICATE it also lowers the commit gate to the
+// requested copy count so a single number selects the replication factor. The
+// Name field of p is ignored; the requested bucket's name is substituted at use.
+func (s *Server) SetDefaultProtection(p meta.BucketPolicy) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	s.defaultBucketPolicy = &p
+	if p.ProtectionScheme == "DUPLICATE" && p.DataShards > 0 {
+		s.minCopies = p.DataShards
+	}
 }
 
 // clearActiveVlogLocked drops any bucket whose active vlog is vlogID, so a

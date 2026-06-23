@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -30,7 +32,33 @@ var (
 	dataDirs   = flag.String("datadirs", "", "Comma-separated list of directories for physical logs")
 	rpcAddr    = flag.String("rpc", ":50051", "RPC listen address")
 	webdavAddr = flag.String("webdav", "", "WebDAV listen address (e.g. :8080); empty disables it")
+	protection = flag.String("protection", "", "Default protection for new buckets: \"N\" for N-way duplication, or \"N+K\" for erasure coding with N data and K parity shards (e.g. 3 or 3+2). Empty keeps the built-in 2-copy mirror.")
 )
+
+// parseProtection turns a --protection value into a default bucket policy. A bare
+// "N" is N-way duplication; "N+K" is erasure coding with N data and K parity
+// shards. An empty string returns ok=false, leaving the built-in default.
+func parseProtection(s string) (meta.BucketPolicy, bool, error) {
+	if s == "" {
+		return meta.BucketPolicy{}, false, nil
+	}
+	if data, parity, found := strings.Cut(s, "+"); found {
+		n, err := strconv.Atoi(data)
+		if err != nil || n < 1 {
+			return meta.BucketPolicy{}, false, fmt.Errorf("protection %q: data shards must be a positive integer", s)
+		}
+		k, err := strconv.Atoi(parity)
+		if err != nil || k < 1 {
+			return meta.BucketPolicy{}, false, fmt.Errorf("protection %q: parity shards must be a positive integer", s)
+		}
+		return meta.BucketPolicy{ProtectionScheme: "EC", DataShards: n, ParityShards: k}, true, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 {
+		return meta.BucketPolicy{}, false, fmt.Errorf("protection %q: copies must be a positive integer or N+K", s)
+	}
+	return meta.BucketPolicy{ProtectionScheme: "DUPLICATE", DataShards: n}, true, nil
+}
 
 func main() {
 	flag.Parse()
@@ -67,6 +95,12 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 	roseServer := server.NewServerWithDiskRoots(db, diskRoots)
+	if pol, ok, err := parseProtection(*protection); err != nil {
+		log.Fatal(err)
+	} else if ok {
+		roseServer.SetDefaultProtection(pol)
+		log.Printf("Default protection: %s", *protection)
+	}
 	if err := roseServer.Recover(context.Background()); err != nil {
 		log.Fatal("recover storage:", err)
 	}

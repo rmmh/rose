@@ -132,7 +132,7 @@ func (i *chaosInjector) bitrotAndRepair(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(i.cluster.rootFor(disk), fmt.Sprintf("plog-%d", plog))
+	path := filepath.Join(i.cluster.rootFor(disk), fmt.Sprintf("plog-%05d", plog))
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return err

@@ -220,7 +220,8 @@ func TestWriteCacheSpliceDedup(t *testing.T) {
 	s := newServer(t)
 	ctx := context.Background()
 	// Random, incompressible content so FastCDC yields several distinct chunks.
-	base := make([]byte, 256<<10)
+	// Sized to span several ~1MB chunks so a small edit re-chunks only a window.
+	base := make([]byte, 8<<20)
 	for i := range base {
 		base[i] = byte(i*2654435761 + i>>3)
 	}
@@ -237,10 +238,10 @@ func TestWriteCacheSpliceDedup(t *testing.T) {
 
 	// Edit a small 64-byte window near the middle, preserving everything else.
 	patch := bytes.Repeat([]byte("!"), 64)
-	writeAt(t, s, "/f", -1, [][2]any{{128 << 10, patch}})
+	writeAt(t, s, "/f", -1, [][2]any{{4 << 20, patch}})
 
 	want := append([]byte{}, base...)
-	copy(want[128<<10:], patch)
+	copy(want[4<<20:], patch)
 	if got := readAll(t, s, "/f"); !bytes.Equal(got, want) {
 		t.Fatalf("spliced content mismatch: got %d bytes want %d", len(got), len(want))
 	}
