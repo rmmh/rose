@@ -250,6 +250,130 @@ func TestPromoteResumesAfterRestart(t *testing.T) {
 	}
 }
 
+// TestRecoverTruncatesOrphanPlogTail reproduces the sharp resume window where a
+// crash lands after writeChunksAsRows seals new stripe rows to the EC dest's plog
+// files (dest.Commit reaches disk) but before SetVlogLength records the new length.
+// The metadata DB still holds the old vlog length while each backing plog's file
+// has grown, so on restart the plog reloads an inflated length (the new write
+// overwrote the previous open-block trailer, so reload falls back to trusting the
+// file bytes). Left unreconciled, the plog cursor sits past where the vlog expects
+// the next append, so a subsequent EC write is misplaced relative to where reads
+// look. Recover must reconcile each shard down to the committed vlog length.
+func TestRecoverTruncatesOrphanPlogTail(t *testing.T) {
+	defer storage.SetECColumnBytesForTest(64)() // stripe row = 192 bytes
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	roots := map[uint32]string{}
+	for i := uint32(1); i <= 4; i++ {
+		roots[i] = filepath.Join(dir, "disk", string(rune('0'+i)))
+	}
+
+	s1 := NewServerWithDiskRoots(db, roots)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s1.SetMaintenanceInterval(0)
+	if err := s1.SetBucketPolicy(ctx, meta.BucketPolicy{Name: "ec", ProtectionScheme: "EC", DataShards: 3, ParityShards: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Promote a payload into an EC vlog so it holds several committed stripe rows.
+	payload := make([]byte, 4000)
+	rand.New(rand.NewSource(13)).Read(payload)
+	writeServerFileInternal(t, s1, "/ec/big", payload)
+	if _, err := s1.PromoteStaging(ctx); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	ec := ecVlogs(t, s1)
+	if len(ec) != 1 {
+		t.Fatalf("got %d EC vlogs after promotion, want 1", len(ec))
+	}
+	ecID := ec[0].ID
+	committed := ec[0].Length
+
+	// Simulate the crash window: append one more stripe row to the dest and make it
+	// durable on the plog files, but do NOT call SetVlogLength. The plog files now
+	// extend past the length the DB records for the vlog.
+	dest := s1.vlogs[ecID]
+	sw := storage.ECStripeWidth(3)
+	orphanRow := make([]byte, sw)
+	rand.New(rand.NewSource(101)).Read(orphanRow)
+	if _, err := dest.Write(ctx, 999, orphanRow); err != nil {
+		t.Fatalf("write orphan row: %v", err)
+	}
+	if err := dest.Commit(ctx, 999); err != nil {
+		t.Fatalf("commit orphan row: %v", err)
+	}
+	s1.CloseStorage()
+
+	// Recover on a fresh server: each plog reloads its inflated file length while
+	// the DB still reports the committed vlog length.
+	s2 := NewServerWithDiskRoots(db, roots)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	s2.SetMaintenanceInterval(0)
+
+	dest2, ok := s2.vlogs[ecID]
+	if !ok {
+		t.Fatalf("EC vlog %d not mounted after recovery", ecID)
+	}
+	if dest2.Length() != committed {
+		t.Fatalf("recovered vlog length = %d, want %d", dest2.Length(), committed)
+	}
+
+	// Every backing plog's committed length must agree with the vlog: committed
+	// logical bytes spread over dataShards columns.
+	perShard := committed / int64(ec[0].DataShards)
+	mappings, err := db.ListVlogPlogs(ctx, ecID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range mappings {
+		p, ok := s2.plogs[m.PlogID]
+		if !ok {
+			t.Fatalf("plog %d not open after recovery", m.PlogID)
+		}
+		if got := p.LogicalLength(); got != perShard {
+			t.Fatalf("shard %d plog length = %d, want %d (orphan tail not truncated)", m.ShardIndex, got, perShard)
+		}
+	}
+
+	// Existing data still reads back correctly.
+	if got := readServerFileInternal(t, s2, "/ec/big"); !bytes.Equal(got, payload) {
+		t.Fatal("payload changed across recovery")
+	}
+
+	// A subsequent write must land where reads look. Use different content than the
+	// orphan row so an append placed at the stale (inflated) cursor would read back
+	// the wrong bytes.
+	newRow := make([]byte, sw)
+	rand.New(rand.NewSource(202)).Read(newRow)
+	base, err := dest2.Write(ctx, 1000, newRow)
+	if err != nil {
+		t.Fatalf("subsequent write: %v", err)
+	}
+	if base != committed {
+		t.Fatalf("subsequent write offset = %d, want %d", base, committed)
+	}
+	if err := dest2.Commit(ctx, 1000); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dest2.Read(ctx, base, int(sw))
+	if err != nil {
+		t.Fatalf("read subsequent write: %v", err)
+	}
+	if !bytes.Equal(got, newRow) {
+		t.Fatal("subsequent write misplaced: read did not return the bytes just written")
+	}
+}
+
 // unlinkServerFile deletes a path, dropping its chunks' refcounts.
 func unlinkServerFile(t *testing.T, s *Server, path string) {
 	t.Helper()

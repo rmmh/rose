@@ -545,6 +545,12 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 	if err != nil {
 		return nil, fmt.Errorf("mount vlog %d: %w", info.ID, err)
 	}
+	// The vlog length is restored authoritatively from the DB; reconcile each
+	// backing plog down to it so a crash that sealed rows to the files but never
+	// committed the new length leaves no orphan tail past the vlog cursor.
+	if err := vlog.ReconcileShardLengths(); err != nil {
+		return nil, fmt.Errorf("mount vlog %d: %w", info.ID, err)
+	}
 	return vlog, nil
 }
 
@@ -570,6 +576,10 @@ func (c *localPlogClient) Commit(ctx context.Context, txnID int64) error {
 
 func (c *localPlogClient) Scrub() (storage.ScrubResult, error) {
 	return c.plog.Scrub()
+}
+
+func (c *localPlogClient) TruncateTo(logical int64) error {
+	return c.plog.TruncateTo(logical)
 }
 
 // GC reclaims unreferenced chunk metadata (refcount zero) and reports how many

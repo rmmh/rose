@@ -133,6 +133,17 @@ func (p *Plog) reload() error {
 	// length is the size-derived value OpenPlog already set; recompute the open
 	// block's sealed hashes from the very sectors they protect, the original
 	// pre-trailer behavior.
+	return p.rebuildOpenBlock()
+}
+
+// rebuildOpenBlock reconstructs the in-memory open sector (the ragged edge) and
+// the hashes of the sectors already sealed in the current open block from the
+// file bytes at the current logicalLength. It is the trust-the-bytes
+// reconstruction shared by reload's fallback and TruncateTo; the caller sets
+// logicalLength first.
+func (p *Plog) rebuildOpenBlock() error {
+	p.buf = p.buf[:0]
+	p.hashes = p.hashes[:0]
 	partial := p.logicalLength % SectorSize
 	sealed := p.logicalLength - partial
 	if partial > 0 {
@@ -150,6 +161,35 @@ func (p *Plog) reload() error {
 		p.hashes = append(p.hashes, sectorHash(sector)...)
 	}
 	return nil
+}
+
+// TruncateTo discards any uncommitted tail beyond logical, making the committed
+// length authoritative again. It is called on mount to reconcile a plog whose
+// file grew past the length the metadata DB recorded for its vlog: a crash that
+// sealed new data to the file after the previous open-block trailer was
+// overwritten but before the vlog length was committed leaves the plog reloading
+// an inflated, trust-the-bytes length. The orphan tail is referenced by nobody,
+// so dropping it keeps the plog cursor aligned with where the vlog expects the
+// next append (otherwise that append is placed past where reads resolve). It only
+// ever shrinks; a target beyond the current length is a different inconsistency
+// and errors.
+func (p *Plog) TruncateTo(logical int64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if logical < 0 {
+		return fmt.Errorf("truncate plog %d: negative target %d", p.id, logical)
+	}
+	if logical > p.logicalLength {
+		return fmt.Errorf("truncate plog %d: target %d beyond length %d", p.id, logical, p.logicalLength)
+	}
+	if logical == p.logicalLength {
+		return nil
+	}
+	if err := p.file.Truncate(calcPhysical(logical)); err != nil {
+		return fmt.Errorf("truncate plog %d: %w", p.id, err)
+	}
+	p.logicalLength = logical
+	return p.rebuildOpenBlock()
 }
 
 // recoverFromTrailer reconstructs the open block's geometry and sealed-sector

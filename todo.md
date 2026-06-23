@@ -160,26 +160,24 @@ replicated staging vlog and a maintenance-pass promotion step.
   This is the benign window: those rows are complete and row-aligned, referenced
   by nobody, counted dead by VlogUsages, and reclaimed by re-compacting that dest
   -- reads stay correct throughout.
-- Close the sharper resume window where a plog ends up longer than its vlog. A
-  vlog's length is restored from the DB (mountVlogLocked uses info.Length), but
-  each backing plog restores its own length from its file (OpenPlog -> calcLogical
-  / reload). If a crash lands after writeChunksAsRows seals rows to the plog files
-  but before Commit/SetVlogLength, the DB still has the old length while the plog
-  reports the inflated physical length (the new write overwrote the previous
-  open-block trailer, so reload falls back to trust-the-bytes). EC Vlog.Write then
-  appends by plain append assuming plog cursor == vlog.length/dataShards, so a
-  subsequent write is misplaced relative to where reads look -- a correctness bug,
-  not reclaimable dead space. Shared with the DUPLICATE compaction path (not new to
-  EC) and currently untested: existing resume tests only crash right after job
-  creation, before anything is written to the dest.
-    - Test: inject a crash between the dest row write and the length commit (after
-      Commit's sectors reach the file, before SetVlogLength), then Recover and
-      assert the dest's vlog length and plog committed lengths agree and reads
-      resolve correctly.
-    - Fix: make the plog's committed trailer length authoritative on reload (ignore
-      / truncate the uncommitted tail) or reconcile vlog.length down to the plogs'
-      committed lengths on mount, so an orphan tail is truncatable rather than
-      mistaken for committed data.
+- (done) Closed the sharper resume window where a plog ends up longer than its
+  vlog. A vlog's length is restored authoritatively from the DB (mountVlogLocked
+  uses info.Length), but each backing plog restored its own length from its file
+  (OpenPlog -> calcLogical / reload). If a crash landed after writeChunksAsRows
+  sealed rows to the plog files but before Commit/SetVlogLength, the DB still had
+  the old length while the plog reported the inflated physical length (the new
+  write overwrote the previous open-block trailer, so reload fell back to
+  trust-the-bytes). An unreconciled EC/DUPLICATE append then landed at the inflated
+  plog cursor while reads resolved against the smaller vlog length -- a correctness
+  bug, not reclaimable dead space. Fix: mountVlogLocked now calls
+  Vlog.ReconcileShardLengths after mount, which truncates each backing plog down to
+  the committed per-shard length (length for DUPLICATE/NONE, length/dataShards for
+  EC) via Plog.TruncateTo. The DB length is authoritative, so the orphan tail is
+  dropped rather than mistaken for committed data, realigning the plog cursor with
+  where the vlog expects the next append. Offline shards (unreachable disks) are
+  skipped. Covered by TestRecoverTruncatesOrphanPlogTail (crash injected between the
+  dest row Commit and SetVlogLength; Recover asserts vlog/plog lengths agree, reads
+  resolve, and a subsequent write lands where reads look).
 - Retire the source vlog's plog files transactionally with the metadata so a
   crash between RetireVlog and os.Remove cannot leak plog files on disk.
 - Track per-vlog logical vs compressed bytes once compression lands, so dead-space

@@ -30,6 +30,13 @@ type scrubbablePlogClient interface {
 	Scrub() (ScrubResult, error)
 }
 
+// truncatablePlogClient discards a shard's uncommitted tail past a logical
+// length. Only live local plogs implement it; an offline shard (unreachable
+// disk) is skipped during length reconciliation.
+type truncatablePlogClient interface {
+	TruncateTo(logical int64) error
+}
+
 // ShardScrub pairs a vlog shard index with its plog scrub result.
 type ShardScrub struct {
 	Shard  int
@@ -404,6 +411,34 @@ func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
 }
 
 func (v *Vlog) Length() int64 { return atomic.LoadInt64(&v.length) }
+
+// ReconcileShardLengths discards any uncommitted tail a backing plog grew past
+// the committed vlog length, restoring the invariant that each shard's plog
+// cursor matches where the vlog -- whose length is restored authoritatively from
+// the metadata DB -- expects the next append to land. It is called on mount: a
+// crash after new rows were sealed to the plog files but before the vlog length
+// was committed leaves the plogs physically longer than the DB records, and an
+// unreconciled append would be placed at the inflated plog cursor while reads
+// resolve against the smaller vlog length. Each data and parity shard carries an
+// equal share of the logical stream (length for DUPLICATE/NONE, length/dataShards
+// for EC, since every stripe row contributes one column per shard). Shards on
+// unreachable disks (offline stubs) are skipped; they carry no live file.
+func (v *Vlog) ReconcileShardLengths() error {
+	perShard := atomic.LoadInt64(&v.length)
+	if v.scheme == "EC" {
+		perShard /= int64(v.dataShards)
+	}
+	for shard, c := range v.clients {
+		t, ok := c.(truncatablePlogClient)
+		if !ok {
+			continue
+		}
+		if err := t.TruncateTo(perShard); err != nil {
+			return fmt.Errorf("reconcile vlog %d shard %d length: %w", v.id, shard, err)
+		}
+	}
+	return nil
+}
 
 func (v *Vlog) ID() uint32 { return v.id }
 
