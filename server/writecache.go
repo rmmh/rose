@@ -91,6 +91,42 @@ func (c *writeCache) WriteAt(off int64, data []byte) {
 func (c *writeCache) writeLocked(off int64, data []byte) {
 	newStart := off
 	newEnd := off + int64(len(data))
+
+	// Fast path: when the write stays within or extends the tail of a single
+	// existing span, mutate that span in place and let append grow its backing
+	// array geometrically. This keeps sequential appends O(n) instead of
+	// rebuilding the full dirty prefix on every 128 KiB write.
+	for i := range c.spans {
+		sp := &c.spans[i]
+		if sp.end() < newStart {
+			continue
+		}
+		if sp.start > newStart {
+			break
+		}
+		nextStart := int64(1<<63 - 1)
+		if i+1 < len(c.spans) {
+			nextStart = c.spans[i+1].start
+		}
+		if nextStart <= newEnd {
+			break
+		}
+		if newEnd <= sp.end() {
+			copy(sp.data[newStart-sp.start:], data)
+		} else {
+			overlap := sp.end() - newStart
+			if overlap > 0 {
+				copy(sp.data[newStart-sp.start:], data[:overlap])
+				data = data[overlap:]
+			}
+			sp.data = append(sp.data, data...)
+		}
+		if newEnd > c.length {
+			c.length = newEnd
+		}
+		return
+	}
+
 	mergeStart, mergeEnd := newStart, newEnd
 	var keep, overlap []span
 	for _, sp := range c.spans {
