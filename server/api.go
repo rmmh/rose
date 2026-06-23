@@ -37,6 +37,7 @@ type FileHandle struct {
 	cache        *writeCache
 	chunker      *chunkers.Chunker
 	chunkerInput bytes.Reader
+	chunks       []meta.ChunkPlacement
 }
 
 func (h *FileHandle) path() string {
@@ -60,12 +61,20 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 		return nil, err
 	}
 
+	var chunks []meta.ChunkPlacement
+	if id != 0 {
+		chunks, err = s.db.FileVersionChunks(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	s.handlesMu.Lock()
 	defer s.handlesMu.Unlock()
 	hid := s.handleCounter
 	s.handleCounter++
 
-	h := &FileHandle{id: id}
+	h := &FileHandle{id: id, chunks: chunks}
 	h.setPath(path)
 	if req.GetOperationKey() != "" {
 		op, err := s.db.CreateWriteOp(ctx, req.GetOperationKey(), path)
@@ -106,11 +115,15 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 	if id == 0 {
 		return nil, fmt.Errorf("path not found in snapshot")
 	}
+	chunks, err := s.db.FileVersionChunks(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	s.handlesMu.Lock()
 	defer s.handlesMu.Unlock()
 	hid := s.handleCounter
 	s.handleCounter++
-	hs := &FileHandle{id: id, snapshotID: req.GetSnapshotId()}
+	hs := &FileHandle{id: id, snapshotID: req.GetSnapshotId(), chunks: chunks}
 	hs.setPath(req.GetPath())
 	s.handles[hid] = hs
 	return &pb.OpenResponse{Handle: hid}, nil
@@ -251,12 +264,7 @@ func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRespons
 	if h.id == 0 {
 		return &pb.ReadResponse{Buffer: nil}, nil
 	}
-	chunks, err := s.db.FileVersionChunks(ctx, h.id)
-	if err != nil {
-		slog.Error("Read failed to get chunks", "fileID", h.id, "error", err)
-		return nil, err
-	}
-	out, err := s.readChunksAt(ctx, chunks, req.GetOffset(), req.GetLength())
+	out, err := s.readChunksAt(ctx, h.chunks, req.GetOffset(), req.GetLength())
 	if err != nil {
 		return nil, err
 	}
@@ -622,11 +630,7 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 // buildCache loads the base version open at this handle and constructs its write
 // cache.
 func (s *Server) buildCache(ctx context.Context, h *FileHandle) error {
-	base, err := s.db.FileVersionChunks(ctx, h.id)
-	if err != nil {
-		return err
-	}
-	h.cache = newWriteCache(base, s.readChunksAt)
+	h.cache = newWriteCache(h.chunks, s.readChunksAt)
 	return nil
 }
 

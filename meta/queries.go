@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -437,14 +438,57 @@ func (d *DB) FileVersionChunks(ctx context.Context, fileID int64) ([]ChunkPlacem
 	if err := d.db.QueryRowContext(ctx, "SELECT chunks FROM file WHERE id = ?", fileID).Scan(&blob); err != nil {
 		return nil, err
 	}
+
+	// 1. Gather all unique hashes
+	uniqueHashesMap := make(map[string]struct{})
+	for i := 0; i+19 <= len(blob); i += 19 {
+		uniqueHashesMap[string(blob[i:i+15])] = struct{}{}
+	}
+
+	// 2. Query chunk table in batches of 500 unique hashes
+	uniqueHashesList := make([]string, 0, len(uniqueHashesMap))
+	for hStr := range uniqueHashesMap {
+		uniqueHashesList = append(uniqueHashesList, hStr)
+	}
+
+	chunksMap := make(map[string]ChunkPlacement)
+	for batch := range slices.Chunk(uniqueHashesList, 500) {
+		query := "SELECT hash, vlog_id, vaddr_offset, compressed_len FROM chunk WHERE hash IN (?" + strings.Repeat(",?", len(batch)-1) + ")"
+		args := make([]any, len(batch))
+		for i, hStr := range batch {
+			args[i] = []byte(hStr)
+		}
+
+		rows, err := d.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var hash []byte
+			var p ChunkPlacement
+			if err := rows.Scan(&hash, &p.VlogID, &p.VaddrOffset, &p.CompressedLen); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			chunksMap[string(hash)] = p
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	// 3. Reconstruct ordered chunk placements
 	var out []ChunkPlacement
 	for i := 0; i+19 <= len(blob); i += 19 {
-		hash := append([]byte(nil), blob[i:i+15]...)
-		p := ChunkPlacement{Hash: hash, LogicalLen: int(binary.LittleEndian.Uint32(blob[i+15 : i+19]))}
-		err := d.db.QueryRowContext(ctx, "SELECT vlog_id, vaddr_offset, compressed_len FROM chunk WHERE hash = ?", hash).Scan(&p.VlogID, &p.VaddrOffset, &p.CompressedLen)
-		if err != nil {
-			return nil, fmt.Errorf("placement for chunk %x: %w", hash, err)
+		hash := blob[i : i+15]
+		hStr := string(hash)
+		p, ok := chunksMap[hStr]
+		if !ok {
+			return nil, fmt.Errorf("placement for chunk %x not found", hash)
 		}
+		p.Hash = append([]byte(nil), hash...)
+		p.LogicalLen = int(binary.LittleEndian.Uint32(blob[i+15 : i+19]))
 		out = append(out, p)
 	}
 	return out, nil
