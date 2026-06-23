@@ -366,6 +366,23 @@ replicated staging vlog and a maintenance-pass promotion step.
 - Reclaim the regenerated plog left behind when a crash re-runs a reprotect step
   whose ReplaceShardPlog had not yet committed (same duplicate-bytes-on-crash
   caveat compaction has).
+- Reap abandoned prepared write ops so their orphan vlog bytes are actually
+  reclaimable. A write op spills/seals chunks into a leased vlog as it goes
+  (SetVlogLength persists the inflated length pre-Close), and on a crash before
+  Close those bytes are durable-but-unpublished -- no chunk rows, dead space by
+  design (meta/db.go "orphan vlog bytes are reclaimed by compaction"). But
+  CompactVlog and PromoteStagingVlog skip any *leased* vlog (compaction.go ~L92,
+  promotion.go ~L52), and the lease is only released on a successful Close
+  (CommitWriteOpVersion) or by AbandonWriteOp -- which has no production caller.
+  Recover does no per-op recovery (server.go ~L370) on purpose, so a client can
+  resume by re-Opening the same operation_key. The gap: if the client never
+  resumes, the op stays `prepared` forever, its vlog_lease dangles, and the vlog
+  is pinned out of compaction indefinitely -- the bytes leak instead of being
+  reclaimed. Needs a reaper (maintenance pass or startup sweep) that AbandonWriteOps
+  prepared ops past some age with no active handle and releases their leases. The
+  age threshold must not be so short it kills a client mid-reconnect (the resume
+  contract). Not the vlog being truncated -- it mounts at full recorded length;
+  purely a reclamation gap.
 - (done) A drained disk's stray source file -- left when a crash lands after
   migratePlog's disk_id flip but before os.Remove -- is now reclaimed by
   SweepStrayPlogFiles, which sees the plog row moved to the destination disk and
