@@ -294,6 +294,17 @@ func (s *Server) resolveVlog(ctx context.Context, chunk meta.ChunkPlacement) (*s
 	}
 }
 func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.GetattrResponse, error) {
+	// A stat against an open write handle must reflect read-your-writes within the
+	// handle: the committed file head is not updated until Close, so serve the
+	// live size from the handle's write cache.
+	if req.GetHandle() != 0 {
+		s.handlesMu.Lock()
+		h, ok := s.handles[req.GetHandle()]
+		s.handlesMu.Unlock()
+		if ok && h.cache != nil {
+			return &pb.GetattrResponse{Size: h.cache.Length(), Mtime: time.Now().UnixNano()}, nil
+		}
+	}
 	entry, ok, err := s.db.StatPath(ctx, req.GetPath())
 	if err != nil {
 		slog.Error("Getattr failed", "path", req.GetPath(), "error", err)

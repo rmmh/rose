@@ -216,7 +216,14 @@ func (f *RoseFile) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 func (f *RoseFile) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = fuse.S_IFREG | 0644
 	out.Owner = mountOwner
-	resp, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: f.path})
+	// An fstat on an open write handle (e.g. rsync stat'ing a file it just wrote
+	// but has not closed) must see the uncommitted length; route the stat through
+	// the handle so the server can answer from its write cache.
+	req := &pb.GetattrRequest{Path: f.path}
+	if h, isRose := fh.(*roseHandle); isRose {
+		req.Handle = h.handle
+	}
+	resp, err := f.srv.Getattr(ctx, req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return syscall.EINTR

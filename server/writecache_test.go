@@ -262,3 +262,43 @@ func TestWriteCacheSpliceDedup(t *testing.T) {
 		t.Fatalf("edit added %d live bytes; expected a small window re-chunk well under half the %d-byte file", added, len(base))
 	}
 }
+
+// TestGetattrHandleReflectsUncommittedWrites verifies that a stat against an
+// open write handle reports the uncommitted length (read-your-writes), while a
+// path-only stat still sees the last committed version until Close.
+func TestGetattrHandleReflectsUncommittedWrites(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	const path = "/dir/file"
+	opKeySeq++
+	key := fmt.Sprintf("test-op-%s-%d", path, opKeySeq)
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: path, OperationKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte("x"), 4096)
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Offset: 0, Buffer: data}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Path-only stat: nothing committed yet, so size is 0.
+	if resp, err := s.Getattr(ctx, &pb.GetattrRequest{Path: path}); err == nil && resp.GetSize() != 0 {
+		t.Fatalf("path-only getattr size = %d, want 0 (uncommitted)", resp.GetSize())
+	}
+
+	// Handle stat: must reflect the bytes written into the cache.
+	resp, err := s.Getattr(ctx, &pb.GetattrRequest{Path: path, Handle: open.GetHandle()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetSize() != int64(len(data)) {
+		t.Fatalf("handle getattr size = %d, want %d", resp.GetSize(), len(data))
+	}
+
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle(), IdempotencyKey: key}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(t, s, path); len(got) != len(data) {
+		t.Fatalf("after close size = %d, want %d", len(got), len(data))
+	}
+}

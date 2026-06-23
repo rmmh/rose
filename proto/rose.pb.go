@@ -492,8 +492,11 @@ func (*TruncateResponse) Descriptor() ([]byte, []int) {
 }
 
 type GetattrRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Path  string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// When non-zero, read the live size from this open write handle's cache so a
+	// stat between write and close reflects the uncommitted length.
+	Handle        int64 `protobuf:"varint,2,opt,name=handle,proto3" json:"handle,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -533,6 +536,13 @@ func (x *GetattrRequest) GetPath() string {
 		return x.Path
 	}
 	return ""
+}
+
+func (x *GetattrRequest) GetHandle() int64 {
+	if x != nil {
+		return x.Handle
+	}
+	return 0
 }
 
 type GetattrResponse struct {
@@ -2640,9 +2650,10 @@ const file_proto_rose_proto_rawDesc = "" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12#\n" +
 	"\roperation_key\x18\x03 \x01(\tR\foperationKey\x12\x12\n" +
 	"\x04size\x18\x04 \x01(\x03R\x04size\"\x12\n" +
-	"\x10TruncateResponse\"$\n" +
+	"\x10TruncateResponse\"<\n" +
 	"\x0eGetattrRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"R\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x16\n" +
+	"\x06handle\x18\x02 \x01(\x03R\x06handle\"R\n" +
 	"\x0fGetattrResponse\x12\x12\n" +
 	"\x04size\x18\x01 \x01(\x03R\x04size\x12\x15\n" +
 	"\x06is_dir\x18\x02 \x01(\bR\x05isDir\x12\x14\n" +

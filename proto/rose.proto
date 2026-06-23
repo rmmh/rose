@@ -86,6 +86,9 @@ message TruncateResponse {
 
 message GetattrRequest {
   string path = 1;
+  // When non-zero, read the live size from this open write handle's cache so a
+  // stat between write and close reflects the uncommitted length.
+  int64 handle = 2;
 }
 
 message GetattrResponse {
