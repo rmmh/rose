@@ -63,24 +63,19 @@ type writeCache struct {
 	// spans is the sorted, non-overlapping un-spilled dirty overlay.
 	spans []span
 
-	// nextChunkIdx is the next write_op_chunk index to assign when a spill or the
-	// final splice stores a freshly computed chunk durably.
-	nextChunkIdx int
-
 	read chunkReader
 }
 
-func newWriteCache(base []meta.ChunkPlacement, read chunkReader, nextChunkIdx int) *writeCache {
+func newWriteCache(base []meta.ChunkPlacement, read chunkReader) *writeCache {
 	var baseLen int64
 	for _, p := range base {
 		baseLen += int64(p.LogicalLen)
 	}
 	return &writeCache{
-		base:         base,
-		baseLen:      baseLen,
-		length:       baseLen,
-		nextChunkIdx: nextChunkIdx,
-		read:         read,
+		base:    base,
+		baseLen: baseLen,
+		length:  baseLen,
+		read:    read,
 	}
 }
 

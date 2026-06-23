@@ -362,20 +362,11 @@ func (s *Server) Recover(ctx context.Context) error {
 	}
 	s.vlogs = vlogs
 
-	// Prepared write operations retain their exact chunk reservations. Reconcile
-	// any planned-but-unmarked chunks now that plogs are mounted again; a client
-	// retry can then continue from the durable acknowledged offset without
-	// creating a second append. Tails remain in metadata until their caller
-	// retries the corresponding Write or Close.
-	prepared, err := s.db.PreparedWriteOps(ctx)
-	if err != nil {
-		return err
-	}
-	for _, op := range prepared {
-		if err := s.finishPlannedWriteChunks(ctx, op); err != nil {
-			return fmt.Errorf("recover write operation %d: %w", op.ID, err)
-		}
-	}
+	// A write operation left prepared by a crash needs no server-side recovery:
+	// its chunk bytes were either never made durable (so the client replays them
+	// from its acknowledged offset) or were sealed into vlogs but never published
+	// (so they are orphan holes reclaimed by compaction). Nothing references chunk
+	// bytes in metadata, so there is nothing to reconcile here.
 
 	// Resume any maintenance work interrupted by the crash/restart.
 	jobs, err := s.db.RunningJobs(ctx)

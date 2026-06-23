@@ -111,10 +111,11 @@ func initSchema(db *sql.DB, durable bool) error {
 			compressed_len INTEGER NOT NULL
 		);
 
-		-- A file write is prepared durably before any physical shard receives its
-		-- bytes.  The idempotency key is the client's stable operation identity;
-		-- chunk rows retain the payload and its exact reserved vlog location so a
-		-- later recovery/retry never invents a second append.
+		-- A file write records only its client identity and lifecycle state; the
+		-- chunk bytes never touch this database.  Bytes are written to the
+		-- append-only vlogs and fsynced before the operation publishes its file
+		-- version, and an uncommitted operation is recovered by client replay (its
+		-- orphan vlog bytes are reclaimed by compaction).
 		CREATE TABLE IF NOT EXISTS write_op (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			idempotency_key TEXT NOT NULL UNIQUE,
@@ -124,18 +125,6 @@ func initSchema(db *sql.DB, durable bool) error {
 			file_id INTEGER NOT NULL DEFAULT 0,
 			acknowledged_offset INTEGER NOT NULL DEFAULT 0,
 			tail BLOB NOT NULL DEFAULT X''
-		);
-
-		CREATE TABLE IF NOT EXISTS write_op_chunk (
-			write_op_id INTEGER NOT NULL REFERENCES write_op(id) ON DELETE CASCADE,
-			chunk_idx INTEGER NOT NULL,
-			data BLOB NOT NULL,
-			hash BLOB NOT NULL,
-			vlog_id INTEGER NOT NULL,
-			vaddr_offset INTEGER NOT NULL,
-			logical_len INTEGER NOT NULL,
-			state TEXT NOT NULL DEFAULT 'planned', -- planned | durable
-			PRIMARY KEY (write_op_id, chunk_idx)
 		);
 
 		-- A vlog may be appended by at most one nonterminal write operation.
@@ -297,11 +286,15 @@ func initSchema(db *sql.DB, durable bool) error {
 	for _, stmt := range []string{
 		`ALTER TABLE write_op ADD COLUMN acknowledged_offset INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE write_op ADD COLUMN tail BLOB NOT NULL DEFAULT X''`,
-		`ALTER TABLE write_op_chunk ADD COLUMN state TEXT NOT NULL DEFAULT 'planned'`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("migrate write operation metadata: %w", err)
 		}
+	}
+	// Bulk chunk bytes are never stored in metadata; drop the legacy table that
+	// staged them before they were sealed into the vlogs.
+	if _, err := db.Exec(`DROP TABLE IF EXISTS write_op_chunk`); err != nil {
+		return fmt.Errorf("drop legacy write_op_chunk table: %w", err)
 	}
 	return nil
 }

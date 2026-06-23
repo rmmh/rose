@@ -45,81 +45,65 @@ func BenchmarkWrite100MB(b *testing.B) {
 		if only := os.Getenv("ROSE_BENCH_SCHEME"); only != "" && only != tc.name {
 			continue
 		}
-		for _, mode := range []struct {
-			name            string
-			disableBatching bool
-		}{
-			{name: "batched", disableBatching: false},
-			{name: "unbatched", disableBatching: true},
-		} {
-			if only := os.Getenv("ROSE_BENCH_MODE"); only != "" && only != mode.name {
-				continue
+		b.Run(tc.name, func(b *testing.B) {
+			ctx := context.Background()
+			db, err := meta.OpenEphemeral()
+			if err != nil {
+				b.Fatal(err)
 			}
-			b.Run(tc.name+"/"+mode.name, func(b *testing.B) {
-				if mode.disableBatching {
-					b.Setenv("ROSE_DISABLE_WRITE_BATCHING", "1")
-				} else {
-					b.Setenv("ROSE_DISABLE_WRITE_BATCHING", "")
+			defer db.Close()
+			roots := map[uint32]string{
+				1: benchmarkDiskRoot(b),
+				2: benchmarkDiskRoot(b),
+				3: benchmarkDiskRoot(b),
+				4: benchmarkDiskRoot(b),
+			}
+			srv := server.NewServerWithDiskRoots(db, roots)
+			srv.SetMaintenanceInterval(0)
+			if err := srv.Recover(ctx); err != nil {
+				b.Fatal(err)
+			}
+			defer srv.StopMaintenanceDriver()
+			if err := tc.setup(ctx, srv); err != nil {
+				b.Fatal(err)
+			}
+
+			data := make([]byte, len(base))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				copy(data, base)
+				var scratch [8]byte
+				for off := 0; off < len(data); off += 256 << 10 {
+					binary.LittleEndian.PutUint64(scratch[:], uint64(i+1+off))
+					copy(data[off:min(off+len(scratch), len(data))], scratch[:])
 				}
-				ctx := context.Background()
-				db, err := meta.OpenEphemeral()
+				path := fmt.Sprintf("/%s/bench-%d", tc.bucket, i)
+				key := fmt.Sprintf("%s-%d", tc.name, i)
+				open, err := srv.Open(ctx, &pb.OpenRequest{Path: path, OperationKey: key})
 				if err != nil {
 					b.Fatal(err)
 				}
-				defer db.Close()
-				roots := map[uint32]string{
-					1: benchmarkDiskRoot(b),
-					2: benchmarkDiskRoot(b),
-					3: benchmarkDiskRoot(b),
-					4: benchmarkDiskRoot(b),
-				}
-				srv := server.NewServerWithDiskRoots(db, roots)
-				srv.SetMaintenanceInterval(0)
-				if err := srv.Recover(ctx); err != nil {
-					b.Fatal(err)
-				}
-				defer srv.StopMaintenanceDriver()
-				if err := tc.setup(ctx, srv); err != nil {
-					b.Fatal(err)
-				}
-
-				data := make([]byte, len(base))
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					b.StopTimer()
-					copy(data, base)
-					var scratch [8]byte
-					for off := 0; off < len(data); off += 256 << 10 {
-						binary.LittleEndian.PutUint64(scratch[:], uint64(i+1+off))
-						copy(data[off:min(off+len(scratch), len(data))], scratch[:])
+				b.StartTimer()
+				for off := 0; off < len(data); off += block {
+					end := off + block
+					if end > len(data) {
+						end = len(data)
 					}
-					path := fmt.Sprintf("/%s/bench-%d", tc.bucket, i)
-					key := fmt.Sprintf("%s-%s-%d", tc.name, mode.name, i)
-					open, err := srv.Open(ctx, &pb.OpenRequest{Path: path, OperationKey: key})
-					if err != nil {
-						b.Fatal(err)
-					}
-					b.StartTimer()
-					for off := 0; off < len(data); off += block {
-						end := off + block
-						if end > len(data) {
-							end = len(data)
-						}
-						if _, err := srv.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Offset: int64(off), Buffer: data[off:end]}); err != nil {
-							b.Fatal(err)
-						}
-					}
-					if _, err := srv.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle(), IdempotencyKey: key}); err != nil {
+					if _, err := srv.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Offset: int64(off), Buffer: data[off:end]}); err != nil {
 						b.Fatal(err)
 					}
 				}
-				elapsed := b.Elapsed()
-				if elapsed > 0 {
-					totalMiB := float64(size*b.N) / float64(1<<20)
-					b.ReportMetric(totalMiB/elapsed.Seconds(), "MiB/s")
+				if _, err := srv.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle(), IdempotencyKey: key}); err != nil {
+					b.Fatal(err)
 				}
-			})
-		}
+			}
+			elapsed := b.Elapsed()
+			if elapsed > 0 {
+				totalMiB := float64(size*b.N) / float64(1<<20)
+				b.ReportMetric(totalMiB/elapsed.Seconds(), "MiB/s")
+			}
+		})
 	}
 }
 

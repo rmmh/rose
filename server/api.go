@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"sort"
 	"sync"
 	"time"
@@ -53,7 +52,7 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 		path: path,
 	}
 	if req.GetOperationKey() != "" {
-		op, err := s.db.CreateWriteOp(ctx, req.GetOperationKey(), path, nil)
+		op, err := s.db.CreateWriteOp(ctx, req.GetOperationKey(), path)
 		if err != nil {
 			return nil, err
 		}
@@ -392,16 +391,12 @@ func (s *Server) ensureWriteOperation(ctx context.Context, h *FileHandle, handle
 		return nil
 	}
 	key := fmt.Sprintf("legacy-handle-%d", handle)
-	op, err := s.db.CreateWriteOp(ctx, key, h.path, nil)
+	op, err := s.db.CreateWriteOp(ctx, key, h.path)
 	if err != nil {
 		return err
 	}
 	h.writeOpID, h.writeKey = op.ID, key
 	return nil
-}
-
-func (s *Server) leasedVlogForWrite(ctx context.Context, opID int64, path string, n int) (uint32, *storage.Vlog, error) {
-	return s.leasedVlogForWriteReserved(ctx, opID, path, n, nil)
 }
 
 func (s *Server) leasedVlogForWriteReserved(ctx context.Context, opID int64, path string, n int, reserved map[uint32]int64) (uint32, *storage.Vlog, error) {
@@ -466,10 +461,6 @@ func (s *Server) leasedVlogForWriteReserved(ctx context.Context, opID int64, pat
 	return id, v, nil
 }
 
-func writeBatchingEnabled() bool {
-	return os.Getenv("ROSE_DISABLE_WRITE_BATCHING") == ""
-}
-
 // vlogMatchesPolicy reports whether an existing vlog can hold chunks written
 // under pol. An EC policy is served by a replicated staging vlog tagged with the
 // EC scheme as its promotion target, never by writing chunks straight into an EC
@@ -494,31 +485,6 @@ func (s *Server) provisionForPolicyLocked(ctx context.Context, pol meta.BucketPo
 		return s.provisionStagingVlogLocked(ctx, pol.DataShards, pol.ParityShards)
 	}
 	return s.provisionVlogLocked(ctx, pol.ProtectionScheme, pol.DataShards, pol.ParityShards)
-}
-
-func (s *Server) finishPlannedWriteChunks(ctx context.Context, op meta.WriteOp) error {
-	chunks, err := s.db.WriteOpChunks(ctx, op.ID)
-	if err != nil {
-		return err
-	}
-	if !writeBatchingEnabled() {
-		for _, chunk := range chunks {
-			if chunk.State == meta.WriteChunkDurable {
-				continue
-			}
-			if err := s.durableAppendChunk(ctx, op.ID, chunk.Index, chunk.VlogID, chunk.VaddrOffset, chunk.Data); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	var pending []meta.WriteOpChunk
-	for _, chunk := range chunks {
-		if chunk.State != meta.WriteChunkDurable {
-			pending = append(pending, chunk)
-		}
-	}
-	return s.durableAppendChunks(ctx, op.ID, pending)
 }
 
 func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResponse, error) {
@@ -570,18 +536,13 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 }
 
 // buildCache loads the base version open at this handle and constructs its write
-// cache. The chunk-index cursor resumes after any chunks a prior attempt already
-// reserved for the operation, so a recovered handle keeps planned indexes unique.
+// cache.
 func (s *Server) buildCache(ctx context.Context, h *FileHandle) error {
 	base, err := s.db.FileVersionChunks(ctx, h.id)
 	if err != nil {
 		return err
 	}
-	existing, err := s.db.WriteOpChunks(ctx, h.writeOpID)
-	if err != nil {
-		return err
-	}
-	h.cache = newWriteCache(base, s.readChunksAt, len(existing))
+	h.cache = newWriteCache(base, s.readChunksAt)
 	return nil
 }
 
@@ -602,20 +563,26 @@ func (s *Server) spillCache(ctx context.Context, h *FileHandle) error {
 	}
 }
 
+// pendingChunk is a new chunk's reserved vlog placement together with the bytes
+// to seal there. The bytes are written to the append-only vlog and fsynced before
+// the operation publishes its file version; they never touch the metadata DB.
+type pendingChunk struct {
+	vlogID uint32
+	vaddr  int64
+	data   []byte
+}
+
 // storeChunks FastCDC-chunks a materialized byte window and stores each chunk
 // durably (or reuses an existing one by content hash), returning the ordered
 // placements. The chunks tile the input exactly, so their logical lengths sum to
 // len(data).
 func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([]meta.ChunkPlacement, error) {
-	if !writeBatchingEnabled() {
-		return s.storeChunksUnbatched(ctx, h, data)
-	}
 	chunker, err := chunkers.NewChunker("fastcdc", bytes.NewReader(data), nil)
 	if err != nil {
 		return nil, err
 	}
 	var placements []meta.ChunkPlacement
-	var pending []meta.WriteOpChunk
+	var pending []pendingChunk
 	reserved := map[uint32]int64{}
 	for {
 		chunk, nextErr := chunker.Next()
@@ -636,45 +603,17 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([
 			break
 		}
 	}
-	if err := s.db.AppendWriteOpChunks(ctx, h.writeOpID, pending); err != nil {
+	if err := s.sealChunks(ctx, h.writeOpID, pending); err != nil {
 		return nil, err
-	}
-	if err := s.durableAppendChunks(ctx, h.writeOpID, pending); err != nil {
-		return nil, err
-	}
-	return placements, nil
-}
-
-func (s *Server) storeChunksUnbatched(ctx context.Context, h *FileHandle, data []byte) ([]meta.ChunkPlacement, error) {
-	chunker, err := chunkers.NewChunker("fastcdc", bytes.NewReader(data), nil)
-	if err != nil {
-		return nil, err
-	}
-	var placements []meta.ChunkPlacement
-	for {
-		chunk, nextErr := chunker.Next()
-		if nextErr != nil && nextErr != io.EOF {
-			return nil, nextErr
-		}
-		if len(chunk) > 0 {
-			p, err := s.storeChunk(ctx, h, append([]byte(nil), chunk...))
-			if err != nil {
-				return nil, err
-			}
-			placements = append(placements, p)
-		}
-		if nextErr == io.EOF {
-			break
-		}
 	}
 	return placements, nil
 }
 
 // planChunk plans one content-defined chunk and returns its placement. A chunk
 // whose hash already exists is reused outright (dedup); otherwise its exact
-// reserved placement is returned so a later grouped durable commit can make a
-// whole batch durable together.
-func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, reserved map[uint32]int64) (meta.ChunkPlacement, *meta.WriteOpChunk, error) {
+// reserved placement is returned alongside the bytes to seal, so a later grouped
+// vlog commit can make a whole batch durable together.
+func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, reserved map[uint32]int64) (meta.ChunkPlacement, *pendingChunk, error) {
 	sum := sha256.Sum256(data)
 	hash := sum[:15]
 	if p, ok, err := s.db.ChunkByHash(ctx, hash); err != nil {
@@ -682,90 +621,35 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 	} else if ok {
 		return p, nil, nil
 	}
-	vlogID, v, err := s.leasedVlogForWriteReserved(ctx, h.writeOpID, h.path, len(data), reserved)
+	vlogID, _, err := s.leasedVlogForWriteReserved(ctx, h.writeOpID, h.path, len(data), reserved)
 	if err != nil {
 		return meta.ChunkPlacement{}, nil, err
 	}
 	vaddr := reserved[vlogID] - int64(len(data))
-	idx := h.cache.nextChunkIdx
-	h.cache.nextChunkIdx++
-	planned := meta.WriteOpChunk{
-		Index: idx, Data: data, Hash: hash, VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data),
-	}
-	_ = v
-	return meta.ChunkPlacement{Hash: append([]byte(nil), hash...), VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data), CompressedLen: len(data)}, &planned, nil
+	pending := &pendingChunk{vlogID: vlogID, vaddr: vaddr, data: data}
+	return meta.ChunkPlacement{Hash: append([]byte(nil), hash...), VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data), CompressedLen: len(data)}, pending, nil
 }
 
-func (s *Server) storeChunk(ctx context.Context, h *FileHandle, data []byte) (meta.ChunkPlacement, error) {
-	sum := sha256.Sum256(data)
-	hash := sum[:15]
-	if p, ok, err := s.db.ChunkByHash(ctx, hash); err != nil {
-		return meta.ChunkPlacement{}, err
-	} else if ok {
-		return p, nil
-	}
-	vlogID, v, err := s.leasedVlogForWrite(ctx, h.writeOpID, h.path, len(data))
-	if err != nil {
-		return meta.ChunkPlacement{}, err
-	}
-	vaddr := v.Length()
-	idx := h.cache.nextChunkIdx
-	h.cache.nextChunkIdx++
-	if err := s.db.AppendWriteOpChunk(ctx, h.writeOpID, meta.WriteOpChunk{
-		Index: idx, Data: data, Hash: hash, VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data),
-	}); err != nil {
-		return meta.ChunkPlacement{}, err
-	}
-	if err := s.durableAppendChunk(ctx, h.writeOpID, idx, vlogID, vaddr, data); err != nil {
-		return meta.ChunkPlacement{}, err
-	}
-	return meta.ChunkPlacement{Hash: append([]byte(nil), hash...), VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data), CompressedLen: len(data)}, nil
-}
-
-func (s *Server) durableAppendChunk(ctx context.Context, opID int64, idx int, vlogID uint32, vaddr int64, data []byte) error {
-	s.vlogMu.Lock()
-	v := s.vlogs[vlogID]
-	s.vlogMu.Unlock()
-	if v == nil {
-		return fmt.Errorf("leased vlog %d is not mounted", vlogID)
-	}
-	ready, err := s.CommitReady(ctx, vlogID)
-	if err != nil {
-		return err
-	}
-	if !ready {
-		return fmt.Errorf("vlog %d is not commit-ready", vlogID)
-	}
-	if err := v.EnsureWrite(ctx, vaddr, data); err != nil {
-		return err
-	}
-	if err := v.Commit(ctx, opID); err != nil {
-		return err
-	}
-	if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
-		return err
-	}
-	return s.db.MarkWriteOpChunkDurable(ctx, opID, idx)
-}
-
-// durableAppendChunks seals reserved chunk bytes into their leased vlogs and
-// marks them durable. Chunks are grouped by vlog so one physical commit and one
-// durable-state metadata transaction cover the whole batch per touched vlog.
-func (s *Server) durableAppendChunks(ctx context.Context, opID int64, chunks []meta.WriteOpChunk) error {
+// sealChunks writes each new chunk's reserved bytes into its leased vlog and
+// fsyncs them. Chunks are grouped by vlog so one physical commit covers the whole
+// batch per touched vlog. The bytes are durable in the append-only vlog before
+// the operation ever publishes its file version; no chunk bytes are written to
+// the metadata DB.
+func (s *Server) sealChunks(ctx context.Context, opID int64, chunks []pendingChunk) error {
 	if len(chunks) == 0 {
 		return nil
 	}
-	byVlog := make(map[uint32][]meta.WriteOpChunk)
+	byVlog := make(map[uint32][]pendingChunk)
 	order := make([]uint32, 0, len(chunks))
 	for _, chunk := range chunks {
-		if _, ok := byVlog[chunk.VlogID]; !ok {
-			order = append(order, chunk.VlogID)
+		if _, ok := byVlog[chunk.vlogID]; !ok {
+			order = append(order, chunk.vlogID)
 		}
-		byVlog[chunk.VlogID] = append(byVlog[chunk.VlogID], chunk)
+		byVlog[chunk.vlogID] = append(byVlog[chunk.vlogID], chunk)
 	}
 	for _, vlogID := range order {
 		group := byVlog[vlogID]
-		sort.Slice(group, func(i, j int) bool { return group[i].VaddrOffset < group[j].VaddrOffset })
+		sort.Slice(group, func(i, j int) bool { return group[i].vaddr < group[j].vaddr })
 		s.vlogMu.Lock()
 		v := s.vlogs[vlogID]
 		s.vlogMu.Unlock()
@@ -779,20 +663,15 @@ func (s *Server) durableAppendChunks(ctx context.Context, opID int64, chunks []m
 		if !ready {
 			return fmt.Errorf("vlog %d is not commit-ready", vlogID)
 		}
-		indexes := make([]int, 0, len(group))
 		for _, chunk := range group {
-			if err := v.EnsureWrite(ctx, chunk.VaddrOffset, chunk.Data); err != nil {
+			if err := v.EnsureWrite(ctx, chunk.vaddr, chunk.data); err != nil {
 				return err
 			}
-			indexes = append(indexes, chunk.Index)
 		}
 		if err := v.Commit(ctx, opID); err != nil {
 			return err
 		}
 		if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
-			return err
-		}
-		if err := s.db.MarkWriteOpChunksDurable(ctx, opID, indexes); err != nil {
 			return err
 		}
 	}
