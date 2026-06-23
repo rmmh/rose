@@ -21,7 +21,27 @@ import (
 
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+// shuttingDown reports whether a failed op is the bounded run winding down
+// rather than a real fault. The run context carries the only deadline in the
+// harness, so a gRPC Canceled/DeadlineExceeded is always that deadline firing.
+// Checking the status code (not just ctx.Err()) closes a skew window: the gRPC
+// transport arms its own deadline timer and can return DeadlineExceeded a hair
+// before the context's timer flips ctx.Err(), which otherwise reads as a
+// spurious op error at the boundary.
+func shuttingDown(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.Canceled, codes.DeadlineExceeded:
+		return true
+	}
+	return false
+}
 
 // fileState is the oracle's record of a committed file: the digest and length of
 // its last successfully committed content.
@@ -338,7 +358,7 @@ func (w *workload) doRead(ctx context.Context, client pb.RoseClient, workerID in
 // vlog below its read threshold a transient failure is tolerable, but with no
 // faults a committed file must always read, so it is a hard error.
 func (w *workload) readFailure(ctx context.Context, path string, err error) {
-	if ctx.Err() != nil {
+	if shuttingDown(ctx, err) {
 		return // run is ending; a cancelled read is expected shutdown
 	}
 	w.stats.readMissing.Add(1)
@@ -425,14 +445,14 @@ func (w *workload) doSnapshotVerify(ctx context.Context, client pb.RoseClient, r
 		st := frozen[path]
 		open, err := client.OpenSnapshot(ctx, &pb.OpenSnapshotRequest{SnapshotId: id, Path: path})
 		if err != nil {
-			if ctx.Err() == nil && !w.degraded() {
+			if !shuttingDown(ctx, err) && !w.degraded() {
 				w.t.Errorf("snapshot %d path %s unreadable: %v", id, path, err)
 			}
 			continue
 		}
 		read, err := client.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Offset: 0, Length: int64(st.len)})
 		if err != nil {
-			if ctx.Err() == nil && !w.degraded() {
+			if !shuttingDown(ctx, err) && !w.degraded() {
 				w.t.Errorf("snapshot %d path %s read failed: %v", id, path, err)
 			}
 			continue
@@ -476,7 +496,7 @@ func (w *workload) randomSnapshot(rng *rand.Rand) (uint64, bool) {
 // done — an op interrupted by the run deadline failing with a cancellation is
 // expected shutdown, not a fault.
 func (w *workload) recordOpErr(ctx context.Context, err error) {
-	if ctx.Err() != nil || w.degraded() {
+	if shuttingDown(ctx, err) || w.degraded() {
 		return
 	}
 	w.stats.opErrors.Add(1)
