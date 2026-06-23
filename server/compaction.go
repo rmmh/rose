@@ -99,6 +99,12 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 	if err != nil {
 		return fmt.Errorf("compact: load vlog %d: %w", sourceID, err)
 	}
+	if info.ProtectionScheme == "EC" {
+		// EC vlogs accept whole stripe rows only, so their live chunks cannot be
+		// copied one at a time like a mirror's; they are repacked into rows on the
+		// way out, the same coding promotion does.
+		return s.compactECVlogLocked(ctx, sourceID, source, info)
+	}
 	job, err := s.db.GetOrCreateCompactionJob(ctx, sourceID)
 	if err != nil {
 		return err
@@ -167,11 +173,74 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 		}
 	}
 
-	plogs, err := s.db.RetireVlog(ctx, sourceID)
+	if err := s.retireVlogLocked(ctx, sourceID); err != nil {
+		return err
+	}
+	return s.db.MarkJobDone(ctx, job.ID)
+}
+
+// compactECVlogLocked rewrites an EC vlog's live chunks into a fresh EC vlog and
+// retires the old one. Unlike a mirror, an EC vlog stores whole stripe rows only,
+// so its live chunks (which the dead holes between them have left scattered) are
+// repacked into complete rows by the same coding promotion uses, padding the
+// final partial row. It is crash-safe and resumable exactly like the mirror path:
+// the coded rows are made durable in the destination before any chunk is
+// repointed, so an interruption leaves every chunk resolving to its intact source
+// location and the job re-runs (re-reading only the chunks still in the source).
+// The caller must hold vlogMu.
+func (s *Server) compactECVlogLocked(ctx context.Context, sourceID uint32, source *storage.Vlog, info meta.VlogInfo) error {
+	live, err := s.db.LiveChunksInVlog(ctx, sourceID)
 	if err != nil {
 		return err
 	}
-	delete(s.vlogs, sourceID)
+	job, err := s.db.GetOrCreateCompactionJob(ctx, sourceID)
+	if err != nil {
+		return err
+	}
+	// The active vlog must not be retired out from under future writes.
+	s.clearActiveVlogLocked(sourceID)
+
+	if len(live) > 0 {
+		destID := job.DestVlog
+		var dest *storage.Vlog
+		if destID == 0 {
+			destID, dest, err = s.provisionVlogLocked(ctx, "EC", int(info.DataShards), int(info.ParityShards))
+			if err != nil {
+				return fmt.Errorf("compact: provision destination EC vlog: %w", err)
+			}
+			if err := s.db.SetJobDest(ctx, job.ID, destID); err != nil {
+				return err
+			}
+		} else {
+			var ok bool
+			dest, ok = s.vlogs[destID]
+			if !ok {
+				return fmt.Errorf("compact: destination vlog %d not mounted", destID)
+			}
+		}
+		padded := paddedRowLen(live, storage.ECStripeWidth(int(info.DataShards)))
+		if err := s.writeChunksAsRows(ctx, job.ID, source, dest, destID, live, padded); err != nil {
+			return fmt.Errorf("compact: %w", err)
+		}
+	}
+
+	if err := s.retireVlogLocked(ctx, sourceID); err != nil {
+		return err
+	}
+	return s.db.MarkJobDone(ctx, job.ID)
+}
+
+// retireVlogLocked drops a fully-drained vlog from the catalog and unmounts and
+// deletes its backing plog files, the shared tail of compaction, EC compaction,
+// and staging retirement. RetireVlog refuses to drop a vlog that still has live
+// chunks, so a caller that has not relocated everything fails loudly rather than
+// losing data. The caller must hold vlogMu.
+func (s *Server) retireVlogLocked(ctx context.Context, vlogID uint32) error {
+	plogs, err := s.db.RetireVlog(ctx, vlogID)
+	if err != nil {
+		return err
+	}
+	delete(s.vlogs, vlogID)
 	for _, p := range plogs {
 		if plog, ok := s.plogs[p.ID]; ok {
 			_ = plog.Close()
@@ -179,5 +248,6 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 		}
 		_ = os.Remove(s.plogPath(p.DiskID, p.ID))
 	}
-	return s.db.MarkJobDone(ctx, job.ID)
+	s.clearActiveVlogLocked(vlogID)
+	return nil
 }

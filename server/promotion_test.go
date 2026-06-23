@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math/rand"
 	"path/filepath"
 	"testing"
@@ -246,6 +247,176 @@ func TestPromoteResumesAfterRestart(t *testing.T) {
 	}
 	if len(jobs) != 0 {
 		t.Fatalf("resumed promotion left %d running jobs", len(jobs))
+	}
+}
+
+// unlinkServerFile deletes a path, dropping its chunks' refcounts.
+func unlinkServerFile(t *testing.T, s *Server, path string) {
+	t.Helper()
+	if _, err := s.Unlink(context.Background(), &pb.UnlinkRequest{Path: path}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPromoteRetiresFullyDrainedStaging writes chunks that pack into whole stripe
+// rows with nothing left over, so promotion drains every live chunk out of the
+// staging vlog. The now-empty replica must be retired rather than left lingering.
+func TestPromoteRetiresFullyDrainedStaging(t *testing.T) {
+	defer storage.SetECColumnBytesForTest(64)() // stripe row = 64*3 = 192 bytes
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 4)
+	s.SetMaintenanceInterval(0)
+	if err := s.SetBucketPolicy(ctx, meta.BucketPolicy{Name: "ec", ProtectionScheme: "EC", DataShards: 3, ParityShards: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Six 200-byte chunks: the whole-row prefix that minimizes padding consumes
+	// all of them, leaving the staging vlog empty after promotion.
+	for i := 0; i < 6; i++ {
+		payload := make([]byte, 200)
+		rand.New(rand.NewSource(int64(20 + i))).Read(payload)
+		writeServerFileInternal(t, s, fmt.Sprintf("/ec/f%d", i), payload)
+	}
+	staging := stagingVlogID(t, s)
+
+	if _, err := s.PromoteStaging(ctx); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+
+	// The drained staging vlog is gone from the catalog and the in-memory mount.
+	vlogs, err := s.db.ListVlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range vlogs {
+		if v.ID == staging {
+			t.Fatalf("drained staging vlog %d still in catalog", staging)
+		}
+	}
+	if _, ok := s.vlogs[staging]; ok {
+		t.Fatalf("drained staging vlog %d still mounted", staging)
+	}
+	if got := ecVlogs(t, s); len(got) != 1 {
+		t.Fatalf("got %d EC vlogs after promotion, want 1", len(got))
+	}
+	for i := 0; i < 6; i++ {
+		path := fmt.Sprintf("/ec/f%d", i)
+		want := make([]byte, 200)
+		rand.New(rand.NewSource(int64(20 + i))).Read(want)
+		if got := readServerFileInternal(t, s, path); !bytes.Equal(got, want) {
+			t.Fatalf("%s changed across promotion", path)
+		}
+	}
+}
+
+// TestPromoteRetiresEmptyStagingAfterDelete confirms a staging vlog holding only
+// a sub-row remainder is retired once that remainder is deleted: the data never
+// completed a row, so it stayed replicated, and when it goes away the empty
+// replica must not linger.
+func TestPromoteRetiresEmptyStagingAfterDelete(t *testing.T) {
+	defer storage.SetECColumnBytesForTest(1 << 20)() // stripe row = 3 MiB, far above the write
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 4)
+	s.SetMaintenanceInterval(0)
+	if err := s.SetBucketPolicy(ctx, meta.BucketPolicy{Name: "ec", ProtectionScheme: "EC", DataShards: 3, ParityShards: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	writeServerFileInternal(t, s, "/ec/small", []byte("well under a stripe row"))
+	staging := stagingVlogID(t, s)
+
+	// Sub-row data: promotion is a no-op and leaves it replicated in staging.
+	if promoted, err := s.PromoteStaging(ctx); err != nil || promoted != 0 {
+		t.Fatalf("promote sub-row = (%d, %v), want (0, nil)", promoted, err)
+	}
+	if _, ok := s.vlogs[staging]; !ok {
+		t.Fatalf("staging vlog %d retired while it still held live data", staging)
+	}
+
+	// Deleting the only file leaves the staging vlog all dead; the next pass
+	// retires it instead of waiting for the dead-byte floor.
+	unlinkServerFile(t, s, "/ec/small")
+	if _, err := s.PromoteStaging(ctx); err != nil {
+		t.Fatalf("promote after delete: %v", err)
+	}
+	if _, ok := s.vlogs[staging]; ok {
+		t.Fatalf("empty staging vlog %d not retired", staging)
+	}
+	vlogs, err := s.db.ListVlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vlogs) != 0 {
+		t.Fatalf("expected no vlogs after draining and deleting, got %+v", vlogs)
+	}
+}
+
+// TestCompactECVlogRepacksRowsAndReclaimsSpace promotes chunks into an EC vlog,
+// deletes most of them to leave dead holes between stripe rows, and confirms EC
+// compaction repacks the survivors into a fresh EC vlog (whole rows only) and
+// retires the wasteful one.
+func TestCompactECVlogRepacksRowsAndReclaimsSpace(t *testing.T) {
+	defer storage.SetECColumnBytesForTest(64)() // stripe row = 192 bytes
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 4)
+	s.SetMaintenanceInterval(0)
+	if err := s.SetBucketPolicy(ctx, meta.BucketPolicy{Name: "ec", ProtectionScheme: "EC", DataShards: 3, ParityShards: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	keep := make([]byte, 200)
+	rand.New(rand.NewSource(1)).Read(keep)
+	writeServerFileInternal(t, s, "/ec/keep", keep)
+	for i := 0; i < 5; i++ {
+		dead := make([]byte, 200)
+		rand.New(rand.NewSource(int64(100 + i))).Read(dead)
+		writeServerFileInternal(t, s, fmt.Sprintf("/ec/dead%d", i), dead)
+	}
+
+	if _, err := s.PromoteStaging(ctx); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	ec := ecVlogs(t, s)
+	if len(ec) != 1 {
+		t.Fatalf("got %d EC vlogs after promotion, want 1", len(ec))
+	}
+	ecID := ec[0].ID
+
+	for i := 0; i < 5; i++ {
+		unlinkServerFile(t, s, fmt.Sprintf("/ec/dead%d", i))
+	}
+	liveBefore, err := s.db.LiveChunksInVlog(ctx, ecID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(liveBefore) != 1 {
+		t.Fatalf("EC vlog holds %d live chunks before compaction, want 1", len(liveBefore))
+	}
+
+	if err := s.CompactVlog(ctx, ecID); err != nil {
+		t.Fatalf("compact EC vlog: %v", err)
+	}
+
+	// The wasteful EC vlog is retired and a fresh EC vlog holds the survivor.
+	if _, ok := s.vlogs[ecID]; ok {
+		t.Fatalf("compacted EC vlog %d still mounted", ecID)
+	}
+	after := ecVlogs(t, s)
+	if len(after) != 1 || after[0].ID == ecID {
+		t.Fatalf("want one fresh EC vlog after compaction, got %+v", after)
+	}
+	if after[0].Length%storage.ECStripeWidth(3) != 0 {
+		t.Fatalf("compacted EC vlog length %d is not whole stripe rows", after[0].Length)
+	}
+	live, err := s.db.LiveChunksInVlog(ctx, after[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 1 {
+		t.Fatalf("fresh EC vlog holds %d live chunks, want 1", len(live))
+	}
+	if got := readServerFileInternal(t, s, "/ec/keep"); !bytes.Equal(got, keep) {
+		t.Fatal("kept file corrupted by EC compaction")
 	}
 }
 

@@ -52,18 +52,27 @@ replicated staging vlog and a maintenance-pass promotion step.
   vlog before any chunk is reparented (RelocateChunk), mirroring compaction's
   crash-safety. Chunks are content-addressed/unsplittable, so promotion reparents
   whole chunks by hash.
-- TODO (task #3): staging cleanup -- after promotion reparents chunks out, the
-  staging vlog's old regions are dead space; ordinary DUPLICATE compaction
-  reclaims them, but the now-empty staging vlog is not yet retired. Edge case:
-  when the target EC vlog is too full to accept another complete row, seal it,
-  allocate a fresh EC vlog, and retarget the staging remainder so staging never
-  becomes undrainable. Sub-row data that never completes a row stays replicated
-  (long-tail cost) unless a coalescing pass packs it.
-- TODO (compaction): CompactVlog of an EC vlog still does dest.Write per chunk
-  (compaction.go), which an EC dest rejects (whole rows only). EC vlogs are only
-  created by promotion today, so this is not hit until EC vlogs accumulate dead
-  space worth compacting; fix by packing chunks into rows on the EC compaction
-  path (reuse promotablePrefix) or by routing EC compaction through promotion.
+- (done) staging cleanup -- PromoteStagingVlog now retires the staging vlog the
+  moment it holds no live chunks: when a whole-row promotion drains it completely
+  (count == len(live)), and when a sub-row remainder is later deleted (count == 0
+  with no live chunks left). retireVlogLocked (shared with compaction) drops the
+  catalog rows, unmounts and deletes the plog files, and clears it as any bucket's
+  active vlog, so the empty replica does not linger until the dead-byte floor
+  makes it a compaction candidate. Sub-row data that never completes a row still
+  stays replicated (long-tail cost) until deleted or coalesced.
+- TODO (task #3, remaining): the EC-vlog-too-full edge case is not yet reachable
+  -- each promote job provisions its own fresh EC vlog and a single promotion's
+  rows are bounded by the staging cap, so promotion never has to seal a full EC
+  vlog and retarget the remainder. Revisit if promotion is changed to fill an EC
+  vlog across multiple jobs. A coalescing pass that packs orphaned sub-row
+  remainders from superseded staging vlogs is also still open.
+- (done) EC compaction -- CompactVlog routes EC vlogs to compactECVlogLocked,
+  which repacks the live chunks into complete stripe rows (writeChunksAsRows,
+  shared with promotion; paddedRowLen sizes the all-chunks final-row padding)
+  instead of the per-chunk dest.Write an EC dest rejects, then retires the
+  wasteful vlog. Same copy-then-repoint crash-safety as the mirror path: rows are
+  durable before any chunk is reparented, so a crash re-runs from the chunks still
+  in the source.
 - TODO (perf): block data cache -- keep recently written/promoted column data in
   memory so promotion and reconstruct avoid re-reading data plogs.
 - TODO (perf): fan out per-row shard writes concurrently (the new path encodes

@@ -78,9 +78,18 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 	sw := storage.ECStripeWidth(int(info.TargetDataShards))
 	count, padded := promotablePrefix(live, sw)
 	if count == 0 {
-		// Nothing yet fills a whole row. If a crash mid-promotion already reparented
-		// enough chunks to drop staging below a row, retire the orphaned job so it is
-		// not re-resumed forever.
+		// Nothing yet fills a whole row. A staging vlog with no live chunks at all
+		// (everything was promoted or deleted) is dead replicated space: retire it
+		// now rather than waiting for the dead-byte floor to make it a compaction
+		// candidate. A sub-row remainder stays replicated to coalesce with later
+		// writes. Either way, retire any orphaned job (a crash mid-promotion may
+		// have reparented enough chunks to drop staging below a row) so it is not
+		// re-resumed forever.
+		if len(live) == 0 {
+			if err := s.retireVlogLocked(ctx, stagingID); err != nil {
+				return false, err
+			}
+		}
 		if _, err := s.db.FinishRunningPromoteJob(ctx, stagingID); err != nil {
 			return false, err
 		}
@@ -110,41 +119,80 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 		}
 	}
 
-	// Concatenate the promoted chunks into a single padded run of whole stripe
-	// rows. Reading each chunk back from the replicated staging vlog heals bitrot
-	// in passing (the read verifies sector hashes against a surviving copy).
+	// Reading each chunk back from the replicated staging vlog heals bitrot in
+	// passing (the read verifies sector hashes against a surviving copy).
+	if err := s.writeChunksAsRows(ctx, job.ID, source, dest, destID, live[:count], padded); err != nil {
+		return false, fmt.Errorf("promote: %w", err)
+	}
+	if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
+		return false, err
+	}
+
+	// If the whole-row prefix drained every live chunk, the staging vlog is now an
+	// empty replica: retire it so it does not linger holding only dead bytes.
+	if count == len(live) {
+		if err := s.retireVlogLocked(ctx, stagingID); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// writeChunksAsRows reads the given live chunks from source in order,
+// concatenates and pads them to a whole number of EC stripe rows, appends those
+// rows to the EC dest under txnID, makes them durable, and reparents each chunk
+// at its new location. It is the shared coding step of promotion (staging ->
+// EC) and EC compaction (EC -> EC): the coded rows are durable before any chunk
+// is repointed, so a crash leaves every chunk resolving to its old, intact
+// location and the job re-runs. padded must be the chunks' total byte length
+// rounded up to a stripe-row boundary. The caller must hold vlogMu.
+func (s *Server) writeChunksAsRows(ctx context.Context, txnID int64, source, dest *storage.Vlog, destID uint32, chunks []meta.ChunkLoc, padded int64) error {
 	buf := make([]byte, 0, padded)
-	chunkOffsets := make([]int64, count)
-	for i := 0; i < count; i++ {
-		chunkOffsets[i] = int64(len(buf))
-		data, err := source.Read(ctx, live[i].VaddrOffset, live[i].LogicalLen)
+	offsets := make([]int64, len(chunks))
+	for i, c := range chunks {
+		offsets[i] = int64(len(buf))
+		data, err := source.Read(ctx, c.VaddrOffset, c.LogicalLen)
 		if err != nil {
-			return false, fmt.Errorf("promote: read chunk from staging vlog %d: %w", stagingID, err)
+			return fmt.Errorf("read chunk from vlog %d: %w", source.ID(), err)
 		}
 		buf = append(buf, data...)
 	}
 	// Pad the final row to a stripe-row boundary so the EC vlog only ever stores
 	// whole rows. The padding is dead space addressed by no chunk; it is bounded
-	// by one stripe row per promotion and reclaimed when the EC vlog is compacted.
+	// by one stripe row per call and reclaimed when the EC vlog is compacted.
 	buf = append(buf, make([]byte, padded-int64(len(buf)))...)
 
-	base, err := dest.Write(ctx, job.ID, buf)
+	base, err := dest.Write(ctx, txnID, buf)
 	if err != nil {
-		return false, fmt.Errorf("promote: write rows to EC vlog %d: %w", destID, err)
+		return fmt.Errorf("write rows to EC vlog %d: %w", destID, err)
 	}
-	if err := dest.Commit(ctx, job.ID); err != nil {
-		return false, fmt.Errorf("promote: commit EC vlog %d: %w", destID, err)
+	if err := dest.Commit(ctx, txnID); err != nil {
+		return fmt.Errorf("commit EC vlog %d: %w", destID, err)
 	}
 	if err := s.db.SetVlogLength(ctx, destID, dest.Length()); err != nil {
-		return false, err
+		return err
 	}
-	for i := 0; i < count; i++ {
-		if err := s.db.RelocateChunk(ctx, live[i].Hash, destID, base+chunkOffsets[i]); err != nil {
-			return false, fmt.Errorf("promote: reparent chunk: %w", err)
+	for i, c := range chunks {
+		if err := s.db.RelocateChunk(ctx, c.Hash, destID, base+offsets[i]); err != nil {
+			return fmt.Errorf("reparent chunk: %w", err)
 		}
 	}
+	return nil
+}
 
-	return true, s.db.MarkJobDone(ctx, job.ID)
+// paddedRowLen returns the byte length the given chunks occupy once packed
+// contiguously and the final partial row padded up to a stripe-row boundary of
+// width sw. It is the all-chunks counterpart to promotablePrefix, used by EC
+// compaction, which must drain every live chunk rather than a whole-row prefix.
+func paddedRowLen(chunks []meta.ChunkLoc, sw int64) int64 {
+	var total int64
+	for _, c := range chunks {
+		total += int64(c.LogicalLen)
+	}
+	if total == 0 || sw <= 0 {
+		return 0
+	}
+	return (total + sw - 1) / sw * sw
 }
 
 // promotablePrefix selects how many of the leading whole chunks to promote into
