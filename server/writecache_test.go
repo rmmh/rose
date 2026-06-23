@@ -302,3 +302,54 @@ func TestGetattrHandleReflectsUncommittedWrites(t *testing.T) {
 		t.Fatalf("after close size = %d, want %d", len(got), len(data))
 	}
 }
+
+// TestRenameOpenUncommittedHandle reproduces rsync's sequence: create a temp
+// file, write into it, then rename it into place *before* closing the write
+// handle. The source has no committed file head yet, so the rename must retarget
+// the live handle rather than failing with EIO; Close then publishes the data at
+// the destination path.
+func TestRenameOpenUncommittedHandle(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	const tmp = "/.b.mp4.tmp"
+	const final = "/b.mp4"
+	opKeySeq++
+	key := fmt.Sprintf("test-op-%s-%d", tmp, opKeySeq)
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: tmp, OperationKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte("z"), 559906)
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Offset: 0, Buffer: data}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rename before Close: the temp path has no committed head, yet this must
+	// succeed by retargeting the open handle.
+	if _, err := s.Rename(ctx, &pb.RenameRequest{OldPath: tmp, NewPath: final}); err != nil {
+		t.Fatalf("rename of open uncommitted file: %v", err)
+	}
+
+	// Closing the (retargeted) handle publishes the data at the destination.
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle(), IdempotencyKey: key}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readAll(t, s, final); !bytes.Equal(got, data) {
+		t.Fatalf("destination size = %d, want %d", len(got), len(data))
+	}
+	// The temp path must not be resurrected by the Close.
+	if _, ok, err := statPath(t, s, tmp); err == nil && ok {
+		t.Fatalf("temp path %s still exists after rename+close", tmp)
+	}
+}
+
+// statPath reports whether a path resolves, via Getattr.
+func statPath(t *testing.T, s *server.Server, path string) (int64, bool, error) {
+	t.Helper()
+	resp, err := s.Getattr(context.Background(), &pb.GetattrRequest{Path: path})
+	if err != nil {
+		return 0, false, err
+	}
+	return resp.GetSize(), true, nil
+}

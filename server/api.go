@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -112,10 +114,41 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 	if req.GetOldPath() == "" || req.GetNewPath() == "" {
 		return nil, fmt.Errorf("old_path and new_path are required")
 	}
-	if err := s.db.RenameFile(ctx, cleanPath(req.GetOldPath()), cleanPath(req.GetNewPath())); err != nil {
+	oldPath, newPath := cleanPath(req.GetOldPath()), cleanPath(req.GetNewPath())
+	err := s.db.RenameFile(ctx, oldPath, newPath)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The source has no committed file head. It may still exist as an open
+		// write handle whose data has not been published yet -- rsync renames its
+		// temp file into place before closing it. Retarget the live handle so its
+		// pending bytes commit at the new path on Close, and report success.
+		if s.retargetOpenHandles(oldPath, newPath) {
+			return &pb.RenameResponse{}, nil
+		}
 		return nil, err
 	}
+	if err != nil {
+		return nil, err
+	}
+	// The committed head moved; redirect any open write handle on the old path so
+	// a later Close republishes at the new path instead of resurrecting the old.
+	s.retargetOpenHandles(oldPath, newPath)
 	return &pb.RenameResponse{}, nil
+}
+
+// retargetOpenHandles repoints every open handle for oldPath at newPath so that
+// pending writes commit under the new name. It reports whether any handle
+// matched. The caller must hold no handle lock.
+func (s *Server) retargetOpenHandles(oldPath, newPath string) bool {
+	s.handlesMu.Lock()
+	defer s.handlesMu.Unlock()
+	found := false
+	for _, h := range s.handles {
+		if h.path == oldPath {
+			h.path = newPath
+			found = true
+		}
+	}
+	return found
 }
 
 func (s *Server) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequest) (*pb.CreateSnapshotResponse, error) {
