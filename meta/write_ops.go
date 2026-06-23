@@ -140,6 +140,33 @@ func (d *DB) AppendWriteOpChunk(ctx context.Context, opID int64, chunk WriteOpCh
 	return tx.Commit()
 }
 
+// AppendWriteOpChunks records several exact reserved placements in one
+// transaction before any shard is written. Chunk indexes must be monotonic and
+// unique within the operation.
+func (d *DB) AppendWriteOpChunks(ctx context.Context, opID int64, chunks []WriteOpChunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var state string
+	if err := tx.QueryRowContext(ctx, "SELECT state FROM write_op WHERE id = ?", opID).Scan(&state); err != nil {
+		return err
+	}
+	if state != WriteOpPrepared {
+		return fmt.Errorf("write operation %d is not prepared", opID)
+	}
+	for _, chunk := range chunks {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO write_op_chunk (write_op_id, chunk_idx, data, hash, vlog_id, vaddr_offset, logical_len, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", opID, chunk.Index, chunk.Data, chunk.Hash, chunk.VlogID, chunk.VaddrOffset, chunk.LogicalLen, WriteChunkPlanned); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (d *DB) MarkWriteOpChunkDurable(ctx context.Context, opID int64, index int) error {
 	res, err := d.db.ExecContext(ctx, "UPDATE write_op_chunk SET state = ? WHERE write_op_id = ? AND chunk_idx = ? AND state = ?", WriteChunkDurable, opID, index, WriteChunkPlanned)
 	if err != nil {
@@ -159,6 +186,40 @@ func (d *DB) MarkWriteOpChunkDurable(ctx context.Context, opID int64, index int)
 		}
 	}
 	return nil
+}
+
+// MarkWriteOpChunksDurable advances a batch of planned chunks to durable. A
+// chunk already marked durable is accepted, keeping replay idempotent.
+func (d *DB) MarkWriteOpChunksDurable(ctx context.Context, opID int64, indexes []int) error {
+	if len(indexes) == 0 {
+		return nil
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, index := range indexes {
+		res, err := tx.ExecContext(ctx, "UPDATE write_op_chunk SET state = ? WHERE write_op_id = ? AND chunk_idx = ? AND state = ?", WriteChunkDurable, opID, index, WriteChunkPlanned)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 0 {
+			continue
+		}
+		var state string
+		if err := tx.QueryRowContext(ctx, "SELECT state FROM write_op_chunk WHERE write_op_id = ? AND chunk_idx = ?", opID, index).Scan(&state); err != nil {
+			return err
+		}
+		if state != WriteChunkDurable {
+			return fmt.Errorf("chunk %d for operation %d is not durable", index, opID)
+		}
+	}
+	return tx.Commit()
 }
 
 func (d *DB) ClaimVlogLease(ctx context.Context, vlogID uint32, opID int64, ordinal int) error {

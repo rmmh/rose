@@ -398,16 +398,24 @@ func ReconstructECShard(dataShards, parityShards int, shards [][]byte) error {
 
 // Commit makes all physical writes issued through this virtual log durable.
 func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
+	var wg sync.WaitGroup
+	errs := make(chan error, len(v.clients))
 	for _, client := range v.clients {
 		committer, ok := client.(committingPlogClient)
 		if !ok {
 			return fmt.Errorf("plog client does not support commit")
 		}
-		if err := committer.Commit(ctx, txnID); err != nil {
-			return err
-		}
+		wg.Add(1)
+		go func(committer committingPlogClient) {
+			defer wg.Done()
+			if err := committer.Commit(ctx, txnID); err != nil {
+				errs <- err
+			}
+		}(committer)
 	}
-	return nil
+	wg.Wait()
+	close(errs)
+	return <-errs
 }
 
 func (v *Vlog) Length() int64 { return atomic.LoadInt64(&v.length) }
