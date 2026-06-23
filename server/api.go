@@ -226,11 +226,9 @@ func (s *Server) readChunksAt(ctx context.Context, chunks []meta.ChunkPlacement,
 	for _, chunk := range chunks {
 		end := cur + int64(chunk.LogicalLen)
 		if off < end && off+length > cur {
-			s.vlogMu.Lock()
-			vlog, ok := s.vlogs[chunk.VlogID]
-			s.vlogMu.Unlock()
-			if !ok {
-				return nil, fmt.Errorf("vlog %d not mounted", chunk.VlogID)
+			vlog, placement, err := s.resolveVlog(ctx, chunk)
+			if err != nil {
+				return nil, err
 			}
 			readStart := cur
 			if off > readStart {
@@ -240,7 +238,7 @@ func (s *Server) readChunksAt(ctx context.Context, chunks []meta.ChunkPlacement,
 			if off+length < readEnd {
 				readEnd = off + length
 			}
-			data, err := vlog.Read(ctx, chunk.VaddrOffset+(readStart-cur), int(readEnd-readStart))
+			data, err := vlog.Read(ctx, placement.VaddrOffset+(readStart-cur), int(readEnd-readStart))
 			if err != nil {
 				return nil, err
 			}
@@ -252,6 +250,47 @@ func (s *Server) readChunksAt(ctx context.Context, chunks []meta.ChunkPlacement,
 		}
 	}
 	return out, nil
+}
+
+// maxRepointRetries bounds how many times resolveVlog will follow a compaction
+// repoint before giving up. Each retry observes a distinct relocation, so a
+// handful covers any realistic burst of back-to-back compactions; exceeding it
+// means the chunk is genuinely unresolvable.
+const maxRepointRetries = 16
+
+// resolveVlog returns the mounted vlog and the placement to read a chunk from,
+// following a compaction repoint when the caller's snapshotted placement names
+// a vlog that has since been retired. Compaction relocates a live chunk's bytes
+// into a fresh vlog and repoints the chunk row (RelocateChunk) before unmounting
+// the old vlog (retireVlogLocked), both under vlogMu -- so a read holding a
+// placement captured before the move finds its vlog gone. Because relocation is
+// content-preserving, re-resolving the chunk by its content hash yields the same
+// bytes at their new home, which is what this does. It only surfaces the
+// not-mounted error when re-resolution makes no progress (the chunk row is gone
+// or still points at the unmounted vlog), i.e. a genuine inconsistency.
+func (s *Server) resolveVlog(ctx context.Context, chunk meta.ChunkPlacement) (*storage.Vlog, meta.ChunkPlacement, error) {
+	for attempt := 0; ; attempt++ {
+		s.vlogMu.Lock()
+		vlog, ok := s.vlogs[chunk.VlogID]
+		s.vlogMu.Unlock()
+		if ok {
+			return vlog, chunk, nil
+		}
+		if attempt >= maxRepointRetries {
+			return nil, chunk, fmt.Errorf("vlog %d not mounted", chunk.VlogID)
+		}
+		fresh, found, err := s.db.ChunkByHash(ctx, chunk.Hash)
+		if err != nil {
+			return nil, chunk, err
+		}
+		if !found || fresh.VlogID == chunk.VlogID {
+			// No live chunk row, or it still resolves to the unmounted vlog:
+			// there is no repoint to follow, so fail with the original error.
+			return nil, chunk, fmt.Errorf("vlog %d not mounted", chunk.VlogID)
+		}
+		chunk.VlogID = fresh.VlogID
+		chunk.VaddrOffset = fresh.VaddrOffset
+	}
 }
 func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.GetattrResponse, error) {
 	entry, ok, err := s.db.StatPath(ctx, req.GetPath())
