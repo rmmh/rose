@@ -281,6 +281,12 @@ func (w *workload) doWrite(ctx context.Context, client pb.RoseClient, workerID i
 		w.recordOpErr(ctx, err)
 		return
 	}
+	// A whole-file overwrite replaces the resource: truncate any prior (possibly
+	// longer) content to zero so the committed version is exactly `data`.
+	if _, err := client.Truncate(ctx, &pb.TruncateRequest{Handle: open.GetHandle(), Size: 0}); err != nil {
+		w.recordOpErr(ctx, err)
+		return
+	}
 	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: data}); err != nil {
 		w.recordOpErr(ctx, err)
 		return

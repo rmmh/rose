@@ -8,6 +8,7 @@ service Rose {
   rpc Open(OpenRequest) returns (OpenResponse);
   rpc Write(WriteRequest) returns (WriteResponse);
   rpc Read(ReadRequest) returns (ReadResponse);
+  rpc Truncate(TruncateRequest) returns (TruncateResponse);
   rpc Close(CloseRequest) returns (CloseResponse);
   rpc Getattr(GetattrRequest) returns (GetattrResponse);
   rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
@@ -70,6 +71,17 @@ message ReadRequest {
 
 message ReadResponse {
   bytes buffer = 1;
+}
+
+message TruncateRequest {
+  int64 handle = 1;
+  // path is used when no open write handle is supplied (a truncate(2) by path).
+  string path = 2;
+  string operation_key = 3;
+  int64 size = 4;
+}
+
+message TruncateResponse {
 }
 
 message GetattrRequest {

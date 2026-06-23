@@ -23,6 +23,10 @@ type FileHandle struct {
 	snapshotID uint64
 	writeOpID  int64
 	writeKey   string
+	// cache holds pending modifications for a writable handle: it coalesces
+	// out-of-order/overlapping writes, serves read-your-writes, and produces the
+	// spliced placement list at Close. Nil for read-only and snapshot handles.
+	cache *writeCache
 }
 
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
@@ -55,6 +59,9 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 			return nil, fmt.Errorf("write operation key is already bound to %q", op.Path)
 		}
 		h.writeOpID, h.writeKey = op.ID, op.IdempotencyKey
+		if err := s.buildCache(ctx, h); err != nil {
+			return nil, err
+		}
 	}
 	s.handles[hid] = h
 
@@ -155,99 +162,96 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 	if op.State == meta.WriteOpCommitted {
 		return &pb.WriteResponse{AcknowledgedOffset: op.AcknowledgedOffset}, nil
 	}
-	if req.GetOffset() > op.AcknowledgedOffset {
-		return nil, fmt.Errorf("write offset %d skips acknowledged offset %d", req.GetOffset(), op.AcknowledgedOffset)
-	}
-	if req.GetOffset() < op.AcknowledgedOffset {
-		if req.GetOffset()+int64(len(req.GetBuffer())) > op.AcknowledgedOffset {
-			return nil, fmt.Errorf("write overlaps acknowledged range")
+	if h.cache == nil {
+		if err := s.buildCache(ctx, h); err != nil {
+			return nil, err
 		}
-		return &pb.WriteResponse{AcknowledgedOffset: op.AcknowledgedOffset}, nil
 	}
-	// A previous attempt may have durably recorded this exact input as the
-	// operation's tail before its response was lost.  Do not append it twice.
-	if len(op.Tail) > 0 {
-		if !bytes.Equal(op.Tail, req.GetBuffer()) {
-			return nil, fmt.Errorf("retry data differs from pending write")
-		}
-	} else if err := s.db.UpdateWriteOpStream(ctx, op.ID, op.AcknowledgedOffset, append([]byte(nil), req.GetBuffer()...)); err != nil {
+	// Any offset, any order, overlapping, extending: the cache coalesces them.
+	// A re-issued identical interval rewrites the same bytes, so it is idempotent.
+	h.cache.WriteAt(req.GetOffset(), req.GetBuffer())
+	if err := s.spillCache(ctx, h); err != nil {
 		return nil, err
 	}
-	if err := s.flushWriteOp(ctx, op.ID, op.AcknowledgedOffset+int64(len(req.GetBuffer()))); err != nil {
-		return nil, err
-	}
-	return &pb.WriteResponse{AcknowledgedOffset: op.AcknowledgedOffset + int64(len(req.GetBuffer()))}, nil
+	// AcknowledgedOffset is the handle-local logical size: monotonic for the
+	// sequential writer the retry contract is built around. In-flight bytes are
+	// made durable at Close, not here, so a resume re-sends them (idempotently).
+	return &pb.WriteResponse{AcknowledgedOffset: h.cache.Length()}, nil
 }
 
 func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
 	s.handlesMu.Lock()
-	defer s.handlesMu.Unlock()
-
-	slog.Info("Read", "handle", req.GetHandle(), "offset", req.GetOffset(), "length", req.GetLength())
-
 	h, ok := s.handles[req.GetHandle()]
+	s.handlesMu.Unlock()
 	if !ok {
 		slog.Error("Read failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
 	}
 
+	// A writable handle reads through its cache, so it sees its own uncommitted
+	// writes (read-your-writes) overlaid on the opened version.
+	if h.cache != nil {
+		out, err := h.cache.ReadAt(ctx, req.GetOffset(), req.GetLength())
+		if err != nil {
+			return nil, err
+		}
+		return &pb.ReadResponse{Buffer: out}, nil
+	}
+
 	if h.id == 0 {
 		return &pb.ReadResponse{Buffer: nil}, nil
 	}
-
-	// Fetch chunks for this file
-	chunks, err := s.db.GetFileChunks(ctx, h.id)
+	chunks, err := s.db.FileVersionChunks(ctx, h.id)
 	if err != nil {
 		slog.Error("Read failed to get chunks", "fileID", h.id, "error", err)
 		return nil, err
 	}
+	out, err := s.readChunksAt(ctx, chunks, req.GetOffset(), req.GetLength())
+	if err != nil {
+		return nil, err
+	}
+	return &pb.ReadResponse{Buffer: out}, nil
+}
 
-	slog.Info("Read chunks", "fileID", h.id, "chunks", len(chunks))
-
+// readChunksAt assembles the logical byte range [off, off+length) from an ordered
+// chunk placement list, reading each overlapped chunk's bytes from its vlog. It
+// is shared by Read (committed versions) and the write cache (base/settled
+// fall-through).
+func (s *Server) readChunksAt(ctx context.Context, chunks []meta.ChunkPlacement, off, length int64) ([]byte, error) {
+	if length <= 0 {
+		return nil, nil
+	}
 	var out []byte
-	var currentLogicalOffset int64 = 0
-
+	var cur int64
 	for _, chunk := range chunks {
-		chunkEnd := currentLogicalOffset + int64(chunk.LogicalLen)
-
-		// Check if this chunk intersects with the read request window
-		if req.GetOffset() < chunkEnd && req.GetOffset()+req.GetLength() > currentLogicalOffset {
+		end := cur + int64(chunk.LogicalLen)
+		if off < end && off+length > cur {
+			s.vlogMu.Lock()
 			vlog, ok := s.vlogs[chunk.VlogID]
+			s.vlogMu.Unlock()
 			if !ok {
-				slog.Error("Read map vlog missing", "vlogID", chunk.VlogID)
 				return nil, fmt.Errorf("vlog %d not mounted", chunk.VlogID)
 			}
-
-			// Calculate how much to read from this chunk
-			readStart := currentLogicalOffset
-			if req.GetOffset() > readStart {
-				readStart = req.GetOffset()
+			readStart := cur
+			if off > readStart {
+				readStart = off
 			}
-
-			readEnd := chunkEnd
-			if req.GetOffset()+req.GetLength() < readEnd {
-				readEnd = req.GetOffset() + req.GetLength()
+			readEnd := end
+			if off+length < readEnd {
+				readEnd = off + length
 			}
-
-			chunkOffset := readStart - currentLogicalOffset
-			chunkReadLen := readEnd - readStart
-
-			data, err := vlog.Read(ctx, chunk.VaddrOffset+chunkOffset, int(chunkReadLen))
+			data, err := vlog.Read(ctx, chunk.VaddrOffset+(readStart-cur), int(readEnd-readStart))
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, data...)
 		}
-
-		currentLogicalOffset += int64(chunk.LogicalLen)
-
-		// Optimization: Break early if we've fulfilled the read length
-		if currentLogicalOffset >= req.GetOffset()+req.GetLength() {
+		cur = end
+		if cur >= off+length {
 			break
 		}
 	}
-
-	return &pb.ReadResponse{Buffer: out}, nil
+	return out, nil
 }
 func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.GetattrResponse, error) {
 	entry, ok, err := s.db.StatPath(ctx, req.GetPath())
@@ -425,69 +429,6 @@ func (s *Server) provisionForPolicyLocked(ctx context.Context, pol meta.BucketPo
 	return s.provisionVlogLocked(ctx, pol.ProtectionScheme, pol.DataShards, pol.ParityShards)
 }
 
-func (s *Server) flushWriteOp(ctx context.Context, opID, acknowledged int64) error {
-	// Load by id through the prepared scan: this keeps the metadata API small
-	// while recovery uses the same durable operation listing.
-	ops, err := s.db.PreparedWriteOps(ctx)
-	if err != nil {
-		return err
-	}
-	var found meta.WriteOp
-	for _, candidate := range ops {
-		if candidate.ID == opID {
-			found = candidate
-			break
-		}
-	}
-	if found.ID == 0 {
-		return fmt.Errorf("write operation %d is not prepared", opID)
-	}
-	if err := s.finishPlannedWriteChunks(ctx, found); err != nil {
-		return err
-	}
-	if len(found.Tail) == 0 {
-		if acknowledged != found.AcknowledgedOffset {
-			return fmt.Errorf("write operation %d has no pending data", opID)
-		}
-		return nil
-	}
-	rd := bytes.NewReader(found.Tail)
-	chunker, err := chunkers.NewChunker("fastcdc", rd, nil)
-	if err != nil {
-		return err
-	}
-	chunks, err := s.db.WriteOpChunks(ctx, opID)
-	if err != nil {
-		return err
-	}
-	index := len(chunks)
-	for {
-		data, nextErr := chunker.Next()
-		if nextErr != nil && nextErr != io.EOF {
-			return nextErr
-		}
-		if len(data) > 0 {
-			owned := append([]byte(nil), data...)
-			vlogID, v, err := s.leasedVlogForWrite(ctx, opID, found.Path, len(owned))
-			if err != nil {
-				return err
-			}
-			hash := sha256.Sum256(owned)
-			if err := s.db.AppendWriteOpChunk(ctx, opID, meta.WriteOpChunk{Index: index, Data: owned, Hash: hash[:15], VlogID: vlogID, VaddrOffset: v.Length(), LogicalLen: len(owned)}); err != nil {
-				return err
-			}
-			if err := s.finishPlannedWriteChunks(ctx, found); err != nil {
-				return err
-			}
-			index++
-		}
-		if nextErr == io.EOF {
-			break
-		}
-	}
-	return s.db.UpdateWriteOpStream(ctx, opID, acknowledged, nil)
-}
-
 func (s *Server) finishPlannedWriteChunks(ctx context.Context, op meta.WriteOp) error {
 	chunks, err := s.db.WriteOpChunks(ctx, op.ID)
 	if err != nil {
@@ -555,10 +496,16 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 		return nil, err
 	}
 	if op.State != meta.WriteOpCommitted {
-		if err := s.flushWriteOp(ctx, op.ID, op.AcknowledgedOffset); err != nil {
+		if h.cache == nil {
+			if err := s.buildCache(ctx, h); err != nil {
+				return nil, err
+			}
+		}
+		placements, err := s.finalizeCache(ctx, h)
+		if err != nil {
 			return nil, err
 		}
-		if _, err := s.db.CommitWriteOp(ctx, op.ID, time.Now().UnixNano()); err != nil {
+		if _, err := s.db.CommitWriteOpVersion(ctx, op.ID, h.path, time.Now().UnixNano(), placements); err != nil {
 			return nil, fmt.Errorf("publish write operation: %w", err)
 		}
 	}
@@ -566,6 +513,256 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 	delete(s.handles, req.GetHandle())
 	s.handlesMu.Unlock()
 	return &pb.CloseResponse{}, nil
+}
+
+// buildCache loads the base version open at this handle and constructs its write
+// cache. The chunk-index cursor resumes after any chunks a prior attempt already
+// reserved for the operation, so a recovered handle keeps planned indexes unique.
+func (s *Server) buildCache(ctx context.Context, h *FileHandle) error {
+	base, err := s.db.FileVersionChunks(ctx, h.id)
+	if err != nil {
+		return err
+	}
+	existing, err := s.db.WriteOpChunks(ctx, h.writeOpID)
+	if err != nil {
+		return err
+	}
+	h.cache = newWriteCache(base, s.readChunksAt, len(existing))
+	return nil
+}
+
+// spillCache drains the cache's contiguous dirty prefix to durable chunks while
+// it exceeds the spill threshold, bounding per-handle memory on a large append.
+// The caller holds the operation lock.
+func (s *Server) spillCache(ctx context.Context, h *FileHandle) error {
+	for {
+		data := h.cache.spillPrefix()
+		if data == nil {
+			return nil
+		}
+		placements, err := s.storeChunks(ctx, h, data)
+		if err != nil {
+			return err
+		}
+		h.cache.commitSpill(placements, int64(len(data)))
+	}
+}
+
+// storeChunks FastCDC-chunks a materialized byte window and stores each chunk
+// durably (or reuses an existing one by content hash), returning the ordered
+// placements. The chunks tile the input exactly, so their logical lengths sum to
+// len(data).
+func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([]meta.ChunkPlacement, error) {
+	chunker, err := chunkers.NewChunker("fastcdc", bytes.NewReader(data), nil)
+	if err != nil {
+		return nil, err
+	}
+	var placements []meta.ChunkPlacement
+	for {
+		chunk, nextErr := chunker.Next()
+		if nextErr != nil && nextErr != io.EOF {
+			return nil, nextErr
+		}
+		if len(chunk) > 0 {
+			p, err := s.storeChunk(ctx, h, append([]byte(nil), chunk...))
+			if err != nil {
+				return nil, err
+			}
+			placements = append(placements, p)
+		}
+		if nextErr == io.EOF {
+			break
+		}
+	}
+	return placements, nil
+}
+
+// storeChunk makes one content-defined chunk durable and returns its placement.
+// A chunk whose hash already exists is reused outright (dedup); otherwise its
+// bytes are appended to a leased vlog under the operation and committed, reusing
+// the existing write_op_chunk + vlog-lease durability machinery.
+func (s *Server) storeChunk(ctx context.Context, h *FileHandle, data []byte) (meta.ChunkPlacement, error) {
+	sum := sha256.Sum256(data)
+	hash := sum[:15]
+	if p, ok, err := s.db.ChunkByHash(ctx, hash); err != nil {
+		return meta.ChunkPlacement{}, err
+	} else if ok {
+		return p, nil
+	}
+	vlogID, v, err := s.leasedVlogForWrite(ctx, h.writeOpID, h.path, len(data))
+	if err != nil {
+		return meta.ChunkPlacement{}, err
+	}
+	vaddr := v.Length()
+	idx := h.cache.nextChunkIdx
+	h.cache.nextChunkIdx++
+	if err := s.db.AppendWriteOpChunk(ctx, h.writeOpID, meta.WriteOpChunk{
+		Index: idx, Data: data, Hash: hash, VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data),
+	}); err != nil {
+		return meta.ChunkPlacement{}, err
+	}
+	if err := s.durableAppendChunk(ctx, h.writeOpID, idx, vlogID, vaddr, data); err != nil {
+		return meta.ChunkPlacement{}, err
+	}
+	return meta.ChunkPlacement{Hash: append([]byte(nil), hash...), VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data), CompressedLen: len(data)}, nil
+}
+
+// durableAppendChunk seals one reserved chunk's bytes into its leased vlog and
+// marks it durable -- the single-chunk form of finishPlannedWriteChunks.
+func (s *Server) durableAppendChunk(ctx context.Context, opID int64, idx int, vlogID uint32, vaddr int64, data []byte) error {
+	s.vlogMu.Lock()
+	v := s.vlogs[vlogID]
+	s.vlogMu.Unlock()
+	if v == nil {
+		return fmt.Errorf("leased vlog %d is not mounted", vlogID)
+	}
+	ready, err := s.CommitReady(ctx, vlogID)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return fmt.Errorf("vlog %d is not commit-ready", vlogID)
+	}
+	if err := v.EnsureWrite(ctx, vaddr, data); err != nil {
+		return err
+	}
+	if err := v.Commit(ctx, opID); err != nil {
+		return err
+	}
+	if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
+		return err
+	}
+	return s.db.MarkWriteOpChunkDurable(ctx, opID, idx)
+}
+
+// finalizeCache produces the new version's ordered placement list by the
+// dirty-window splice: the settled prefix verbatim, then untouched base chunks
+// reused by hash, with only the modified windows materialized and re-chunked.
+// Window boundaries are real base-chunk boundaries, so content-defined boundary
+// shifts stay contained to the window and untouched neighbors round-trip
+// byte-identical (and dedup-identical). The caller holds the operation lock.
+func (s *Server) finalizeCache(ctx context.Context, h *FileHandle) ([]meta.ChunkPlacement, error) {
+	c := h.cache
+	c.mu.Lock()
+	base := c.base
+	baseLen := c.baseLen
+	settled := append([]meta.ChunkPlacement(nil), c.settled...)
+	settledLen := c.settledLen
+	length := c.length
+	spans := append([]span(nil), c.spans...)
+	c.mu.Unlock()
+
+	result := append([]meta.ChunkPlacement(nil), settled...)
+
+	type bchunk struct {
+		start, end int64
+		p          meta.ChunkPlacement
+	}
+	var bchunks []bchunk
+	var cur int64
+	for _, p := range base {
+		end := cur + int64(p.LogicalLen)
+		if end > settledLen && cur < baseLen {
+			bchunks = append(bchunks, bchunk{start: cur, end: end, p: p})
+		}
+		cur = end
+	}
+	spanOverlaps := func(a, b int64) bool {
+		for _, sp := range spans {
+			if sp.start < b && sp.end() > a {
+				return true
+			}
+		}
+		return false
+	}
+	isClean := func(bc bchunk) bool {
+		return bc.start >= settledLen && bc.end <= baseLen && !spanOverlaps(bc.start, bc.end)
+	}
+
+	pos := settledLen
+	for pos < length {
+		reused := false
+		for _, bc := range bchunks {
+			if bc.start == pos && isClean(bc) {
+				result = append(result, bc.p)
+				pos = bc.end
+				reused = true
+				break
+			}
+		}
+		if reused {
+			continue
+		}
+		// Dirty window: from pos to the start of the next reusable clean base
+		// chunk (a real boundary), or to length.
+		windowEnd := length
+		for _, bc := range bchunks {
+			if bc.start > pos && isClean(bc) {
+				windowEnd = bc.start
+				break
+			}
+		}
+		data, err := c.ReadAt(ctx, pos, windowEnd-pos)
+		if err != nil {
+			return nil, err
+		}
+		placements, err := s.storeChunks(ctx, h, data)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, placements...)
+		pos = windowEnd
+	}
+	return result, nil
+}
+
+func (s *Server) Truncate(ctx context.Context, req *pb.TruncateRequest) (*pb.TruncateResponse, error) {
+	if req.GetSize() < 0 {
+		return nil, fmt.Errorf("negative truncate size")
+	}
+	// An open write handle truncates its cache in place; the new size takes effect
+	// at the handle's Close.
+	if req.GetHandle() != 0 {
+		s.handlesMu.Lock()
+		h, ok := s.handles[req.GetHandle()]
+		s.handlesMu.Unlock()
+		if !ok {
+			return nil, fmt.Errorf("invalid handle")
+		}
+		if h.snapshotID != 0 {
+			return nil, fmt.Errorf("snapshot handles are read-only")
+		}
+		if err := s.ensureWriteOperation(ctx, h, req.GetHandle()); err != nil {
+			return nil, err
+		}
+		mu := s.writeOperationLock(h.writeOpID)
+		mu.Lock()
+		defer mu.Unlock()
+		if h.cache == nil {
+			if err := s.buildCache(ctx, h); err != nil {
+				return nil, err
+			}
+		}
+		h.cache.Truncate(req.GetSize())
+		return &pb.TruncateResponse{}, nil
+	}
+
+	// No handle: a truncate(2) by path. Open a transient write operation, apply
+	// the size, and publish it immediately.
+	if req.GetPath() == "" {
+		return nil, fmt.Errorf("truncate requires a handle or path")
+	}
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: req.GetPath(), OperationKey: req.GetOperationKey()})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.Truncate(ctx, &pb.TruncateRequest{Handle: open.GetHandle(), Size: req.GetSize()}); err != nil {
+		return nil, err
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle(), IdempotencyKey: req.GetOperationKey()}); err != nil {
+		return nil, err
+	}
+	return &pb.TruncateResponse{}, nil
 }
 
 // Vlog Operations

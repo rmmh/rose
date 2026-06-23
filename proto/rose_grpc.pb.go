@@ -22,6 +22,7 @@ const (
 	Rose_Open_FullMethodName              = "/rose.v1.Rose/Open"
 	Rose_Write_FullMethodName             = "/rose.v1.Rose/Write"
 	Rose_Read_FullMethodName              = "/rose.v1.Rose/Read"
+	Rose_Truncate_FullMethodName          = "/rose.v1.Rose/Truncate"
 	Rose_Close_FullMethodName             = "/rose.v1.Rose/Close"
 	Rose_Getattr_FullMethodName           = "/rose.v1.Rose/Getattr"
 	Rose_Unlink_FullMethodName            = "/rose.v1.Rose/Unlink"
@@ -56,6 +57,7 @@ type RoseClient interface {
 	Open(ctx context.Context, in *OpenRequest, opts ...grpc.CallOption) (*OpenResponse, error)
 	Write(ctx context.Context, in *WriteRequest, opts ...grpc.CallOption) (*WriteResponse, error)
 	Read(ctx context.Context, in *ReadRequest, opts ...grpc.CallOption) (*ReadResponse, error)
+	Truncate(ctx context.Context, in *TruncateRequest, opts ...grpc.CallOption) (*TruncateResponse, error)
 	Close(ctx context.Context, in *CloseRequest, opts ...grpc.CallOption) (*CloseResponse, error)
 	Getattr(ctx context.Context, in *GetattrRequest, opts ...grpc.CallOption) (*GetattrResponse, error)
 	Unlink(ctx context.Context, in *UnlinkRequest, opts ...grpc.CallOption) (*UnlinkResponse, error)
@@ -118,6 +120,16 @@ func (c *roseClient) Read(ctx context.Context, in *ReadRequest, opts ...grpc.Cal
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReadResponse)
 	err := c.cc.Invoke(ctx, Rose_Read_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *roseClient) Truncate(ctx context.Context, in *TruncateRequest, opts ...grpc.CallOption) (*TruncateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TruncateResponse)
+	err := c.cc.Invoke(ctx, Rose_Truncate_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -372,6 +384,7 @@ type RoseServer interface {
 	Open(context.Context, *OpenRequest) (*OpenResponse, error)
 	Write(context.Context, *WriteRequest) (*WriteResponse, error)
 	Read(context.Context, *ReadRequest) (*ReadResponse, error)
+	Truncate(context.Context, *TruncateRequest) (*TruncateResponse, error)
 	Close(context.Context, *CloseRequest) (*CloseResponse, error)
 	Getattr(context.Context, *GetattrRequest) (*GetattrResponse, error)
 	Unlink(context.Context, *UnlinkRequest) (*UnlinkResponse, error)
@@ -418,6 +431,9 @@ func (UnimplementedRoseServer) Write(context.Context, *WriteRequest) (*WriteResp
 }
 func (UnimplementedRoseServer) Read(context.Context, *ReadRequest) (*ReadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Read not implemented")
+}
+func (UnimplementedRoseServer) Truncate(context.Context, *TruncateRequest) (*TruncateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Truncate not implemented")
 }
 func (UnimplementedRoseServer) Close(context.Context, *CloseRequest) (*CloseResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Close not implemented")
@@ -562,6 +578,24 @@ func _Rose_Read_Handler(srv interface{}, ctx context.Context, dec func(interface
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RoseServer).Read(ctx, req.(*ReadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rose_Truncate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TruncateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoseServer).Truncate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rose_Truncate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoseServer).Truncate(ctx, req.(*TruncateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1016,6 +1050,10 @@ var Rose_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Read",
 			Handler:    _Rose_Read_Handler,
+		},
+		{
+			MethodName: "Truncate",
+			Handler:    _Rose_Truncate_Handler,
 		},
 		{
 			MethodName: "Close",

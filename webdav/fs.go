@@ -106,6 +106,11 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 		if err != nil {
 			return nil, err
 		}
+		// A PUT replaces the whole resource: truncate any prior content to zero so
+		// a shorter body does not leave a stale tail behind.
+		if _, err := f.srv.Truncate(ctx, &pb.TruncateRequest{Handle: resp.GetHandle(), Size: 0}); err != nil {
+			return nil, err
+		}
 		return &roseFile{ctx: ctx, srv: f.srv, path: path, handle: resp.GetHandle(), writing: true}, nil
 	}
 

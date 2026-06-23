@@ -20,6 +20,9 @@ func writeServerFileInternal(t *testing.T, s *Server, path string, data []byte) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.Truncate(ctx, &pb.TruncateRequest{Handle: open.GetHandle(), Size: 0}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: data}); err != nil {
 		t.Fatal(err)
 	}

@@ -51,6 +51,9 @@ func writeFile(t *testing.T, client pb.RoseClient, path string, data []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := client.Truncate(ctx, &pb.TruncateRequest{Handle: open.GetHandle(), Size: 0}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: data}); err != nil {
 		t.Fatal(err)
 	}
@@ -666,6 +669,9 @@ func writeServerFile(t *testing.T, s *server.Server, path string, data []byte) {
 	ctx := context.Background()
 	open, err := s.Open(ctx, &pb.OpenRequest{Path: path})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Truncate(ctx, &pb.TruncateRequest{Handle: open.GetHandle(), Size: 0}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: data}); err != nil {

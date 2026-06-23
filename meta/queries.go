@@ -290,11 +290,16 @@ func fileChunks(ctx context.Context, tx *sql.Tx, fileID int64) ([]byte, error) {
 	return chunks, err
 }
 
-// CommitFile atomically publishes a new immutable file version and transfers
-// the namespace reference from the previous head. Chunk rows are inserted and
-// referenced inside the same transaction, so no committed chunk is ever durably
-// visible at refcount 0 in the window before it is referenced.
-func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, placements []ChunkPlacement) (int64, error) {
+// publishFileVersion inserts a new immutable file version from an explicit
+// ordered placement list and transfers the namespace reference from the previous
+// head, all inside tx. Chunk rows are inserted and referenced in the same
+// transaction, so no committed chunk is ever durably visible at refcount 0 in
+// the window before it is referenced. Placements may freely mix freshly stored
+// chunks and reused (already-referenced) ones; insertChunk is ON CONFLICT
+// DO NOTHING and the refcount transfer keeps unchanged chunks live across the
+// version bump. It is the shared body of CommitFile, CommitWriteOp, and
+// CommitWriteOpVersion.
+func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int64, placements []ChunkPlacement) (int64, error) {
 	chunks := make([]byte, 0, len(placements)*19)
 	lenBytes := make([]byte, 4)
 	for _, p := range placements {
@@ -303,12 +308,6 @@ func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, placement
 		chunks = append(chunks, lenBytes...)
 	}
 
-	tx, err := d.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("begin file commit: %w", err)
-	}
-	defer tx.Rollback()
-
 	for _, p := range placements {
 		if err := insertChunk(ctx, tx, p); err != nil {
 			return 0, fmt.Errorf("insert chunk: %w", err)
@@ -316,7 +315,7 @@ func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, placement
 	}
 
 	var oldID int64
-	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", path).Scan(&oldID)
+	err := tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", path).Scan(&oldID)
 	if err != nil && err != sql.ErrNoRows {
 		return 0, fmt.Errorf("load file head: %w", err)
 	}
@@ -343,11 +342,26 @@ func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, placement
 	}
 	parent, name := splitPath(path)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id, parent, name) VALUES (?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id`, path, id, parent, name); err != nil {
+		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id, parent = excluded.parent, name = excluded.name`, path, id, parent, name); err != nil {
 		return 0, fmt.Errorf("publish file head: %w", err)
 	}
 	if err := ensureDirs(ctx, tx, path, mtime); err != nil {
 		return 0, fmt.Errorf("ensure parent directories: %w", err)
+	}
+	return id, nil
+}
+
+// CommitFile atomically publishes a new immutable file version and transfers
+// the namespace reference from the previous head.
+func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, placements []ChunkPlacement) (int64, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin file commit: %w", err)
+	}
+	defer tx.Rollback()
+	id, err := publishFileVersion(ctx, tx, path, mtime, placements)
+	if err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit file version: %w", err)
@@ -395,6 +409,47 @@ func (d *DB) GCChunks(ctx context.Context) ([]ChunkPlacement, error) {
 	return collected, nil
 }
 
+// FileVersionChunks returns the ordered chunk placements of a file version: each
+// chunk's content hash, its logical length, and where its bytes live in a vlog.
+// It is the read side of the splice path -- the base placement list the write
+// cache overlays its pending modifications onto. A zero fileID (a path with no
+// committed version yet) yields an empty list.
+func (d *DB) FileVersionChunks(ctx context.Context, fileID int64) ([]ChunkPlacement, error) {
+	if fileID == 0 {
+		return nil, nil
+	}
+	var blob []byte
+	if err := d.db.QueryRowContext(ctx, "SELECT chunks FROM file WHERE id = ?", fileID).Scan(&blob); err != nil {
+		return nil, err
+	}
+	var out []ChunkPlacement
+	for i := 0; i+19 <= len(blob); i += 19 {
+		hash := append([]byte(nil), blob[i:i+15]...)
+		p := ChunkPlacement{Hash: hash, LogicalLen: int(binary.LittleEndian.Uint32(blob[i+15 : i+19]))}
+		err := d.db.QueryRowContext(ctx, "SELECT vlog_id, vaddr_offset, compressed_len FROM chunk WHERE hash = ?", hash).Scan(&p.VlogID, &p.VaddrOffset, &p.CompressedLen)
+		if err != nil {
+			return nil, fmt.Errorf("placement for chunk %x: %w", hash, err)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// ChunkByHash looks up the placement of an already-stored chunk by its content
+// hash. It backs dedup during the splice: a freshly recomputed chunk whose hash
+// is already present reuses that placement instead of writing its bytes again.
+func (d *DB) ChunkByHash(ctx context.Context, hash []byte) (ChunkPlacement, bool, error) {
+	p := ChunkPlacement{Hash: append([]byte(nil), hash...)}
+	err := d.db.QueryRowContext(ctx, "SELECT vlog_id, vaddr_offset, logical_len, compressed_len FROM chunk WHERE hash = ?", hash).Scan(&p.VlogID, &p.VaddrOffset, &p.LogicalLen, &p.CompressedLen)
+	if err == sql.ErrNoRows {
+		return ChunkPlacement{}, false, nil
+	}
+	if err != nil {
+		return ChunkPlacement{}, false, err
+	}
+	return p, true, nil
+}
+
 func (d *DB) GetFileSize(ctx context.Context, path string) (int64, error) {
 	var chunks []byte
 	err := d.db.QueryRowContext(ctx, `SELECT file.chunks FROM file_head
@@ -410,36 +465,6 @@ func (d *DB) GetFileSize(ctx context.Context, path string) (int64, error) {
 		size += int64(binary.LittleEndian.Uint32(chunks[i+15 : i+19]))
 	}
 	return size, nil
-}
-
-type FileChunkInfo struct {
-	VlogID      uint32
-	VaddrOffset int64
-	LogicalLen  int
-}
-
-func (d *DB) GetFileChunks(ctx context.Context, fileID int64) ([]FileChunkInfo, error) {
-	var chunksBlob []byte
-	err := d.db.QueryRowContext(ctx, "SELECT chunks FROM file WHERE id = ?", fileID).Scan(&chunksBlob)
-	if err != nil {
-		return nil, err
-	}
-
-	var chunks []FileChunkInfo
-	for i := 0; i+19 <= len(chunksBlob); i += 19 {
-		hash := chunksBlob[i : i+15]
-		logicalLen := binary.LittleEndian.Uint32(chunksBlob[i+15 : i+19])
-
-		var info FileChunkInfo
-		info.LogicalLen = int(logicalLen)
-
-		err = d.db.QueryRowContext(ctx, "SELECT vlog_id, vaddr_offset FROM chunk WHERE hash = ?", hash).Scan(&info.VlogID, &info.VaddrOffset)
-		if err != nil {
-			return nil, err
-		}
-		chunks = append(chunks, info)
-	}
-	return chunks, nil
 }
 
 func (d *DB) CreateSnapshot(ctx context.Context, name string, createdAt int64) (uint64, error) {

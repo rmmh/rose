@@ -3,7 +3,6 @@ package meta
 import (
 	"context"
 	"database/sql"
-	"encoding/binary"
 	"fmt"
 	"time"
 )
@@ -291,46 +290,49 @@ func (d *DB) CommitWriteOp(ctx context.Context, opID int64, mtime int64) (int64,
 		return 0, err
 	}
 	rows.Close()
-	chunks := make([]byte, 0, len(placements)*19)
-	lenBytes := make([]byte, 4)
-	for _, p := range placements {
-		if err := insertChunk(ctx, tx, p); err != nil {
-			return 0, err
-		}
-		chunks = append(chunks, p.Hash...)
-		binary.LittleEndian.PutUint32(lenBytes, uint32(p.LogicalLen))
-		chunks = append(chunks, lenBytes...)
-	}
-	var oldID int64
-	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", op.Path).Scan(&oldID)
-	if err != nil && err != sql.ErrNoRows {
-		return 0, err
-	}
-	if err == nil {
-		oldChunks, err := fileChunks(ctx, tx, oldID)
-		if err != nil {
-			return 0, err
-		}
-		if err := adjustChunkRefs(ctx, tx, oldChunks, -1); err != nil {
-			return 0, err
-		}
-	}
-	if err := adjustChunkRefs(ctx, tx, chunks, 1); err != nil {
-		return 0, err
-	}
-	res, err := tx.ExecContext(ctx, "INSERT INTO file (path, mtime, chunks) VALUES (?, ?, ?)", op.Path, mtime, chunks)
+	fileID, err := publishFileVersion(ctx, tx, op.Path, mtime, placements)
 	if err != nil {
 		return 0, err
 	}
-	fileID, err := res.LastInsertId()
+	if _, err := tx.ExecContext(ctx, "UPDATE write_op SET state = ?, file_id = ?, tail = X'' WHERE id = ?", WriteOpCommitted, fileID, opID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM vlog_lease WHERE write_op_id = ?", opID); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return fileID, nil
+}
+
+// CommitWriteOpVersion publishes an explicit ordered placement list as the
+// operation's committed file version, then marks the operation committed and
+// releases its leases in the same metadata transaction. Unlike CommitWriteOp it
+// does not derive the version from the write_op_chunk rows: the splice path
+// computes the final placement list directly (a mix of reused base chunks and
+// freshly stored window chunks), and the bytes of any new chunk are already
+// durable in their vlogs before this is called. Repeating it after commit is a
+// no-op that returns the published file id, keeping Close idempotent by key.
+func (d *DB) CommitWriteOpVersion(ctx context.Context, opID int64, path string, mtime int64, placements []ChunkPlacement) (int64, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	parent, name := splitPath(op.Path)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id, parent, name) VALUES (?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id, parent = excluded.parent, name = excluded.name`, op.Path, fileID, parent, name); err != nil {
+	defer tx.Rollback()
+	var state string
+	var fileID int64
+	if err := tx.QueryRowContext(ctx, "SELECT state, file_id FROM write_op WHERE id = ?", opID).Scan(&state, &fileID); err != nil {
 		return 0, err
 	}
-	if err := ensureDirs(ctx, tx, op.Path, mtime); err != nil {
+	if state == WriteOpCommitted {
+		return fileID, nil
+	}
+	if state != WriteOpPrepared {
+		return 0, fmt.Errorf("write operation %d is %s", opID, state)
+	}
+	fileID, err = publishFileVersion(ctx, tx, path, mtime, placements)
+	if err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE write_op SET state = ?, file_id = ?, tail = X'' WHERE id = ?", WriteOpCommitted, fileID, opID); err != nil {

@@ -179,18 +179,27 @@ var (
 	_ = (fs.NodeSetattrer)((*RoseFile)(nil))
 )
 
-// Setattr accepts metadata changes (chmod/chown/utimes) as no-ops and tolerates
-// the size set that O_TRUNC issues -- without a Setattr handler the kernel's
-// truncate-on-open fails with ENOTSUP. Arbitrary truncation of existing data is
-// not supported by the append-only first pass; the reported size just reflects
-// the request so open(O_TRUNC) of a fresh file succeeds.
+// Setattr accepts metadata changes (chmod/chown/utimes) as no-ops and applies a
+// size change (ftruncate, or the O_TRUNC the kernel issues at open) to the file
+// via the server truncate path: through the open write handle when one is
+// supplied, otherwise as a truncate(2) by path that publishes a resized version.
 func (f *RoseFile) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	resp, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: f.path})
 	out.Mode = fuse.S_IFREG | 0644
 	out.Owner = mountOwner
 	if size, ok := in.GetSize(); ok {
+		req := &pb.TruncateRequest{Path: f.path, Size: int64(size)}
+		if h, isRose := fh.(*roseHandle); isRose {
+			req.Handle = h.handle
+		} else {
+			req.OperationKey = fmt.Sprintf("fuse-truncate-%s-%d-%d", f.path, time.Now().UnixNano(), opSeq.Add(1))
+		}
+		if _, err := f.srv.Truncate(ctx, req); err != nil {
+			return opErrno(ctx, err)
+		}
 		out.Size = size
-	} else if err == nil {
+		return 0
+	}
+	if resp, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: f.path}); err == nil {
 		out.Size = uint64(resp.Size)
 	}
 	return 0
