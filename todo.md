@@ -302,10 +302,13 @@ replicated staging vlog and a maintenance-pass promotion step.
     (RunMaintenanceOnce already reprotects DiskFailed disks) regenerates every
     shard it held onto a healthy disk -- no operator action.
   - An individual missing plog file inside an otherwise-accessible directory is
-    deliberately NOT a disk failure: vlog files can be removed out-of-band (e.g.
-    tearing down a bucket's vlogs), so that shard is stubbed offline and the disk
-    stays active, serving its other shards. Reads fall through to surviving
-    redundancy; the degraded shard is not auto-reprotected (the disk persists).
+    deliberately NOT a disk failure: the disk stays active, serving its other
+    shards, and that shard is stubbed offline. The maintenance pass's
+    RepairOfflineShards then regenerates it from surviving redundancy onto a
+    placement-allowed disk and clears the stub -- restoring full protection at
+    shard granularity without condemning the disk. (A genuine teardown goes
+    through RetireVlog, which deletes the plog catalog rows, so a cataloged-but-
+    missing file is a real loss to repair, not an out-of-band teardown to ignore.)
   The root cause was OpenPlog's O_CREATE silently resurrecting a missing shard as
   an empty file (which then either tripped ReconcileShardLengths' "target beyond
   length" or, for an empty vlog, mounted a bogus zero-length shard reads would
@@ -316,11 +319,19 @@ replicated staging vlog and a maintenance-pass promotion step.
   too). Covered by TestRecoverStubsSingleMissingPlogFile (disk persists active),
   TestRecoverFailsWhollyMissingDisk, and TestRecoverFailedDiskGetsReprotected
   (end-to-end: boot-failed disk reprotected onto a spare in one maintenance pass).
-- Follow-up: an individual offline-stubbed shard (single out-of-band file loss)
-  has no automatic path back to full redundancy -- ScrubAndRepair errors on offline
-  shards, and reprotect is disk-keyed. A per-shard repair that regenerates an
-  offline hole would close this, if/when out-of-band single-file loss should
-  self-heal rather than persist degraded.
+- (done) An individual offline-stubbed shard (single out-of-band file loss) now
+  has an automatic path back to full redundancy. RepairOfflineShards (run every
+  maintenance pass, after reprotect) discovers offline shards from the catalog
+  (offlineShardsLocked over ListVlogPlogs x s.offlinePlogs) and regenerates each
+  from surviving redundancy via the same repairVlogShardsLocked path scrub-repair
+  uses -- onto a placement-allowed disk, clearing the offlinePlogs stub. It is
+  catalog-driven (no full byte scrub) so it is cheap to run on the interval and a
+  no-op when nothing is offline. offlinePlogClient no longer implements Scrub, so
+  Vlog.Scrub skips an offline shard (an availability, not integrity, condition)
+  instead of aborting the whole vlog; a deep ScrubAndRepair also folds offline
+  shards into its repair set via mergeShards. Covered by
+  TestRecoverStubbedShardGetsRepaired (end-to-end: a stubbed shard regenerated
+  onto a spare in one maintenance pass, disk stays active).
 - Still open: reverting a *failed* disk back to active across a cold restart
   relies on its original plogs still being openable; a disk failed for a genuinely
   gone directory cannot be reactivated (correctly -- the bytes are lost), only

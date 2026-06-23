@@ -87,6 +87,14 @@ func (s *Server) RunMaintenanceOnce(ctx context.Context) error {
 		// disks. Its failed state remains the durable retry signal.
 		recordErr(s.ReprotectDisk(ctx, diskID))
 	}
+	// Regenerate shards stubbed offline at recovery (their file went missing on a
+	// still-active disk, so reprotect — keyed on a failed disk — never sees them).
+	// Catalog-driven and a no-op when nothing is offline, so it is cheap to run
+	// every pass; it closes the loop on a single lost file restoring full
+	// redundancy without condemning the disk.
+	if _, err := s.RepairOfflineShards(ctx); err != nil {
+		recordErr(err)
+	}
 	_, err := s.Rebalance(ctx)
 	recordErr(err)
 	// Promote staged chunks into EC before reclamation: it reparents chunks out of

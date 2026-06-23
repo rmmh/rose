@@ -231,10 +231,11 @@ func (s *Server) GetDB() *meta.DB {
 // is marked failed durably, so it leaves placement and the maintenance driver
 // reprotects the shards it held onto healthy disks. An individual missing plog
 // file inside an otherwise-accessible disk is tolerated, not failed: that shard
-// mounts offline (it may have been removed out-of-band) while the disk keeps
-// serving its other shards. Either way the server boots degraded and the
-// surviving redundancy carries reads, rather than failing startup on the first
-// absent file.
+// mounts offline while the disk keeps serving its other shards, and the
+// maintenance pass's RepairOfflineShards regenerates it from surviving
+// redundancy onto a placement-allowed disk — restoring full protection without
+// condemning the disk. Either way the server boots degraded and the surviving
+// redundancy carries reads, rather than failing startup on the first absent file.
 func (s *Server) Recover(ctx context.Context) error {
 	// Declare configured disks in the durable catalog (idempotent) and adopt any
 	// non-active lifecycle state a prior run persisted, so a disk that was
@@ -661,12 +662,20 @@ func (s *Server) Scrub() ([]VlogScrub, error) {
 	return out, nil
 }
 
-// offlinePlogClient stands in for a shard whose backing plog is unreachable: its
-// disk is failed or on a failed node, so Recover never opened the file. Every
+// offlinePlogClient stands in for a shard whose backing plog is unreachable:
+// either its disk is failed or on a failed node (Recover never opened the file),
+// or its individual file went missing on an otherwise-active disk. Every
 // operation errors, which the redundancy layer treats as a missing shard (EC
-// reconstructs, DUPLICATE falls through) and reprotect regenerates from the
-// surviving copies. It lets a vlog mount with a hole instead of failing recovery
-// on the first dead disk.
+// reconstructs, DUPLICATE falls through). It lets a vlog mount with a hole
+// instead of failing recovery on the first dead disk; the hole is regenerated
+// either by reprotect (failed disk) or by the maintenance pass's offline-shard
+// repair (RepairOfflineShards), which restores full redundancy without
+// condemning a still-active disk.
+//
+// It deliberately does NOT implement scrubbablePlogClient: an offline shard is a
+// catalog/availability condition, not byte corruption, so Vlog.Scrub skips it
+// rather than aborting the whole vlog's scrub. RepairOfflineShards discovers it
+// from the catalog instead.
 type offlinePlogClient struct {
 	plogID uint32
 }
@@ -689,10 +698,6 @@ func (c offlinePlogClient) EnsureAppend(ctx context.Context, offset int64, data 
 
 func (c offlinePlogClient) Commit(ctx context.Context, txnID int64) error {
 	return c.err()
-}
-
-func (c offlinePlogClient) Scrub() (storage.ScrubResult, error) {
-	return storage.ScrubResult{}, c.err()
 }
 
 // Ensure the plog clients implement storage.PlogClient

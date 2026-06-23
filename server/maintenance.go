@@ -428,6 +428,15 @@ func (s *Server) repairOneVlogLocked(ctx context.Context, vlogID uint32) (scrubb
 			corrupt = append(corrupt, sh.Shard)
 		}
 	}
+	// Fold in shards stubbed offline at recovery (their file went missing on an
+	// otherwise-active disk). Scrub skips them — they are an availability, not an
+	// integrity, condition — so a deep ScrubAndRepair pass would not see them
+	// without this. They share the regenerate path with corrupt shards.
+	offline, err := s.offlineShardsLocked(ctx, vlogID)
+	if err != nil {
+		return scrubbed, 0, nil, err
+	}
+	corrupt = mergeShards(corrupt, offline)
 	if len(corrupt) == 0 {
 		return scrubbed, 0, nil, nil
 	}
@@ -521,6 +530,109 @@ func (s *Server) repairVlogShardsLocked(ctx context.Context, info meta.VlogInfo,
 		repaired++
 	}
 	return repaired, failures, nil
+}
+
+// RepairOfflineShards regenerates every shard stubbed offline at recovery — its
+// backing plog file gone on an otherwise-active disk — onto a placement-allowed
+// disk, restoring full redundancy without scrubbing live bytes. It is the
+// maintenance-pass counterpart to ScrubAndRepair for the missing-file case: a
+// still-active disk that silently dropped one shard is not condemned (its other
+// shards keep serving), but the lost shard no longer sits unprotected forever
+// with no path back to full redundancy. The work is catalog-driven (no full
+// read), so it is cheap enough to run every interval, and a no-op when nothing
+// is offline. Each repaired vlog runs under the same durable scrubrepair job as
+// ScrubAndRepair so a crash mid-repair resumes.
+func (s *Server) RepairOfflineShards(ctx context.Context) (ScrubRepairResult, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+
+	var res ScrubRepairResult
+	if len(s.offlinePlogs) == 0 {
+		return res, nil
+	}
+	ids := make([]uint32, 0, len(s.vlogs))
+	for id := range s.vlogs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	for _, id := range ids {
+		repaired, failures, err := s.repairOfflineShardsOneVlogLocked(ctx, id)
+		if err != nil {
+			return res, err
+		}
+		res.ShardsRepaired += repaired
+		res.Unrepairable = append(res.Unrepairable, failures...)
+	}
+	return res, nil
+}
+
+// repairOfflineShardsOneVlogLocked regenerates one vlog's offline shards from its
+// surviving redundancy, without the byte scrub ScrubAndRepair does. A vlog with
+// no offline shard touches no job (the common case stays cheap). The caller must
+// hold vlogMu.
+func (s *Server) repairOfflineShardsOneVlogLocked(ctx context.Context, vlogID uint32) (repaired int, failures []RepairFailure, err error) {
+	offline, err := s.offlineShardsLocked(ctx, vlogID)
+	if err != nil || len(offline) == 0 {
+		return 0, nil, err
+	}
+	info, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		return 0, nil, err
+	}
+	job, err := s.db.GetOrCreateScrubRepairJob(ctx, vlogID)
+	if err != nil {
+		return 0, nil, err
+	}
+	repaired, failures, err = s.repairVlogShardsLocked(ctx, info, offline)
+	if err != nil {
+		return repaired, failures, err
+	}
+	if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
+		return repaired, failures, err
+	}
+	return repaired, failures, nil
+}
+
+// offlineShardsLocked returns the shard indices of vlogID whose backing plog was
+// stubbed offline at recovery, read from the catalog's shard→plog mappings. The
+// caller must hold vlogMu.
+func (s *Server) offlineShardsLocked(ctx context.Context, vlogID uint32) ([]int, error) {
+	if len(s.offlinePlogs) == 0 {
+		return nil, nil
+	}
+	mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
+	if err != nil {
+		return nil, err
+	}
+	var offline []int
+	for _, m := range mappings {
+		if s.offlinePlogs[m.PlogID] {
+			offline = append(offline, m.ShardIndex)
+		}
+	}
+	return offline, nil
+}
+
+// mergeShards unions two shard-index lists, dropping duplicates, so a shard that
+// is both scrub-corrupt and offline (it cannot be, but the union stays correct)
+// is regenerated once. The result is sorted for deterministic repair order.
+func mergeShards(a, b []int) []int {
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[int]bool, len(a)+len(b))
+	out := make([]int, 0, len(a)+len(b))
+	for _, xs := range [][]int{a, b} {
+		for _, x := range xs {
+			if !seen[x] {
+				seen[x] = true
+				out = append(out, x)
+			}
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 // pickRepairDestinationLocked selects a placement-allowed disk to host a shard

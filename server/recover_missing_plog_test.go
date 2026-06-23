@@ -111,6 +111,120 @@ func TestRecoverStubsSingleMissingPlogFile(t *testing.T) {
 	}
 }
 
+// TestRecoverStubbedShardGetsRepaired closes the loop for the missing-file case:
+// a shard whose file vanished on an otherwise-active disk is stubbed offline at
+// recovery (the disk is NOT condemned), and the next maintenance pass regenerates
+// it from the surviving mirror onto a placement-allowed disk, clearing the
+// offline stub and restoring full redundancy with no operator action. This is the
+// gap the disk-keyed reprotect path could not reach.
+func TestRecoverStubbedShardGetsRepaired(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	disk1 := filepath.Join(dir, "disk1")
+	disk2 := filepath.Join(dir, "disk2")
+	disk3 := filepath.Join(dir, "disk3")
+	// Mirror across disks 1 and 2 (2-copy DUPLICATE); disk 3 is a free spare the
+	// repair can relocate the regenerated shard onto.
+	roots := map[uint32]string{1: disk1, 2: disk2, 3: disk3}
+	s1 := NewServerWithDiskRoots(db, roots)
+	s1.SetMaintenanceInterval(0)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 4096)
+	rand.New(rand.NewSource(31)).Read(payload)
+	writeServerFileInternal(t, s1, "/mirror/file", payload)
+
+	// Pick a non-staging DUPLICATE vlog and the shard-0 plog to lose.
+	vlogs, err := db.ListVlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vlogID, lostPlogID, lostDiskID uint32
+	for _, v := range vlogs {
+		if v.ProtectionScheme != "DUPLICATE" || v.IsStaging() {
+			continue
+		}
+		shardDisks, err := db.VlogShardDisks(ctx, v.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mappings, err := db.ListVlogPlogs(ctx, v.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mappings) < 2 {
+			continue
+		}
+		vlogID = v.ID
+		lostPlogID = mappings[0].PlogID
+		lostDiskID = shardDisks[0].DiskID
+		break
+	}
+	if vlogID == 0 {
+		t.Fatal("no DUPLICATE data vlog with a sibling copy found")
+	}
+	lostPath := s1.plogPath(lostDiskID, lostPlogID)
+	s1.CloseStorage()
+
+	// The shard's file vanishes while its disk stays reachable (active, working
+	// node): a genuine single-file media loss, not a whole-disk unplug.
+	if err := os.Remove(lostPath); err != nil {
+		t.Fatal(err)
+	}
+
+	s2 := NewServerWithDiskRoots(db, roots)
+	s2.SetMaintenanceInterval(0)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatalf("recover with a missing shard file should boot degraded, got: %v", err)
+	}
+	defer s2.CloseStorage()
+	if got := s2.DiskStates()[lostDiskID]; got != meta.DiskActive {
+		t.Fatalf("disk %d state = %q after one missing shard file, want %q", lostDiskID, got, meta.DiskActive)
+	}
+	if !s2.offlinePlogs[lostPlogID] {
+		t.Fatalf("plog %d should be stubbed offline after its file went missing", lostPlogID)
+	}
+
+	// One maintenance pass regenerates the offline shard from the surviving mirror.
+	if err := s2.RunMaintenanceOnce(ctx); err != nil {
+		t.Fatalf("maintenance pass: %v", err)
+	}
+
+	// The offline stub is cleared and the vlog no longer references the lost plog:
+	// its copy was regenerated onto a fresh plog, restoring two healthy copies.
+	if s2.offlinePlogs[lostPlogID] {
+		t.Fatalf("plog %d should no longer be offline after repair", lostPlogID)
+	}
+	mappings, err := db.ListVlogPlogs(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) < 2 {
+		t.Fatalf("vlog %d should still have two copies after repair, got %d", vlogID, len(mappings))
+	}
+	for _, m := range mappings {
+		if m.PlogID == lostPlogID {
+			t.Fatalf("vlog %d still references the lost plog %d after repair", vlogID, lostPlogID)
+		}
+	}
+	// Every surviving shard is backed by an open, reachable plog (none offline).
+	for _, m := range mappings {
+		if _, ok := s2.plogs[m.PlogID]; !ok {
+			t.Fatalf("vlog %d shard %d plog %d has no open handle after repair", vlogID, m.ShardIndex, m.PlogID)
+		}
+	}
+	if got := readServerFileInternal(t, s2, "/mirror/file"); !bytes.Equal(got, payload) {
+		t.Fatal("payload changed after repairing the offline shard")
+	}
+}
+
 // TestRecoverFailsWhollyMissingDisk is the disk-granularity case: an entire disk
 // root is gone (the disk is unplugged, not yet marked failed in the catalog).
 // The disk must be marked failed and every shard on it stubbed offline -- the
