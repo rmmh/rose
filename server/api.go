@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	chunkers "github.com/PlakarKorp/go-cdc-chunkers"
@@ -21,8 +22,12 @@ import (
 )
 
 type FileHandle struct {
-	id         int64
-	path       string
+	id int64
+	// pathPtr is the namespace path the handle commits to. It is read on the
+	// write path without the handle's write-op lock and mutated by Rename (to
+	// retarget an open handle to its new name), so access goes through atomic
+	// load/store to stay race-free.
+	pathPtr    atomic.Pointer[string]
 	snapshotID uint64
 	writeOpID  int64
 	writeKey   string
@@ -31,6 +36,15 @@ type FileHandle struct {
 	// spliced placement list at Close. Nil for read-only and snapshot handles.
 	cache *writeCache
 }
+
+func (h *FileHandle) path() string {
+	if p := h.pathPtr.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+func (h *FileHandle) setPath(path string) { h.pathPtr.Store(&path) }
 
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	// Simple implementation
@@ -49,10 +63,8 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	hid := s.handleCounter
 	s.handleCounter++
 
-	h := &FileHandle{
-		id:   id,
-		path: path,
-	}
+	h := &FileHandle{id: id}
+	h.setPath(path)
 	if req.GetOperationKey() != "" {
 		op, err := s.db.CreateWriteOp(ctx, req.GetOperationKey(), path)
 		if err != nil {
@@ -96,7 +108,9 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 	defer s.handlesMu.Unlock()
 	hid := s.handleCounter
 	s.handleCounter++
-	s.handles[hid] = &FileHandle{id: id, path: req.GetPath(), snapshotID: req.GetSnapshotId()}
+	hs := &FileHandle{id: id, snapshotID: req.GetSnapshotId()}
+	hs.setPath(req.GetPath())
+	s.handles[hid] = hs
 	return &pb.OpenResponse{Handle: hid}, nil
 }
 
@@ -143,8 +157,8 @@ func (s *Server) retargetOpenHandles(oldPath, newPath string) bool {
 	defer s.handlesMu.Unlock()
 	found := false
 	for _, h := range s.handles {
-		if h.path == oldPath {
-			h.path = newPath
+		if h.path() == oldPath {
+			h.setPath(newPath)
 			found = true
 		}
 	}
@@ -435,7 +449,7 @@ func (s *Server) ensureWriteOperation(ctx context.Context, h *FileHandle, handle
 		return nil
 	}
 	key := fmt.Sprintf("legacy-handle-%d", handle)
-	op, err := s.db.CreateWriteOp(ctx, key, h.path)
+	op, err := s.db.CreateWriteOp(ctx, key, h.path())
 	if err != nil {
 		return err
 	}
@@ -569,7 +583,7 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 		if err != nil {
 			return nil, err
 		}
-		if _, err := s.db.CommitWriteOpVersion(ctx, op.ID, h.path, time.Now().UnixNano(), placements); err != nil {
+		if _, err := s.db.CommitWriteOpVersion(ctx, op.ID, h.path(), time.Now().UnixNano(), placements); err != nil {
 			return nil, fmt.Errorf("publish write operation: %w", err)
 		}
 	}
@@ -679,7 +693,7 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 	} else if ok {
 		return p, nil, nil
 	}
-	vlogID, _, err := s.leasedVlogForWriteReserved(ctx, h.writeOpID, h.path, len(data), reserved)
+	vlogID, _, err := s.leasedVlogForWriteReserved(ctx, h.writeOpID, h.path(), len(data), reserved)
 	if err != nil {
 		return meta.ChunkPlacement{}, nil, err
 	}
