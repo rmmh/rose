@@ -2,14 +2,22 @@ package fuse
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"os"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
 )
+
+// opSeq makes each Create's write-operation key unique within a process so a
+// fresh file always gets its own idempotent write operation.
+var opSeq atomic.Uint64
 
 // mountOwner attributes every node to the process that mounted the filesystem,
 // so the mounting user can read and write it (FUSE nodes default to uid/gid 0).
@@ -22,7 +30,7 @@ func opErrno(ctx context.Context, err error) syscall.Errno {
 	if ctx.Err() != nil {
 		return syscall.EINTR
 	}
-	_ = err
+	slog.Error("fuse op failed", "err", err)
 	return syscall.EIO
 }
 
@@ -142,7 +150,11 @@ func (d *RoseDir) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 
 func (d *RoseDir) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	childPath := join(d.path, name)
-	resp, err := d.srv.Open(ctx, &pb.OpenRequest{Path: childPath})
+	// Bind a write operation up front so the file is published on Close even if
+	// nothing is written (e.g. `touch`); otherwise a zero-write handle closes
+	// without ever creating a file head.
+	key := fmt.Sprintf("fuse-create-%s-%d-%d", childPath, time.Now().UnixNano(), opSeq.Add(1))
+	resp, err := d.srv.Open(ctx, &pb.OpenRequest{Path: childPath, OperationKey: key})
 	if err != nil {
 		return nil, nil, 0, opErrno(ctx, err)
 	}
@@ -193,13 +205,19 @@ func (f *RoseFile) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 }
 
 func (f *RoseFile) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	out.Mode = fuse.S_IFREG | 0644
+	out.Owner = mountOwner
 	resp, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: f.path})
 	if err != nil {
-		return opErrno(ctx, err)
+		if ctx.Err() != nil {
+			return syscall.EINTR
+		}
+		// The node exists as an open inode but its file head is not yet published
+		// (a freshly created file before Close commits it). Report it as empty
+		// rather than failing the stat the kernel issues right after Create.
+		return 0
 	}
-	out.Mode = fuse.S_IFREG | 0644
 	out.Size = uint64(resp.Size)
-	out.Owner = mountOwner
 	return 0
 }
 
@@ -227,7 +245,6 @@ func (h *roseHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 }
 
 func (h *roseHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
-	// First pass assumes append; the server tracks the acknowledged offset.
 	if _, err := h.srv.Write(ctx, &pb.WriteRequest{Handle: h.handle, Buffer: data, Offset: off}); err != nil {
 		return 0, opErrno(ctx, err)
 	}

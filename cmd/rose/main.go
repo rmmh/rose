@@ -102,7 +102,12 @@ func main() {
 		fuseRoot := rosefuse.NewRoseRoot(roseServer)
 		serverOptions := &fs.Options{
 			MountOptions: fuse.MountOptions{
-				Debug: true,
+				FsName: "rose",
+				Debug:  true,
+				// macFUSE otherwise probes AppleDouble (._*) sidecars and xattrs on
+				// every op, emitting macFUSE-private opcodes go-fuse does not
+				// implement (surfacing as spurious I/O errors). No-ops on Linux.
+				Options: []string{"noappledouble", "noapplexattr"},
 			},
 		}
 		log.Printf("Mounting FUSE on %s...", *mountPoint)
