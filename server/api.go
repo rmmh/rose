@@ -583,6 +583,30 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 		if err != nil {
 			return nil, err
 		}
+		// Make every vlog this operation wrote durable, then record each one's
+		// new length, before publishing the file version. The commit must precede
+		// SetVlogLength: recovery (ReconcileShardLengths) only trims a plog that is
+		// physically longer than the DB length, so the DB length must never exceed
+		// what is durable on the plogs. WriteOpLeases lists every vlog the op
+		// leased across all spills, since leases are not released until commit.
+		leases, err := s.db.WriteOpLeases(ctx, op.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, vlogID := range leases {
+			s.vlogMu.Lock()
+			v := s.vlogs[vlogID]
+			s.vlogMu.Unlock()
+			if v == nil {
+				continue
+			}
+			if err := v.Commit(ctx, op.ID); err != nil {
+				return nil, err
+			}
+			if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
+				return nil, err
+			}
+		}
 		if _, err := s.db.CommitWriteOpVersion(ctx, op.ID, h.path(), time.Now().UnixNano(), placements); err != nil {
 			return nil, fmt.Errorf("publish write operation: %w", err)
 		}
@@ -675,7 +699,7 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([
 			break
 		}
 	}
-	if err := s.sealChunks(ctx, h.writeOpID, pending); err != nil {
+	if err := s.sealChunks(ctx, pending); err != nil {
 		return nil, err
 	}
 	return placements, nil
@@ -702,12 +726,13 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 	return meta.ChunkPlacement{Hash: append([]byte(nil), hash...), VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data), CompressedLen: len(data)}, pending, nil
 }
 
-// sealChunks writes each new chunk's reserved bytes into its leased vlog and
-// fsyncs them. Chunks are grouped by vlog so one physical commit covers the whole
-// batch per touched vlog. The bytes are durable in the append-only vlog before
-// the operation ever publishes its file version; no chunk bytes are written to
-// the metadata DB.
-func (s *Server) sealChunks(ctx context.Context, opID int64, chunks []pendingChunk) error {
+// sealChunks writes each new chunk's reserved bytes into its leased vlog,
+// grouping by vlog and coalescing adjacent placements into one EnsureWrite per
+// run. It does not fsync or record vlog lengths: a single Commit per leased vlog,
+// followed by SetVlogLength, runs once at Close before the file version is
+// published, so the whole operation pays one durability barrier per vlog rather
+// than one per spill. No chunk bytes are written to the metadata DB.
+func (s *Server) sealChunks(ctx context.Context, chunks []pendingChunk) error {
 	if len(chunks) == 0 {
 		return nil
 	}
@@ -735,16 +760,18 @@ func (s *Server) sealChunks(ctx context.Context, opID int64, chunks []pendingChu
 		if !ready {
 			return fmt.Errorf("vlog %d is not commit-ready", vlogID)
 		}
+		var merged []pendingChunk
 		for _, chunk := range group {
+			if len(merged) > 0 && merged[len(merged)-1].vaddr+int64(len(merged[len(merged)-1].data)) == chunk.vaddr {
+				merged[len(merged)-1].data = append(merged[len(merged)-1].data, chunk.data...)
+			} else {
+				merged = append(merged, chunk)
+			}
+		}
+		for _, chunk := range merged {
 			if err := v.EnsureWrite(ctx, chunk.vaddr, chunk.data); err != nil {
 				return err
 			}
-		}
-		if err := v.Commit(ctx, opID); err != nil {
-			return err
-		}
-		if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
-			return err
 		}
 	}
 	return nil

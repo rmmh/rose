@@ -76,9 +76,11 @@ const (
 // placeholder until per-volume keys are provisioned.
 var bitrotKey = []byte("rose-bitrot-key-todo")
 
-func sectorHash(data []byte) []byte {
+func sectorHash(data []byte) [HashSize]byte {
 	sum := sha256.Sum256(data)
-	return sum[:HashSize]
+	var out [HashSize]byte
+	copy(out[:], sum[:HashSize])
+	return out
 }
 
 func OpenPlog(path string, id uint32) (*Plog, error) {
@@ -172,7 +174,8 @@ func (p *Plog) rebuildOpenBlock() error {
 		if _, err := p.file.ReadAt(sector, calcPhysical(s)); err != nil {
 			return fmt.Errorf("reload plog %d sector at %d: %w", p.id, s, err)
 		}
-		p.hashes = append(p.hashes, sectorHash(sector)...)
+		h := sectorHash(sector)
+		p.hashes = append(p.hashes, h[:]...)
 	}
 	return nil
 }
@@ -286,25 +289,84 @@ func (p *Plog) Write(txnID int64, data []byte) (int64, error) {
 }
 
 func (p *Plog) writeLocked(data []byte) (int64, error) {
-
 	offset := p.logicalLength
 	pos := 0
-	for pos < len(data) {
-		space := SectorSize - len(p.buf)
-		toWrite := len(data) - pos
-		if toWrite > space {
-			toWrite = space
-		}
-		p.buf = append(p.buf, data[pos:pos+toWrite]...)
-		pos += toWrite
-		p.logicalLength += int64(toWrite)
 
-		if len(p.buf) == SectorSize {
-			if err := p.sealSector(); err != nil {
-				return 0, err
-			}
+	// If the write fits entirely in the remaining space of the open sector,
+	// just append it to p.buf in memory. No sectors are sealed, so no disk write.
+	if len(p.buf)+len(data) < SectorSize {
+		p.buf = append(p.buf, data...)
+		p.logicalLength += int64(len(data))
+		return offset, nil
+	}
+
+	// We are going to seal at least one sector.
+	firstSectorLogicalStart := p.logicalLength - int64(len(p.buf))
+	firstSectorPhysicalStart := calcPhysical(firstSectorLogicalStart)
+
+	// Pre-allocate a write buffer.
+	estimatedHashSectors := len(data)/dataPerBlock + 2
+	writeBuf := make([]byte, 0, len(p.buf)+len(data)+estimatedHashSectors*SectorSize)
+
+	// Construct the first sector (which seals the current p.buf)
+	var sector [SectorSize]byte
+	space := SectorSize - len(p.buf)
+	copy(sector[:len(p.buf)], p.buf)
+	copy(sector[len(p.buf):], data[:space])
+	pos += space
+	p.logicalLength += int64(space)
+
+	writeBuf = append(writeBuf, sector[:]...)
+	h := sectorHash(sector[:])
+	p.hashes = append(p.hashes, h[:]...)
+
+	if len(p.hashes) == HashesPerBlock*HashSize {
+		var hashSec [SectorSize]byte
+		copy(hashSec[:], p.hashes)
+		mac := hmac.New(sha256.New, bitrotKey)
+		mac.Write(p.hashes)
+		copy(hashSec[HashesPerBlock*HashSize:], mac.Sum(nil)[:HashSize])
+
+		writeBuf = append(writeBuf, hashSec[:]...)
+		p.hashes = p.hashes[:0]
+	}
+
+	// Process subsequent full sectors
+	for pos+SectorSize <= len(data) {
+		secBytes := data[pos : pos+SectorSize]
+		pos += SectorSize
+		p.logicalLength += SectorSize
+
+		writeBuf = append(writeBuf, secBytes...)
+		h := sectorHash(secBytes)
+		p.hashes = append(p.hashes, h[:]...)
+
+		if len(p.hashes) == HashesPerBlock*HashSize {
+			var hashSec [SectorSize]byte
+			copy(hashSec[:], p.hashes)
+			mac := hmac.New(sha256.New, bitrotKey)
+			mac.Write(p.hashes)
+			copy(hashSec[HashesPerBlock*HashSize:], mac.Sum(nil)[:HashSize])
+
+			writeBuf = append(writeBuf, hashSec[:]...)
+			p.hashes = p.hashes[:0]
 		}
 	}
+
+	// Store the remaining incomplete sector in p.buf
+	p.buf = p.buf[:0]
+	if pos < len(data) {
+		p.buf = append(p.buf, data[pos:]...)
+		p.logicalLength += int64(len(data) - pos)
+	}
+
+	// Perform the batched write
+	if len(writeBuf) > 0 {
+		if _, err := p.file.WriteAt(writeBuf, firstSectorPhysicalStart); err != nil {
+			return 0, fmt.Errorf("write plog %d: %w", p.id, err)
+		}
+	}
+
 	return offset, nil
 }
 
@@ -346,7 +408,8 @@ func (p *Plog) sealSector() error {
 	if _, err := p.file.WriteAt(p.buf, calcPhysical(sectorStart)); err != nil {
 		return fmt.Errorf("seal plog %d sector: %w", p.id, err)
 	}
-	p.hashes = append(p.hashes, sectorHash(p.buf)...)
+	h := sectorHash(p.buf)
+	p.hashes = append(p.hashes, h[:]...)
 	p.buf = p.buf[:0]
 
 	if len(p.hashes) == HashesPerBlock*HashSize {
@@ -436,8 +499,11 @@ func (p *Plog) readDataSector(sectorIdx, sealed int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ok && !bytes.Equal(sectorHash(sector), expected) {
-		return nil, fmt.Errorf("plog %d sector %d (logical %d): %w", p.id, sectorIdx, sectorStart, ErrBitrot)
+	if ok {
+		hash := sectorHash(sector)
+		if !bytes.Equal(hash[:], expected) {
+			return nil, fmt.Errorf("plog %d sector %d (logical %d): %w", p.id, sectorIdx, sectorStart, ErrBitrot)
+		}
 	}
 	return sector, nil
 }
@@ -513,7 +579,8 @@ func (p *Plog) Scrub() (ScrubResult, error) {
 			}
 			res.SectorsChecked++
 			expected := recorded[pos*HashSize : pos*HashSize+HashSize]
-			if !bytes.Equal(sectorHash(sector), expected) {
+			hash := sectorHash(sector)
+			if !bytes.Equal(hash[:], expected) {
 				res.CorruptSectors = append(res.CorruptSectors, sectorIdx*SectorSize)
 			}
 		}
