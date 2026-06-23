@@ -743,11 +743,11 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 }
 
 // sealChunks writes each new chunk's reserved bytes into its leased vlog,
-// grouping by vlog and coalescing adjacent placements into one EnsureWrite per
-// run. It does not fsync or record vlog lengths: a single Commit per leased vlog,
-// followed by SetVlogLength, runs once at Close before the file version is
-// published, so the whole operation pays one durability barrier per vlog rather
-// than one per spill. No chunk bytes are written to the metadata DB.
+// grouped by vlog and ordered by reserved offset. It does not fsync or record
+// vlog lengths: a single Commit per leased vlog, followed by SetVlogLength, runs
+// once at Close before the file version is published, so the whole operation
+// pays one durability barrier per vlog rather than one per spill. No chunk
+// bytes are written to the metadata DB.
 func (s *Server) sealChunks(ctx context.Context, chunks []pendingChunk) error {
 	if len(chunks) == 0 {
 		return nil
@@ -776,15 +776,7 @@ func (s *Server) sealChunks(ctx context.Context, chunks []pendingChunk) error {
 		if !ready {
 			return fmt.Errorf("vlog %d is not commit-ready", vlogID)
 		}
-		var merged []pendingChunk
 		for _, chunk := range group {
-			if len(merged) > 0 && merged[len(merged)-1].vaddr+int64(len(merged[len(merged)-1].data)) == chunk.vaddr {
-				merged[len(merged)-1].data = append(merged[len(merged)-1].data, chunk.data...)
-			} else {
-				merged = append(merged, chunk)
-			}
-		}
-		for _, chunk := range merged {
 			if err := v.EnsureWrite(ctx, chunk.vaddr, chunk.data); err != nil {
 				return err
 			}

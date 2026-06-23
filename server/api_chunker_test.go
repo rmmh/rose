@@ -2,11 +2,15 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"io"
+	"path/filepath"
 	"testing"
 
 	chunkers "github.com/PlakarKorp/go-cdc-chunkers"
 	_ "github.com/PlakarKorp/go-cdc-chunkers/chunkers/fastcdc"
+	"github.com/rmmh/rose/meta"
+	pb "github.com/rmmh/rose/proto"
 )
 
 func collectChunkSizes(t *testing.T, chunker *chunkers.Chunker) []int {
@@ -72,4 +76,49 @@ func intsToBytes(v []int) []byte {
 		out = append(out, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
 	}
 	return out
+}
+
+func TestSealChunksWritesAdjacentPendingChunksWithoutConcatenation(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
+	ctx := context.Background()
+	if err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s.StopMaintenanceDriver()
+
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/f", OperationKey: "seal-adjacent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.handles[open.GetHandle()]
+
+	vlogID, v, err := s.activeVlogForAppend(ctx, bucketOf(h.path()), 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.ClaimVlogLease(ctx, vlogID, h.writeOpID, 0); err != nil {
+		t.Fatal(err)
+	}
+	start := v.Length()
+	chunks := []pendingChunk{
+		{vlogID: vlogID, vaddr: start, data: []byte("hello")},
+		{vlogID: vlogID, vaddr: start + 5, data: []byte("world")},
+		{vlogID: vlogID, vaddr: start + 10, data: []byte("!!")},
+	}
+	if err := s.sealChunks(ctx, chunks); err != nil {
+		t.Fatal(err)
+	}
+	got, err := v.Read(ctx, start, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, []byte("helloworld!!")) {
+		t.Fatalf("sealed bytes = %q, want %q", got, []byte("helloworld!!"))
+	}
 }
