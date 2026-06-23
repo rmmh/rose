@@ -33,6 +33,7 @@ var (
 	rpcAddr    = flag.String("rpc", ":50051", "RPC listen address")
 	webdavAddr = flag.String("webdav", "", "WebDAV listen address (e.g. :8080); empty disables it")
 	protection = flag.String("protection", "", "Default protection for new buckets: \"N\" for N-way duplication, or \"N+K\" for erasure coding with N data and K parity shards (e.g. 3 or 3+2). Empty keeps the built-in 2-copy mirror.")
+	debug      = flag.Bool("debug", false, "Verbose logging: per-operation FUSE tracing and debug-level logs. Off by default; the per-op trace noticeably slows the write path.")
 )
 
 // parseProtection turns a --protection value into a default bucket policy. A bare
@@ -67,7 +68,11 @@ func main() {
 		log.Fatalf("Missing required arguments. Usage: ./rose --metadir <dir> --datadirs <dir1,dir2> [--mount <dir>] [--webdav :8080]")
 	}
 
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	logLevel := slog.LevelInfo
+	if *debug {
+		logLevel = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 
 	// Initialize Metadata DB
 	metaPath := *metaDir + "/rose.db"
@@ -137,7 +142,7 @@ func main() {
 		serverOptions := &fs.Options{
 			MountOptions: fuse.MountOptions{
 				FsName: "rose",
-				Debug:  true,
+				Debug:  *debug,
 				// macFUSE otherwise probes AppleDouble (._*) sidecars and xattrs on
 				// every op, emitting macFUSE-private opcodes go-fuse does not
 				// implement (surfacing as spurious I/O errors). No-ops on Linux.
