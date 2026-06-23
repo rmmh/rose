@@ -65,6 +65,11 @@ func (d *DB) Close() error {
 	return d.db.Close()
 }
 
+// GetDB returns the underlying sql.DB connection for testing purposes.
+func (d *DB) GetDB() *sql.DB {
+	return d.db
+}
+
 func initSchema(db *sql.DB, durable bool) error {
 	pragmas := "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;"
 	if !durable {

@@ -366,7 +366,7 @@ replicated staging vlog and a maintenance-pass promotion step.
 - Reclaim the regenerated plog left behind when a crash re-runs a reprotect step
   whose ReplaceShardPlog had not yet committed (same duplicate-bytes-on-crash
   caveat compaction has).
-- Reap abandoned prepared write ops so their orphan vlog bytes are actually
+- (done) Reap abandoned prepared write ops so their orphan vlog bytes are actually
   reclaimable. A write op spills/seals chunks into a leased vlog as it goes
   (SetVlogLength persists the inflated length pre-Close), and on a crash before
   Close those bytes are durable-but-unpublished -- no chunk rows, dead space by

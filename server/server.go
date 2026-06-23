@@ -87,11 +87,16 @@ type Server struct {
 	handleCounter int64
 	writeOpsMu    sync.Mutex
 	writeOps      map[int64]*sync.Mutex
+	writeOpExpiry time.Duration
+	startTime     time.Time
 }
 
 // MaxVlogBytes is the 32-bit byte-addressable virtual-log boundary described
 // in plan.txt. Writers must roll to a fresh vlog before crossing this limit.
 const MaxVlogBytes int64 = 4 << 30
+
+// DefaultWriteOpExpiry is the duration after which an inactive prepared write operation is abandoned.
+const DefaultWriteOpExpiry = 1 * time.Hour
 
 func NewServer(db *meta.DB) *Server {
 	s := &Server{
@@ -112,6 +117,8 @@ func NewServer(db *meta.DB) *Server {
 		maintenanceEvery:   time.Second,
 		handles:            make(map[int64]*FileHandle),
 		writeOps:           make(map[int64]*sync.Mutex),
+		writeOpExpiry:      DefaultWriteOpExpiry,
+		startTime:          time.Now(),
 		// Handle ids start at 1 so 0 is reserved as the "no handle" sentinel used
 		// by OpenResponse and the FUSE layer.
 		handleCounter: 1,
@@ -372,6 +379,9 @@ func (s *Server) Recover(ctx context.Context) error {
 	// from its acknowledged offset) or were sealed into vlogs but never published
 	// (so they are orphan holes reclaimed by compaction). Nothing references chunk
 	// bytes in metadata, so there is nothing to reconcile here.
+	if _, err := s.ReapAbandonedWriteOps(ctx, s.writeOpExpiryDuration()); err != nil {
+		return err
+	}
 
 	// Resume any maintenance work interrupted by the crash/restart.
 	jobs, err := s.db.RunningJobs(ctx)
@@ -505,6 +515,20 @@ func (s *Server) SetDefaultProtection(p meta.BucketPolicy) {
 		s.minCopies = p.DataShards
 	}
 }
+
+// SetWriteOpExpiry sets the duration after which inactive prepared write operations are abandoned.
+func (s *Server) SetWriteOpExpiry(d time.Duration) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	s.writeOpExpiry = d
+}
+
+func (s *Server) writeOpExpiryDuration() time.Duration {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	return s.writeOpExpiry
+}
+
 
 // clearActiveVlogLocked drops any bucket whose active vlog is vlogID, so a
 // maintenance step retiring or relocating that vlog does not leave a bucket

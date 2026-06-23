@@ -162,3 +162,27 @@ func (d *DB) CommitWriteOpVersion(ctx context.Context, opID int64, path string, 
 	}
 	return fileID, nil
 }
+
+type PreparedWriteOp struct {
+	ID        int64
+	CreatedAt int64
+}
+
+// ListPreparedWriteOps returns all write operations in the prepared state.
+func (d *DB) ListPreparedWriteOps(ctx context.Context) ([]PreparedWriteOp, error) {
+	rows, err := d.db.QueryContext(ctx, "SELECT id, created_at FROM write_op WHERE state = ? ORDER BY id", WriteOpPrepared)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ops []PreparedWriteOp
+	for rows.Next() {
+		var op PreparedWriteOp
+		if err := rows.Scan(&op.ID, &op.CreatedAt); err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+	return ops, rows.Err()
+}
+
