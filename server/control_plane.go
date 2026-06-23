@@ -91,7 +91,10 @@ func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error
 		if s.nodeOf(info.DiskID) != nodeID || !s.offlinePlogs[info.ID] {
 			continue
 		}
-		p, err := storage.OpenPlog(s.plogPath(info.DiskID, info.ID), info.ID)
+		// OpenExistingPlog, not OpenPlog: a returned node whose file is genuinely
+		// gone must fail here rather than have O_CREATE resurrect it as an empty
+		// shard and pass it off as healthy, which would violate the durability gate.
+		p, err := storage.OpenExistingPlog(s.plogPath(info.DiskID, info.ID), info.ID)
 		if err != nil {
 			return fmt.Errorf("reopen plog %d on returned node %d: %w", info.ID, nodeID, err)
 		}

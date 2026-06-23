@@ -85,7 +85,21 @@ func OpenPlog(path string, id uint32) (*Plog, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	return openPlogFile(path, id, os.O_RDWR|os.O_CREATE)
+}
+
+// OpenExistingPlog opens an already-provisioned plog without creating it. If the
+// backing file is absent it returns an error satisfying errors.Is(err,
+// fs.ErrNotExist), letting recovery distinguish a genuinely lost shard (stub it
+// offline, or fail the durability gate) from one that is merely unreadable.
+// Unlike OpenPlog, whose O_CREATE would silently resurrect a missing shard as an
+// empty file and present it as valid, this never fabricates a shard.
+func OpenExistingPlog(path string, id uint32) (*Plog, error) {
+	return openPlogFile(path, id, os.O_RDWR)
+}
+
+func openPlogFile(path string, id uint32, flag int) (*Plog, error) {
+	f, err := os.OpenFile(path, flag, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open plog: %w", err)
 	}

@@ -293,15 +293,25 @@ replicated staging vlog and a maintenance-pass promotion step.
   every published object is fully protected again; plus the gRPC handlers
   (AddDisk/RemoveDisk/ReplaceDisk/StartReprotect/StartRebalance) wired to the
   control-plane methods.
-- Make Recover tolerate a failed disk whose plog files are actually gone (it
-  currently OpenPlogs every catalog plog by path, so a true file loss fails
-  startup before reprotect can run); reconstruct or stub the missing shard's
-  client so reprotect can resume from a cold start, not just a live server.
-  This is also what limits the node-return reprotect-cancel: reverting a disk
-  failed -> active relies on its original plogs still being openable, which holds
-  for a live server (handles never closed) but not across a cold restart while
-  the offline node's files are unreachable. Until Recover tolerates absent files,
-  cancel-on-return is only sound for a running server.
+- (done) Recover now tolerates a catalog plog whose backing file is gone on an
+  otherwise-reachable disk (true media loss not yet reflected as a failed disk):
+  it stubs the shard offline (offlinePlogs) and boots degraded, so the surviving
+  redundancy carries reads and a scheduled reprotect regenerates it, instead of
+  failing startup on the first absent file. The root cause was OpenPlog's
+  O_CREATE silently resurrecting a missing shard as an empty file (which then
+  either tripped ReconcileShardLengths' "target beyond length" or, for an empty
+  vlog, mounted a bogus zero-length shard reads would trust). Fix: a non-creating
+  storage.OpenExistingPlog (errors.Is(err, fs.ErrNotExist)-detectable) used by
+  Recover (stub offline on absent file) and by reopenNodePlogsLocked (which now
+  genuinely fails on a returned node's lost file, as its comment always intended
+  -- O_CREATE had been defeating that durability gate too). Covered by
+  TestRecoverStubsMissingPlogFile.
+- Still open: reverting a *failed* disk back to active across a cold restart
+  relies on its original plogs still being openable; for a disk left failed (not
+  just a transiently-offline node), the files may be truly gone. Cancel-on-return
+  remains fully sound only for a running server. A reprotect keyed on the offline
+  stub (or marking the disk failed when Recover finds its files absent) would
+  close this, but that is the automatic-repair-driver's job.
 - (done) SweepStrayPlogFiles, run at the end of each maintenance pass, reclaims
   plog files no catalog row references on their disk: the orphan a reprotect
   leaves on a returning disk, a drained disk's stray source file, and the

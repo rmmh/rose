@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -218,9 +220,12 @@ func (s *Server) GetDB() *meta.DB {
 	return s.db
 }
 
-// Recover rebuilds local plog and vlog clients from persisted metadata. A
-// missing locally configured disk fails startup rather than silently exposing
-// metadata that cannot be read.
+// Recover rebuilds local plog and vlog clients from persisted metadata. A shard
+// on an unreachable disk (failed disk / failed node) is stubbed offline, as is a
+// shard whose backing file is gone on an otherwise-reachable disk (true media
+// loss): the server boots degraded and the surviving redundancy carries reads
+// until a reprotect regenerates the shard, rather than failing startup on the
+// first absent file.
 func (s *Server) Recover(ctx context.Context) error {
 	// Declare configured disks in the durable catalog (idempotent) and adopt any
 	// non-active lifecycle state a prior run persisted, so a disk that was
@@ -283,8 +288,19 @@ func (s *Server) Recover(ctx context.Context) error {
 			s.offlinePlogs[info.ID] = true
 			continue
 		}
-		plog, err := storage.OpenPlog(s.plogPath(info.DiskID, info.ID), info.ID)
+		plog, err := storage.OpenExistingPlog(s.plogPath(info.DiskID, info.ID), info.ID)
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				// The catalog still considers this disk reachable, but the shard's
+				// backing file is gone -- true media loss not yet reflected as a
+				// failed disk. Stub it offline so the server boots degraded (the
+				// surviving redundancy carries reads and a scheduled reprotect
+				// regenerates the shard) rather than failing startup on the first
+				// absent file -- or, worse, letting O_CREATE silently resurrect it
+				// as an empty shard that reads would trust.
+				s.offlinePlogs[info.ID] = true
+				continue
+			}
 			return fmt.Errorf("recover plog %d on disk %d: %w", info.ID, info.DiskID, err)
 		}
 		plogByID[info.ID] = plog
