@@ -666,6 +666,13 @@ const (
 	chunkMaxSize    = 4 * 1024 * 1024
 )
 
+var chunkBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, chunkMaxSize)
+		return &buf
+	},
+}
+
 func (h *FileHandle) chunkerForData(data []byte) (*chunkers.Chunker, error) {
 	h.chunkerInput.Reset(data)
 	if h.chunker != nil {
@@ -695,6 +702,14 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([
 	}
 	var placements []meta.ChunkPlacement
 	var pending []pendingChunk
+	var pooledBufs []*[]byte
+
+	defer func() {
+		for _, bufPtr := range pooledBufs {
+			chunkBufferPool.Put(bufPtr)
+		}
+	}()
+
 	reserved := map[uint32]int64{}
 	for {
 		chunk, nextErr := chunker.Next()
@@ -702,7 +717,17 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([
 			return nil, nextErr
 		}
 		if len(chunk) > 0 {
-			p, plan, err := s.planChunk(ctx, h, append([]byte(nil), chunk...), reserved)
+			var chunkCopy []byte
+			if len(chunk) <= chunkMaxSize {
+				bufPtr := chunkBufferPool.Get().(*[]byte)
+				pooledBufs = append(pooledBufs, bufPtr)
+				chunkCopy = (*bufPtr)[:len(chunk)]
+			} else {
+				chunkCopy = make([]byte, len(chunk))
+			}
+			copy(chunkCopy, chunk)
+
+			p, plan, err := s.planChunk(ctx, h, chunkCopy, reserved)
 			if err != nil {
 				return nil, err
 			}

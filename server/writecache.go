@@ -284,15 +284,11 @@ func (c *writeCache) commitSpill(placements []meta.ChunkPlacement, n int64) {
 	defer c.mu.Unlock()
 	c.settled = append(c.settled, placements...)
 	c.settledLen += n
-	sp := c.spans[0]
+	sp := &c.spans[0]
 	restLen := len(sp.data) - int(n)
-	neededCap := restLen
-	if neededCap < spillThreshold+spillCarry+128*1024 {
-		neededCap = spillThreshold + spillCarry + 128*1024
-	}
-	rest := make([]byte, restLen, neededCap)
-	copy(rest, sp.data[n:])
-	c.spans[0] = span{start: sp.start + n, data: rest}
+	copy(sp.data, sp.data[n:])
+	sp.data = sp.data[:restLen]
+	sp.start += n
 }
 
 func min64(a, b int64) int64 {
