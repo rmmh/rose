@@ -28,13 +28,17 @@ const (
 // runtime conveniences that can collide across wiped/recreated clusters. The
 // membership fields reflect the layout at creation; the metadata DB remains
 // authoritative for live placement.
+//
+// The disk is identified only by its UID: the numeric disk_id is a
+// config-relative surrogate that the metadata DB binds to a directory via the
+// disk's rose_disk_uid marker, so it carries no recovery value and is not stored
+// here.
 type PlogHeader struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ClusterUid     []byte                 `protobuf:"bytes,1,opt,name=cluster_uid,json=clusterUid,proto3" json:"cluster_uid,omitempty"`                // 15 bytes, from the SQLite cluster record
 	PlogUid        []byte                 `protobuf:"bytes,2,opt,name=plog_uid,json=plogUid,proto3" json:"plog_uid,omitempty"`                         // 15 bytes, this plog's UID
 	PlogId         uint32                 `protobuf:"varint,3,opt,name=plog_id,json=plogId,proto3" json:"plog_id,omitempty"`                           // small monotonic int, runtime mapping
 	DiskUid        []byte                 `protobuf:"bytes,4,opt,name=disk_uid,json=diskUid,proto3" json:"disk_uid,omitempty"`                         // 15 bytes, identifies the physical disk
-	DiskId         uint32                 `protobuf:"varint,14,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`                          // small int, config-relative
 	CreatedAtNanos int64                  `protobuf:"varint,5,opt,name=created_at_nanos,json=createdAtNanos,proto3" json:"created_at_nanos,omitempty"` // unix nanos at creation
 	WriterVersion  string                 `protobuf:"bytes,6,opt,name=writer_version,json=writerVersion,proto3" json:"writer_version,omitempty"`       // software/build identifier (best-effort)
 	// Vlog membership ("vlog header") captured at creation.
@@ -108,13 +112,6 @@ func (x *PlogHeader) GetDiskUid() []byte {
 	return nil
 }
 
-func (x *PlogHeader) GetDiskId() uint32 {
-	if x != nil {
-		return x.DiskId
-	}
-	return 0
-}
-
 func (x *PlogHeader) GetCreatedAtNanos() int64 {
 	if x != nil {
 		return x.CreatedAtNanos
@@ -182,15 +179,14 @@ var File_proto_format_proto protoreflect.FileDescriptor
 
 const file_proto_format_proto_rawDesc = "" +
 	"\n" +
-	"\x12proto/format.proto\x12\arose.v1\"\xda\x03\n" +
+	"\x12proto/format.proto\x12\arose.v1\"\xc1\x03\n" +
 	"\n" +
 	"PlogHeader\x12\x1f\n" +
 	"\vcluster_uid\x18\x01 \x01(\fR\n" +
 	"clusterUid\x12\x19\n" +
 	"\bplog_uid\x18\x02 \x01(\fR\aplogUid\x12\x17\n" +
 	"\aplog_id\x18\x03 \x01(\rR\x06plogId\x12\x19\n" +
-	"\bdisk_uid\x18\x04 \x01(\fR\adiskUid\x12\x17\n" +
-	"\adisk_id\x18\x0e \x01(\rR\x06diskId\x12(\n" +
+	"\bdisk_uid\x18\x04 \x01(\fR\adiskUid\x12(\n" +
 	"\x10created_at_nanos\x18\x05 \x01(\x03R\x0ecreatedAtNanos\x12%\n" +
 	"\x0ewriter_version\x18\x06 \x01(\tR\rwriterVersion\x12\x19\n" +
 	"\bvlog_uid\x18\a \x01(\fR\avlogUid\x12\x17\n" +

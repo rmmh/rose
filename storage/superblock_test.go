@@ -19,7 +19,6 @@ func sampleHeader(id uint32) *pb.PlogHeader {
 		ClusterUid:      cluster[:],
 		PlogUid:         self[:],
 		PlogId:          id,
-		DiskId:          7,
 		VlogId:          42,
 		ShardIndex:      1,
 		ProtectionScheme: "EC",
@@ -51,7 +50,7 @@ func TestSuperblockRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(got.ClusterUid, hdr.ClusterUid) ||
 		!bytes.Equal(got.PlogUid, hdr.PlogUid) ||
-		got.PlogId != hdr.PlogId || got.DiskId != hdr.DiskId ||
+		got.PlogId != hdr.PlogId ||
 		got.VlogId != hdr.VlogId || got.ShardIndex != hdr.ShardIndex ||
 		got.ProtectionScheme != hdr.ProtectionScheme ||
 		got.DataShards != hdr.DataShards || got.ParityShards != hdr.ParityShards {

@@ -694,7 +694,11 @@ func (s *Server) AttachDiskOnNode(ctx context.Context, diskID, nodeID uint32, ro
 	if err := s.db.RegisterNode(ctx, nodeID); err != nil {
 		return err
 	}
-	if err := s.db.RegisterDiskWithCapacity(ctx, diskID, nodeID, totalBytes, uid.New()); err != nil {
+	diskUID, err := diskUIDForRoot(root)
+	if err != nil {
+		return err
+	}
+	if err := s.db.RegisterDiskWithCapacity(ctx, diskID, nodeID, totalBytes, diskUID); err != nil {
 		return err
 	}
 	s.diskRoots[diskID] = root

@@ -276,17 +276,12 @@ func (s *Server) GetDB() *meta.DB {
 // condemning the disk. Either way the server boots degraded and the surviving
 // redundancy carries reads, rather than failing startup on the first absent file.
 func (s *Server) Recover(ctx context.Context) error {
-	// Declare configured disks in the durable catalog (idempotent) and adopt any
-	// non-active lifecycle state a prior run persisted, so a disk that was
-	// draining or failed before the crash stays out of placement after restart.
-	for id := range s.diskRoots {
-		node := s.nodeOf(id)
-		if err := s.db.RegisterNode(ctx, node); err != nil {
-			return err
-		}
-		if err := s.db.RegisterDisk(ctx, id, node, uid.New()); err != nil {
-			return err
-		}
+	// Bind the configured disk roots to catalog disk ids by their rose_disk_uid
+	// markers (declaring fresh disks and adopting any persisted lifecycle state),
+	// so a physically relocated disk is recognized by content rather than by the
+	// numeric id its mount point happens to be configured as.
+	if err := s.reconcileDiskRoots(ctx); err != nil {
+		return err
 	}
 	disks, err := s.db.ListDisks(ctx)
 	if err != nil {

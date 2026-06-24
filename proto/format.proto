@@ -10,12 +10,16 @@ option go_package = "github.com/rmmh/rose/proto";
 // runtime conveniences that can collide across wiped/recreated clusters. The
 // membership fields reflect the layout at creation; the metadata DB remains
 // authoritative for live placement.
+//
+// The disk is identified only by its UID: the numeric disk_id is a
+// config-relative surrogate that the metadata DB binds to a directory via the
+// disk's rose_disk_uid marker, so it carries no recovery value and is not stored
+// here.
 message PlogHeader {
   bytes  cluster_uid = 1;  // 15 bytes, from the SQLite cluster record
   bytes  plog_uid    = 2;  // 15 bytes, this plog's UID
   uint32 plog_id     = 3;  // small monotonic int, runtime mapping
   bytes  disk_uid    = 4;  // 15 bytes, identifies the physical disk
-  uint32 disk_id     = 14; // small int, config-relative
   int64  created_at_nanos = 5; // unix nanos at creation
   string writer_version   = 6; // software/build identifier (best-effort)
 
