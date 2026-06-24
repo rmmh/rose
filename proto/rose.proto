@@ -11,6 +11,7 @@ service Rose {
   rpc Truncate(TruncateRequest) returns (TruncateResponse);
   rpc Close(CloseRequest) returns (CloseResponse);
   rpc Getattr(GetattrRequest) returns (GetattrResponse);
+  rpc Setattr(SetattrRequest) returns (SetattrResponse);
   rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
   rpc Rename(RenameRequest) returns (RenameResponse);
   rpc ListDir(ListDirRequest) returns (ListDirResponse);
@@ -95,6 +96,16 @@ message GetattrResponse {
   int64 size = 1;
   bool is_dir = 2;
   int64 mtime = 3;
+}
+
+message SetattrRequest {
+  string path = 1;
+  // When present, set the file or directory modification time (ns since epoch).
+  // Absent means "leave mtime unchanged".
+  optional int64 mtime = 2;
+}
+
+message SetattrResponse {
 }
 
 message UnlinkRequest {

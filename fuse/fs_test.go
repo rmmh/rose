@@ -7,6 +7,7 @@ import (
 	"sort"
 	"syscall"
 	"testing"
+	"time"
 
 	gofuse "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -76,6 +77,38 @@ func mountRose(t *testing.T) string {
 		}
 	})
 	return mnt
+}
+
+func TestFuseFileTimes(t *testing.T) {
+	mnt := mountRose(t)
+
+	bucket := filepath.Join(mnt, "bucket")
+	retryNoSys(t, "mkdir", func() error { return os.Mkdir(bucket, 0755) })
+	f := filepath.Join(bucket, "a.txt")
+	retryNoSys(t, "write", func() error { return os.WriteFile(f, []byte("hi"), 0644) })
+
+	// A freshly written file reports a sane, non-zero mtime (the bug was every
+	// node reporting the 1970 epoch because FUSE never filled out.Mtime).
+	var fi os.FileInfo
+	retryNoSys(t, "stat", func() (err error) { fi, err = os.Stat(f); return })
+	if fi.ModTime().Year() < 2000 {
+		t.Fatalf("file mtime = %v, want a recent time", fi.ModTime())
+	}
+
+	// utimes round-trips: setting a specific mtime is visible on the next stat.
+	want := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	retryNoSys(t, "chtimes", func() error { return os.Chtimes(f, want, want) })
+	retryNoSys(t, "restat", func() (err error) { fi, err = os.Stat(f); return })
+	if !fi.ModTime().Equal(want) {
+		t.Fatalf("file mtime after Chtimes = %v, want %v", fi.ModTime().UTC(), want)
+	}
+
+	// Directories carry an mtime too.
+	var di os.FileInfo
+	retryNoSys(t, "stat dir", func() (err error) { di, err = os.Stat(bucket); return })
+	if di.ModTime().Year() < 2000 {
+		t.Fatalf("dir mtime = %v, want a recent time", di.ModTime())
+	}
 }
 
 func TestFuseMkdirWriteReadList(t *testing.T) {

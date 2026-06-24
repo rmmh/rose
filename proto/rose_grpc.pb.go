@@ -25,6 +25,7 @@ const (
 	Rose_Truncate_FullMethodName          = "/rose.v1.Rose/Truncate"
 	Rose_Close_FullMethodName             = "/rose.v1.Rose/Close"
 	Rose_Getattr_FullMethodName           = "/rose.v1.Rose/Getattr"
+	Rose_Setattr_FullMethodName           = "/rose.v1.Rose/Setattr"
 	Rose_Unlink_FullMethodName            = "/rose.v1.Rose/Unlink"
 	Rose_Rename_FullMethodName            = "/rose.v1.Rose/Rename"
 	Rose_ListDir_FullMethodName           = "/rose.v1.Rose/ListDir"
@@ -60,6 +61,7 @@ type RoseClient interface {
 	Truncate(ctx context.Context, in *TruncateRequest, opts ...grpc.CallOption) (*TruncateResponse, error)
 	Close(ctx context.Context, in *CloseRequest, opts ...grpc.CallOption) (*CloseResponse, error)
 	Getattr(ctx context.Context, in *GetattrRequest, opts ...grpc.CallOption) (*GetattrResponse, error)
+	Setattr(ctx context.Context, in *SetattrRequest, opts ...grpc.CallOption) (*SetattrResponse, error)
 	Unlink(ctx context.Context, in *UnlinkRequest, opts ...grpc.CallOption) (*UnlinkResponse, error)
 	Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*RenameResponse, error)
 	ListDir(ctx context.Context, in *ListDirRequest, opts ...grpc.CallOption) (*ListDirResponse, error)
@@ -150,6 +152,16 @@ func (c *roseClient) Getattr(ctx context.Context, in *GetattrRequest, opts ...gr
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetattrResponse)
 	err := c.cc.Invoke(ctx, Rose_Getattr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *roseClient) Setattr(ctx context.Context, in *SetattrRequest, opts ...grpc.CallOption) (*SetattrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetattrResponse)
+	err := c.cc.Invoke(ctx, Rose_Setattr_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -387,6 +399,7 @@ type RoseServer interface {
 	Truncate(context.Context, *TruncateRequest) (*TruncateResponse, error)
 	Close(context.Context, *CloseRequest) (*CloseResponse, error)
 	Getattr(context.Context, *GetattrRequest) (*GetattrResponse, error)
+	Setattr(context.Context, *SetattrRequest) (*SetattrResponse, error)
 	Unlink(context.Context, *UnlinkRequest) (*UnlinkResponse, error)
 	Rename(context.Context, *RenameRequest) (*RenameResponse, error)
 	ListDir(context.Context, *ListDirRequest) (*ListDirResponse, error)
@@ -440,6 +453,9 @@ func (UnimplementedRoseServer) Close(context.Context, *CloseRequest) (*CloseResp
 }
 func (UnimplementedRoseServer) Getattr(context.Context, *GetattrRequest) (*GetattrResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Getattr not implemented")
+}
+func (UnimplementedRoseServer) Setattr(context.Context, *SetattrRequest) (*SetattrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Setattr not implemented")
 }
 func (UnimplementedRoseServer) Unlink(context.Context, *UnlinkRequest) (*UnlinkResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Unlink not implemented")
@@ -632,6 +648,24 @@ func _Rose_Getattr_Handler(srv interface{}, ctx context.Context, dec func(interf
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RoseServer).Getattr(ctx, req.(*GetattrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Rose_Setattr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetattrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoseServer).Setattr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Rose_Setattr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoseServer).Setattr(ctx, req.(*SetattrRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1062,6 +1096,10 @@ var Rose_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Getattr",
 			Handler:    _Rose_Getattr_Handler,
+		},
+		{
+			MethodName: "Setattr",
+			Handler:    _Rose_Setattr_Handler,
 		},
 		{
 			MethodName: "Unlink",

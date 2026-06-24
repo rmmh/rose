@@ -86,7 +86,7 @@ func (d *DB) ListDir(ctx context.Context, dir string) ([]DirEntry, error) {
 		return nil, err
 	}
 
-	fileRows, err := d.db.QueryContext(ctx, `SELECT fh.name, f.mtime, f.chunks
+	fileRows, err := d.db.QueryContext(ctx, `SELECT fh.name, fh.mtime, f.chunks
 		FROM file_head fh JOIN file f ON f.id = fh.file_id
 		WHERE fh.parent = ? ORDER BY fh.name`, dir)
 	if err != nil {
@@ -117,7 +117,7 @@ func (d *DB) StatPath(ctx context.Context, path string) (DirEntry, bool, error) 
 
 	var chunks []byte
 	var mtime int64
-	err := d.db.QueryRowContext(ctx, `SELECT f.mtime, f.chunks FROM file_head fh
+	err := d.db.QueryRowContext(ctx, `SELECT fh.mtime, f.chunks FROM file_head fh
 		JOIN file f ON f.id = fh.file_id WHERE fh.path = ?`, path).Scan(&mtime, &chunks)
 	if err == nil {
 		return DirEntry{Name: name, IsDir: false, Size: chunksLogicalSize(chunks), Mtime: mtime}, true, nil
@@ -163,6 +163,35 @@ func (d *DB) Mkdir(ctx context.Context, path string, mtime int64) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// SetMtime updates the live modification time of a file or directory without
+// minting a new version, so an immutable file row (and any snapshot referencing
+// it) keeps its frozen mtime.  It reports whether a matching path existed.
+func (d *DB) SetMtime(ctx context.Context, path string, mtime int64) (bool, error) {
+	path = cleanPath(path)
+	if path == "" {
+		// The namespace root has no stored row; treat utimes on it as a no-op.
+		return true, nil
+	}
+	res, err := d.db.ExecContext(ctx, `UPDATE file_head SET mtime = ? WHERE path = ?`, mtime, path)
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return false, err
+	} else if n > 0 {
+		return true, nil
+	}
+	res, err = d.db.ExecContext(ctx, `UPDATE dir SET mtime = ? WHERE path = ?`, mtime, path)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // Rmdir removes an empty directory.  It fails if the directory still has any

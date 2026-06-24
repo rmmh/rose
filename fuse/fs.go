@@ -34,6 +34,13 @@ func opErrno(ctx context.Context, err error) syscall.Errno {
 	return syscall.EIO
 }
 
+// setTimes fills the kernel attr times from a stored mtime (ns since epoch).
+// Rose tracks only modification time, so atime and ctime are reported as mtime.
+func setTimes(attr *fuse.Attr, mtimeNs int64) {
+	t := time.Unix(0, mtimeNs)
+	attr.SetTimes(&t, &t, &t)
+}
+
 // join builds the namespace path of a child of dir. The root directory has the
 // empty path, so a child of root is just its name.
 func join(dir, name string) string {
@@ -69,6 +76,13 @@ var (
 func (d *RoseDir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = fuse.S_IFDIR | 0755
 	out.Owner = mountOwner
+	// The root has no stored row and thus no mtime; every other directory carries
+	// one in the namespace.
+	if d.path != "" {
+		if resp, err := d.srv.Getattr(ctx, &pb.GetattrRequest{Path: d.path}); err == nil {
+			setTimes(&out.Attr, resp.GetMtime())
+		}
+	}
 	return 0
 }
 
@@ -98,6 +112,7 @@ func (d *RoseDir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 		return nil, syscall.ENOENT
 	}
 	out.Owner = mountOwner
+	setTimes(&out.Attr, attr.GetMtime())
 	if attr.GetIsDir() {
 		out.Mode = fuse.S_IFDIR | 0755
 		child := d.NewInode(ctx, &RoseDir{srv: d.srv, path: childPath}, fs.StableAttr{Mode: fuse.S_IFDIR})
@@ -179,14 +194,21 @@ var (
 	_ = (fs.NodeSetattrer)((*RoseFile)(nil))
 )
 
-// Setattr accepts metadata changes (chmod/chown/utimes) as no-ops and applies a
-// size change (ftruncate, or the O_TRUNC the kernel issues at open) to the file
-// via the server truncate path: through the open write handle when one is
-// supplied, otherwise as a truncate(2) by path that publishes a resized version.
+// Setattr applies a size change (ftruncate, or the O_TRUNC the kernel issues at
+// open) via the server truncate path, and a modification-time change (utimes)
+// via Setattr. chmod/chown remain no-ops since mode/owner are not persisted.
 func (f *RoseFile) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = fuse.S_IFREG | 0644
 	out.Owner = mountOwner
-	if size, ok := in.GetSize(); ok {
+	if m, ok := in.GetMTime(); ok {
+		mtime := m.UnixNano()
+		if _, err := f.srv.Setattr(ctx, &pb.SetattrRequest{Path: f.path, Mtime: &mtime}); err != nil {
+			return opErrno(ctx, err)
+		}
+		setTimes(&out.Attr, mtime)
+	}
+	size, hasSize := in.GetSize()
+	if hasSize {
 		req := &pb.TruncateRequest{Path: f.path, Size: int64(size)}
 		if h, isRose := fh.(*roseHandle); isRose {
 			req.Handle = h.handle
@@ -196,11 +218,14 @@ func (f *RoseFile) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 		if _, err := f.srv.Truncate(ctx, req); err != nil {
 			return opErrno(ctx, err)
 		}
+		// Reflect the just-set length; the committed head may not yet show it for an
+		// open write handle, so do not overwrite it with a by-path stat below.
 		out.Size = size
 		return 0
 	}
 	if resp, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: f.path}); err == nil {
 		out.Size = uint64(resp.Size)
+		setTimes(&out.Attr, resp.GetMtime())
 	}
 	return 0
 }
@@ -234,6 +259,7 @@ func (f *RoseFile) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 		return 0
 	}
 	out.Size = uint64(resp.Size)
+	setTimes(&out.Attr, resp.GetMtime())
 	return 0
 }
 

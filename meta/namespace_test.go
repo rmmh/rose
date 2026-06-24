@@ -242,6 +242,125 @@ func TestBackfillNamespace(t *testing.T) {
 	}
 }
 
+// statMtime resolves path and returns its reported mtime, failing if it does
+// not exist.
+func statMtime(t *testing.T, db *DB, path string) int64 {
+	t.Helper()
+	e, ok, err := db.StatPath(context.Background(), path)
+	if err != nil || !ok {
+		t.Fatalf("stat %q: ok=%v err=%v", path, ok, err)
+	}
+	return e.Mtime
+}
+
+func TestStatAndListReportCommittedMtime(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.CommitFile(ctx, "b/f.txt", 100, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := statMtime(t, db, "b/f.txt"); got != 100 {
+		t.Fatalf("StatPath mtime = %d, want 100", got)
+	}
+	entries, err := db.ListDir(ctx, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Mtime != 100 {
+		t.Fatalf("ListDir entries = %+v, want one with mtime 100", entries)
+	}
+
+	// Overwriting the content refreshes the live mtime from the new version.
+	if _, err := db.CommitFile(ctx, "b/f.txt", 200, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := statMtime(t, db, "b/f.txt"); got != 200 {
+		t.Fatalf("after overwrite StatPath mtime = %d, want 200", got)
+	}
+}
+
+func TestSetMtime(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.CommitFile(ctx, "b/f.txt", 100, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Mkdir(ctx, "b/sub", 100); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := db.SetMtime(ctx, "b/f.txt", 555)
+	if err != nil || !ok {
+		t.Fatalf("SetMtime file: ok=%v err=%v", ok, err)
+	}
+	if got := statMtime(t, db, "b/f.txt"); got != 555 {
+		t.Fatalf("file mtime = %d, want 555", got)
+	}
+
+	ok, err = db.SetMtime(ctx, "b/sub", 777)
+	if err != nil || !ok {
+		t.Fatalf("SetMtime dir: ok=%v err=%v", ok, err)
+	}
+	if got := statMtime(t, db, "b/sub"); got != 777 {
+		t.Fatalf("dir mtime = %d, want 777", got)
+	}
+
+	ok, err = db.SetMtime(ctx, "b/missing", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("SetMtime on a missing path reported success")
+	}
+}
+
+func TestSetMtimeLeavesSnapshotFrozen(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.CommitFile(ctx, "b/f.txt", 100, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapID, err := db.CreateSnapshot(ctx, "snap", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetMtime(ctx, "b/f.txt", 999); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := statMtime(t, db, "b/f.txt"); got != 999 {
+		t.Fatalf("live mtime = %d, want 999", got)
+	}
+	// The snapshot still references the original immutable version, whose mtime
+	// was not touched by SetMtime.
+	fileID, err := db.OpenSnapshotFile(ctx, snapID, "b/f.txt")
+	if err != nil || fileID == 0 {
+		t.Fatalf("OpenSnapshotFile: id=%d err=%v", fileID, err)
+	}
+	var frozen int64
+	if err := db.db.QueryRowContext(ctx, "SELECT mtime FROM file WHERE id = ?", fileID).Scan(&frozen); err != nil {
+		t.Fatal(err)
+	}
+	if frozen != 100 {
+		t.Fatalf("snapshot version mtime = %d, want 100 (frozen)", frozen)
+	}
+}
+
 func TestSplitPath(t *testing.T) {
 	cases := []struct{ in, parent, name string }{
 		{"a", "", "a"},

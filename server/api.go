@@ -373,6 +373,22 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 	return &pb.GetattrResponse{Size: entry.Size, IsDir: entry.IsDir, Mtime: entry.Mtime}, nil
 }
 
+// Setattr applies metadata-only changes to an existing path. Today the only
+// mutable attribute is the modification time (utimes); size changes go through
+// Truncate, and mode/owner are not persisted.
+func (s *Server) Setattr(ctx context.Context, req *pb.SetattrRequest) (*pb.SetattrResponse, error) {
+	if req.Mtime != nil {
+		ok, err := s.db.SetMtime(ctx, req.GetPath(), req.GetMtime())
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("path not found: %q", req.GetPath())
+		}
+	}
+	return &pb.SetattrResponse{}, nil
+}
+
 func (s *Server) ListDir(ctx context.Context, req *pb.ListDirRequest) (*pb.ListDirResponse, error) {
 	entries, err := s.db.ListDir(ctx, req.GetPath())
 	if err != nil {

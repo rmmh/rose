@@ -357,8 +357,8 @@ func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int6
 		return 0, err
 	}
 	parent, name := splitPath(path)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id, parent, name) VALUES (?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id, parent = excluded.parent, name = excluded.name`, path, id, parent, name); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id, parent, name, mtime) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id, parent = excluded.parent, name = excluded.name, mtime = excluded.mtime`, path, id, parent, name, mtime); err != nil {
 		return 0, fmt.Errorf("publish file head: %w", err)
 	}
 	if err := ensureDirs(ctx, tx, path, mtime); err != nil {

@@ -109,7 +109,12 @@ func initSchema(db *sql.DB, durable bool) error {
 			path TEXT PRIMARY KEY,
 			file_id INTEGER NOT NULL REFERENCES file(id),
 			parent TEXT NOT NULL DEFAULT '',
-			name TEXT NOT NULL DEFAULT ''
+			name TEXT NOT NULL DEFAULT '',
+			-- The live, settable modification time.  It tracks the committed version's
+			-- mtime on each write but can be changed independently by utimes without
+			-- minting a new version, so the immutable file rows (which snapshots
+			-- reference by file_id) stay frozen.
+			mtime INTEGER NOT NULL DEFAULT 0
 		);
 
 		-- Every directory, explicit (Mkdir) or implicit (an ancestor of a
