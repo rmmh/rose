@@ -16,6 +16,7 @@ import (
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/storage"
+	"github.com/rmmh/rose/uid"
 )
 
 type Server struct {
@@ -283,7 +284,7 @@ func (s *Server) Recover(ctx context.Context) error {
 		if err := s.db.RegisterNode(ctx, node); err != nil {
 			return err
 		}
-		if err := s.db.RegisterDisk(ctx, id, node); err != nil {
+		if err := s.db.RegisterDisk(ctx, id, node, uid.New()); err != nil {
 			return err
 		}
 	}
@@ -605,14 +606,16 @@ func (s *Server) provisionStagingVlogLocked(ctx context.Context, targetData, tar
 // given distinct-node disks, mounts it, and registers it. The caller must hold
 // vlogMu.
 func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dataShards, parityShards, targetData, targetParity, clientCount int, diskIDs []uint32) (uint32, *storage.Vlog, error) {
-	id, err := s.db.MakeStagingVlog(ctx, scheme, int32(dataShards), int32(parityShards), int32(targetData), int32(targetParity))
+	vlogUID := uid.New()
+	id, err := s.db.MakeStagingVlog(ctx, vlogUID, scheme, int32(dataShards), int32(parityShards), int32(targetData), int32(targetParity))
 	if err != nil {
 		return 0, nil, err
 	}
 	clients := make([]storage.PlogClient, 0, clientCount)
 	for shard := 0; shard < clientCount; shard++ {
 		diskID := diskIDs[shard]
-		plogID, err := s.db.MakePlog(ctx, diskID)
+		plogUID := uid.New()
+		plogID, err := s.db.MakePlog(ctx, plogUID, diskID)
 		if err != nil {
 			return 0, nil, err
 		}

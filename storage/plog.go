@@ -83,6 +83,11 @@ const (
 // the marshaled PlogHeader follows, and the last HashSize bytes of the sector
 // hold an HMAC over everything before them. Data sectors begin at sector 1, so
 // every physical offset is shifted by plogHeaderSize (see CalcPhysical).
+// PlogFormatVersion is the on-disk plog superblock format version, also stamped
+// into the singleton cluster record so a format migration has a value to branch
+// on.
+const PlogFormatVersion = plogFormatVersion
+
 const (
 	plogMagic            = "ROSEPLG1"
 	plogFormatVersion    = 1

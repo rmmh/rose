@@ -8,18 +8,21 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/rmmh/rose/uid"
 )
 
-// MakeVlog creates a new vlog with the specified protection scheme.
-func (d *DB) MakeVlog(ctx context.Context, protectionScheme string, dataShards, parityShards int32) (uint32, error) {
-	return d.MakeStagingVlog(ctx, protectionScheme, dataShards, parityShards, 0, 0)
+// MakeVlog creates a new vlog with the specified protection scheme. u is the
+// vlog's persistent UID, also stamped into the superblocks of its member plogs.
+func (d *DB) MakeVlog(ctx context.Context, u uid.UID, protectionScheme string, dataShards, parityShards int32) (uint32, error) {
+	return d.MakeStagingVlog(ctx, u, protectionScheme, dataShards, parityShards, 0, 0)
 }
 
 // MakeStagingVlog records a vlog and, when targetParityShards is nonzero, marks
 // it as a replicated staging vlog whose chunks will later be promoted into an EC
 // vlog with the given target shard counts.
-func (d *DB) MakeStagingVlog(ctx context.Context, protectionScheme string, dataShards, parityShards, targetDataShards, targetParityShards int32) (uint32, error) {
-	res, err := d.db.ExecContext(ctx, "INSERT INTO vlog (protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards) VALUES (?, ?, ?, ?, ?)", protectionScheme, dataShards, parityShards, targetDataShards, targetParityShards)
+func (d *DB) MakeStagingVlog(ctx context.Context, u uid.UID, protectionScheme string, dataShards, parityShards, targetDataShards, targetParityShards int32) (uint32, error) {
+	res, err := d.db.ExecContext(ctx, "INSERT INTO vlog (uid, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards) VALUES (?, ?, ?, ?, ?, ?)", u[:], protectionScheme, dataShards, parityShards, targetDataShards, targetParityShards)
 	if err != nil {
 		return 0, fmt.Errorf("make vlog: %w", err)
 	}
@@ -27,9 +30,10 @@ func (d *DB) MakeStagingVlog(ctx context.Context, protectionScheme string, dataS
 	return uint32(id), err
 }
 
-// MakePlog creates a new physical log assigned to a disk.
-func (d *DB) MakePlog(ctx context.Context, diskID uint32) (uint32, error) {
-	res, err := d.db.ExecContext(ctx, "INSERT INTO plog (disk_id) VALUES (?)", diskID)
+// MakePlog creates a new physical log assigned to a disk. u is the plog's
+// persistent UID, also written into its on-disk superblock.
+func (d *DB) MakePlog(ctx context.Context, u uid.UID, diskID uint32) (uint32, error) {
+	res, err := d.db.ExecContext(ctx, "INSERT INTO plog (uid, disk_id) VALUES (?, ?)", u[:], diskID)
 	if err != nil {
 		return 0, fmt.Errorf("make plog: %w", err)
 	}
@@ -39,12 +43,14 @@ func (d *DB) MakePlog(ctx context.Context, diskID uint32) (uint32, error) {
 
 type PlogInfo struct {
 	ID     uint32
+	UID    uid.UID
 	DiskID uint32
 	Length int64
 }
 
 type VlogInfo struct {
 	ID               uint32
+	UID              uid.UID
 	Length           int64
 	ProtectionScheme string
 	DataShards       int32
@@ -65,7 +71,7 @@ type VlogPlogInfo struct {
 }
 
 func (d *DB) ListPlogs(ctx context.Context) ([]PlogInfo, error) {
-	rows, err := d.db.QueryContext(ctx, "SELECT id, disk_id, length FROM plog ORDER BY id")
+	rows, err := d.db.QueryContext(ctx, "SELECT id, uid, disk_id, length FROM plog ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -73,16 +79,34 @@ func (d *DB) ListPlogs(ctx context.Context) ([]PlogInfo, error) {
 	var out []PlogInfo
 	for rows.Next() {
 		var info PlogInfo
-		if err := rows.Scan(&info.ID, &info.DiskID, &info.Length); err != nil {
+		var rawUID []byte
+		if err := rows.Scan(&info.ID, &rawUID, &info.DiskID, &info.Length); err != nil {
 			return nil, err
+		}
+		if info.UID, err = uid.FromBytes(rawUID); err != nil {
+			return nil, fmt.Errorf("decode plog %d uid: %w", info.ID, err)
 		}
 		out = append(out, info)
 	}
 	return out, rows.Err()
 }
 
+// PlogUID returns the persistent UID recorded for a plog, or the zero UID if the
+// plog is unknown.
+func (d *DB) PlogUID(ctx context.Context, plogID uint32) (uid.UID, error) {
+	var rawUID []byte
+	err := d.db.QueryRowContext(ctx, "SELECT uid FROM plog WHERE id = ?", plogID).Scan(&rawUID)
+	if err == sql.ErrNoRows {
+		return uid.UID{}, nil
+	}
+	if err != nil {
+		return uid.UID{}, err
+	}
+	return uid.FromBytes(rawUID)
+}
+
 func (d *DB) ListVlogs(ctx context.Context) ([]VlogInfo, error) {
-	rows, err := d.db.QueryContext(ctx, "SELECT id, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards FROM vlog ORDER BY id")
+	rows, err := d.db.QueryContext(ctx, "SELECT id, uid, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards FROM vlog ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -90,8 +114,12 @@ func (d *DB) ListVlogs(ctx context.Context) ([]VlogInfo, error) {
 	var out []VlogInfo
 	for rows.Next() {
 		var info VlogInfo
-		if err := rows.Scan(&info.ID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards); err != nil {
+		var rawUID []byte
+		if err := rows.Scan(&info.ID, &rawUID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards); err != nil {
 			return nil, err
+		}
+		if info.UID, err = uid.FromBytes(rawUID); err != nil {
+			return nil, fmt.Errorf("decode vlog %d uid: %w", info.ID, err)
 		}
 		out = append(out, info)
 	}

@@ -57,6 +57,21 @@ func New() UID {
 	return u
 }
 
+// FromBytes builds a UID from its raw 15-byte form (as stored on disk and in
+// the metadata DB). A zero-length slice decodes to the zero UID, tolerating rows
+// written before a UID was assigned.
+func FromBytes(b []byte) (UID, error) {
+	var u UID
+	if len(b) == 0 {
+		return u, nil
+	}
+	if len(b) != Size {
+		return UID{}, fmt.Errorf("uid: invalid byte length %d, want %d", len(b), Size)
+	}
+	copy(u[:], b)
+	return u, nil
+}
+
 // IsZero reports whether u is the all-zero UID (the unset value).
 func (u UID) IsZero() bool {
 	return u == UID{}

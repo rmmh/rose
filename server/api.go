@@ -19,6 +19,7 @@ import (
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/storage"
+	"github.com/rmmh/rose/uid"
 )
 
 type FileHandle struct {
@@ -996,7 +997,7 @@ func (s *Server) MakeVlog(ctx context.Context, req *pb.MakeVlogRequest) (*pb.Mak
 
 // Plog Operations
 func (s *Server) MakePlog(ctx context.Context, req *pb.MakePlogRequest) (*pb.MakePlogResponse, error) {
-	id, err := s.db.MakePlog(ctx, req.GetDiskId())
+	id, err := s.db.MakePlog(ctx, uid.New(), req.GetDiskId())
 	if err != nil {
 		return nil, err
 	}

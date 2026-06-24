@@ -93,6 +93,18 @@ func initSchema(db *sql.DB, durable bool) error {
 	}
 	_, err := db.Exec(pragmas + `
 
+		-- Singleton cluster identity and on-disk format version. The uid stamps
+		-- every plog superblock so a bundle of plogs is attributable to its cluster
+		-- independently of the small monotonic IDs (which collide across wiped
+		-- clusters). feature_flags is the home for migration/compatibility toggles.
+		CREATE TABLE IF NOT EXISTS cluster (
+			id             INTEGER PRIMARY KEY CHECK (id = 1),
+			uid            BLOB    NOT NULL,
+			format_version INTEGER NOT NULL,
+			feature_flags  INTEGER NOT NULL DEFAULT 0,
+			created_at     INTEGER NOT NULL
+		);
+
 		CREATE TABLE IF NOT EXISTS file (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			path TEXT NOT NULL,
@@ -176,6 +188,7 @@ func initSchema(db *sql.DB, durable bool) error {
 
 		CREATE TABLE IF NOT EXISTS vlog (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			uid BLOB NOT NULL DEFAULT X'',
 			length INTEGER NOT NULL DEFAULT 0,
 			protection_scheme TEXT NOT NULL,
 			data_shards INTEGER NOT NULL,
@@ -210,6 +223,7 @@ func initSchema(db *sql.DB, durable bool) error {
 
 		CREATE TABLE IF NOT EXISTS plog (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			uid BLOB NOT NULL DEFAULT X'',
 			disk_id INTEGER NOT NULL,
 			length INTEGER NOT NULL DEFAULT 0
 		);
@@ -226,6 +240,7 @@ func initSchema(db *sql.DB, durable bool) error {
 
 		CREATE TABLE IF NOT EXISTS disk (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			uid BLOB NOT NULL DEFAULT X'',
 			node_id INTEGER NOT NULL,
 			total_bytes INTEGER NOT NULL,
 			used_bytes INTEGER NOT NULL,
@@ -335,6 +350,9 @@ func initSchema(db *sql.DB, durable bool) error {
 	// staged them before they were sealed into the vlogs.
 	if _, err := db.Exec(`DROP TABLE IF EXISTS write_op_chunk`); err != nil {
 		return fmt.Errorf("drop legacy write_op_chunk table: %w", err)
+	}
+	if err := bootstrapCluster(db); err != nil {
+		return err
 	}
 	return nil
 }

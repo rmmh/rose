@@ -3,6 +3,8 @@ package meta
 import (
 	"context"
 	"testing"
+
+	"github.com/rmmh/rose/uid"
 )
 
 func TestWriteOpIdempotentKeyAndVlogLease(t *testing.T) {
@@ -24,7 +26,7 @@ func TestWriteOpIdempotentKeyAndVlogLease(t *testing.T) {
 	if again.ID != op.ID {
 		t.Fatalf("duplicate key created op %d, want %d", again.ID, op.ID)
 	}
-	if _, err := db.MakeVlog(ctx, "NONE", 1, 0); err != nil {
+	if _, err := db.MakeVlog(ctx, uid.New(), "NONE", 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.ClaimVlogLease(ctx, 1, op.ID, 0); err != nil {

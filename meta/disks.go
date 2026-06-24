@@ -3,6 +3,8 @@ package meta
 import (
 	"context"
 	"fmt"
+
+	"github.com/rmmh/rose/uid"
 )
 
 // Disk lifecycle states, mirroring RoseStorage's disk_state. A disk is created
@@ -18,6 +20,7 @@ const (
 // DiskInfo is one row of the durable disk catalog.
 type DiskInfo struct {
 	ID     uint32
+	UID    uid.UID
 	NodeID uint32
 	State  string
 }
@@ -25,17 +28,19 @@ type DiskInfo struct {
 // RegisterDisk records a disk as active if it is not already known. It is
 // idempotent: startup declares its configured disks without clobbering a
 // draining/failed/detached state a prior maintenance operation persisted.
-func (d *DB) RegisterDisk(ctx context.Context, id, nodeID uint32) error {
-	return d.RegisterDiskWithCapacity(ctx, id, nodeID, 0)
+func (d *DB) RegisterDisk(ctx context.Context, id, nodeID uint32, u uid.UID) error {
+	return d.RegisterDiskWithCapacity(ctx, id, nodeID, 0, u)
 }
 
 // RegisterDiskWithCapacity is RegisterDisk with the capacity reported by the
-// control-plane AddDisk RPC. Existing catalog entries are never overwritten.
-func (d *DB) RegisterDiskWithCapacity(ctx context.Context, id, nodeID uint32, totalBytes uint64) error {
+// control-plane AddDisk RPC. Existing catalog entries are never overwritten, so
+// a disk's UID is fixed at first registration. u carries the identity adopted
+// from (or freshly written to) the disk's rose_disk_uid marker.
+func (d *DB) RegisterDiskWithCapacity(ctx context.Context, id, nodeID uint32, totalBytes uint64, u uid.UID) error {
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO disk (id, node_id, total_bytes, used_bytes, state)
-		 VALUES (?, ?, ?, 0, ?) ON CONFLICT(id) DO NOTHING`,
-		id, nodeID, totalBytes, DiskActive)
+		`INSERT INTO disk (id, uid, node_id, total_bytes, used_bytes, state)
+		 VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(id) DO NOTHING`,
+		id, u[:], nodeID, totalBytes, DiskActive)
 	if err != nil {
 		return fmt.Errorf("register disk %d: %w", id, err)
 	}
@@ -60,7 +65,7 @@ func (d *DB) SetDiskState(ctx context.Context, id uint32, state string) error {
 
 // ListDisks returns the durable disk catalog ordered by id.
 func (d *DB) ListDisks(ctx context.Context) ([]DiskInfo, error) {
-	rows, err := d.db.QueryContext(ctx, "SELECT id, node_id, state FROM disk ORDER BY id")
+	rows, err := d.db.QueryContext(ctx, "SELECT id, uid, node_id, state FROM disk ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -68,12 +73,27 @@ func (d *DB) ListDisks(ctx context.Context) ([]DiskInfo, error) {
 	var out []DiskInfo
 	for rows.Next() {
 		var info DiskInfo
-		if err := rows.Scan(&info.ID, &info.NodeID, &info.State); err != nil {
+		var rawUID []byte
+		if err := rows.Scan(&info.ID, &rawUID, &info.NodeID, &info.State); err != nil {
 			return nil, err
+		}
+		if info.UID, err = uid.FromBytes(rawUID); err != nil {
+			return nil, fmt.Errorf("decode disk %d uid: %w", info.ID, err)
 		}
 		out = append(out, info)
 	}
 	return out, rows.Err()
+}
+
+// DiskUID returns the persistent UID recorded for a disk, or the zero UID if the
+// disk is unknown.
+func (d *DB) DiskUID(ctx context.Context, diskID uint32) (uid.UID, error) {
+	var rawUID []byte
+	err := d.db.QueryRowContext(ctx, "SELECT uid FROM disk WHERE id = ?", diskID).Scan(&rawUID)
+	if err != nil {
+		return uid.UID{}, err
+	}
+	return uid.FromBytes(rawUID)
 }
 
 // VlogShardDisk maps one shard of a vlog to the disk currently backing it.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rmmh/rose/meta"
+	"github.com/rmmh/rose/uid"
 )
 
 // virtualScaleCluster exercises the control-plane catalog with logical plog
@@ -84,7 +85,7 @@ func newVirtualScaleCluster(t testing.TB, nodes, disksPerNode int) *virtualScale
 		roots := make(map[uint32]string, disksPerNode)
 		for d := 0; d < disksPerNode; d++ {
 			id := uint32((n-1)*disksPerNode + d + 1)
-			if err := db.RegisterDiskWithCapacity(ctx, id, uint32(n), 8_000_000_000_000); err != nil {
+			if err := db.RegisterDiskWithCapacity(ctx, id, uint32(n), 8_000_000_000_000, uid.New()); err != nil {
 				t.Fatal(err)
 			}
 			c.diskNode[id], c.diskState[id] = uint32(n), meta.DiskActive
@@ -129,7 +130,7 @@ func (c *virtualScaleCluster) populateECProgress(count, dataShards, parityShards
 		batch = 1
 	}
 	for i := 0; i < count; i++ {
-		vlogID, err := c.db.MakeVlog(ctx, "EC", int32(dataShards), int32(parityShards))
+		vlogID, err := c.db.MakeVlog(ctx, uid.New(), "EC", int32(dataShards), int32(parityShards))
 		if err != nil {
 			c.t.Fatal(err)
 		}
@@ -138,7 +139,7 @@ func (c *virtualScaleCluster) populateECProgress(count, dataShards, parityShards
 		}
 		for shard := 0; shard < dataShards+parityShards; shard++ {
 			diskID := c.disk(shard+1, i%c.disksPerNode)
-			plogID, err := c.db.MakePlog(ctx, diskID)
+			plogID, err := c.db.MakePlog(ctx, uid.New(), diskID)
 			if err != nil {
 				c.t.Fatal(err)
 			}
@@ -380,7 +381,7 @@ func (c *virtualScaleCluster) reprotectDisk(diskID uint32) int {
 		if dest == 0 {
 			c.t.Fatalf("reprotect vlog %d: no placement-allowed destination", lost.VlogID)
 		}
-		newPlog, err := c.db.MakePlog(ctx, dest)
+		newPlog, err := c.db.MakePlog(ctx, uid.New(), dest)
 		if err != nil {
 			c.t.Fatal(err)
 		}
