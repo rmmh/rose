@@ -390,7 +390,13 @@ func (d *DB) CommitFile(ctx context.Context, path string, mtime int64, placement
 // reachable from no live file head and no active snapshot, so collecting it
 // cannot make any reachable version unreadable. It returns the placements of the
 // collected chunks so a caller can later reclaim their log space via compaction.
-func (d *DB) GCChunks(ctx context.Context) ([]ChunkPlacement, error) {
+//
+// pinned holds chunk hashes (as map keys over the raw hash bytes) that an
+// in-flight write operation deduplicated against but has not yet committed: their
+// refcount can read zero while a prepared op still depends on them, so they are
+// skipped rather than collected. The caller must hold that pin set stable for the
+// duration of this call so a pin taken concurrently is not raced past.
+func (d *DB) GCChunks(ctx context.Context, pinned map[string]struct{}) ([]ChunkPlacement, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -408,6 +414,9 @@ func (d *DB) GCChunks(ctx context.Context) ([]ChunkPlacement, error) {
 			rows.Close()
 			return nil, err
 		}
+		if _, ok := pinned[string(p.Hash)]; ok {
+			continue
+		}
 		collected = append(collected, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -416,13 +425,76 @@ func (d *DB) GCChunks(ctx context.Context) ([]ChunkPlacement, error) {
 	}
 	rows.Close()
 
-	if _, err := tx.ExecContext(ctx, "DELETE FROM chunk WHERE refcount <= 0"); err != nil {
-		return nil, err
+	if len(pinned) == 0 {
+		// No pins: the bulk predicate delete matches exactly what was collected and
+		// avoids materializing the hash list.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM chunk WHERE refcount <= 0"); err != nil {
+			return nil, err
+		}
+	} else {
+		for start := 0; start < len(collected); start += maxChunkUpsertRows {
+			end := start + maxChunkUpsertRows
+			if end > len(collected) {
+				end = len(collected)
+			}
+			batch := collected[start:end]
+			var sqlText strings.Builder
+			sqlText.WriteString("DELETE FROM chunk WHERE hash IN (")
+			args := make([]any, len(batch))
+			for i, p := range batch {
+				if i > 0 {
+					sqlText.WriteByte(',')
+				}
+				sqlText.WriteByte('?')
+				args[i] = p.Hash
+			}
+			sqlText.WriteByte(')')
+			if _, err := tx.ExecContext(ctx, sqlText.String(), args...); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return collected, nil
+}
+
+// VlogHoldsAnyHash reports whether any chunk row currently residing in vlogID has
+// one of the given hashes. Compaction uses it to defer retiring a vlog that still
+// holds a chunk an in-flight write operation pinned: such a chunk may have gone
+// dead (refcount 0) and so was not relocated with the live set, yet its bytes
+// must survive until the pinning op resolves.
+func (d *DB) VlogHoldsAnyHash(ctx context.Context, vlogID uint32, hashes [][]byte) (bool, error) {
+	for start := 0; start < len(hashes); start += maxChunkUpsertRows {
+		end := start + maxChunkUpsertRows
+		if end > len(hashes) {
+			end = len(hashes)
+		}
+		batch := hashes[start:end]
+		var sqlText strings.Builder
+		sqlText.WriteString("SELECT 1 FROM chunk WHERE vlog_id = ? AND hash IN (")
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, vlogID)
+		for i, h := range batch {
+			if i > 0 {
+				sqlText.WriteByte(',')
+			}
+			sqlText.WriteByte('?')
+			args = append(args, h)
+		}
+		sqlText.WriteString(") LIMIT 1")
+		var one int
+		err := d.db.QueryRowContext(ctx, sqlText.String(), args...).Scan(&one)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // FileVersionChunks returns the ordered chunk placements of a file version: each
@@ -500,6 +572,24 @@ func (d *DB) FileVersionChunks(ctx context.Context, fileID int64) ([]ChunkPlacem
 func (d *DB) ChunkByHash(ctx context.Context, hash []byte) (ChunkPlacement, bool, error) {
 	p := ChunkPlacement{Hash: append([]byte(nil), hash...)}
 	err := d.chunkByHashStmt.QueryRowContext(ctx, hash).Scan(&p.VlogID, &p.VaddrOffset, &p.LogicalLen, &p.CompressedLen)
+	if err == sql.ErrNoRows {
+		return ChunkPlacement{}, false, nil
+	}
+	if err != nil {
+		return ChunkPlacement{}, false, err
+	}
+	return p, true, nil
+}
+
+// LiveChunkByHash is ChunkByHash restricted to chunks still referenced by a
+// committed file version (refcount > 0). It backs deduplication: a chunk whose
+// last reference has been deleted is dead and may already be mid-reclamation, so
+// reusing its placement could publish a version pointing at bytes about to be
+// freed. A returned placement is only safe across the rest of the write once the
+// caller has pinned the hash against reclamation.
+func (d *DB) LiveChunkByHash(ctx context.Context, hash []byte) (ChunkPlacement, bool, error) {
+	p := ChunkPlacement{Hash: append([]byte(nil), hash...)}
+	err := d.liveChunkByHashStmt.QueryRowContext(ctx, hash).Scan(&p.VlogID, &p.VaddrOffset, &p.LogicalLen, &p.CompressedLen)
 	if err == sql.ErrNoRows {
 		return ChunkPlacement{}, false, nil
 	}

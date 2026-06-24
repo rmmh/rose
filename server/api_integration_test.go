@@ -422,6 +422,102 @@ func TestRecoverReopensPersistedVlogs(t *testing.T) {
 	}
 }
 
+// TestPinnedDedupChunkSurvivesConcurrentReclaim exercises the dedup/GC race the
+// chunk-pin mechanism closes: an in-flight write deduplicates against an existing
+// chunk, that chunk's last committed reference is then deleted, and a full
+// reclamation cycle (GC + compaction) runs before the write commits. Without
+// pinning the reused bytes would be collected and physically reclaimed, so the
+// committed file would resolve to a hole; the pin must keep them live until the
+// write publishes its own reference.
+func TestPinnedDedupChunkSurvivesConcurrentReclaim(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := server.NewServerWithDataDir(db, filepath.Join(dir, "disk"))
+	ctx := context.Background()
+
+	// 8 MiB of incompressible, dedup-stable content. FastCDC splits it into
+	// several ~1 MiB chunks, and a single Write of it exceeds the 4 MiB spill
+	// threshold, so the deduplicating writer pins the reused chunks mid-write
+	// rather than only at Close.
+	content := make([]byte, 8<<20)
+	if _, err := rand.New(rand.NewSource(0x05e)).Read(content); err != nil {
+		t.Fatal(err)
+	}
+
+	// Donor file: its chunks are the only references holding these bytes live.
+	writeServerFile(t, s, "/donor", content)
+
+	// Begin a second file that deduplicates against the donor. The large Write
+	// spills synchronously, so by the time it returns the new operation has pinned
+	// the donor's chunks.
+	reuse, err := s.Open(ctx, &pb.OpenRequest{Path: "/reuse"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: reuse.GetHandle(), Buffer: content}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The donor disappears: every chunk it referenced falls to refcount zero. Only
+	// the in-flight operation's pins now stand between those bytes and reclamation.
+	if _, err := s.Unlink(ctx, &pb.UnlinkRequest{Path: "/donor"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Drive a full reclamation cycle while the write is still open. Without the
+	// pins GC would delete the chunk rows and compaction would physically free
+	// their bytes, so the reused file would commit pointing at reclaimed holes.
+	if _, err := s.GC(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Compact(ctx, server.DefaultCompactionPolicy()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Commit the reused file and read it back in full: the pinned chunks must
+	// still resolve to their original bytes.
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: reuse.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readWholeServerFile(t, s, "/reuse", len(content)); !bytes.Equal(got, content) {
+		t.Fatalf("reused file corrupted after reclamation (len got=%d want=%d)", len(got), len(content))
+	}
+
+	// With the write committed and its pins released, a second cycle reclaims any
+	// genuinely dead space and the file still reads back intact.
+	if _, err := s.GC(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Compact(ctx, server.DefaultCompactionPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	if got := readWholeServerFile(t, s, "/reuse", len(content)); !bytes.Equal(got, content) {
+		t.Fatalf("reused file corrupted after post-commit reclamation")
+	}
+}
+
+// readWholeServerFile opens path and reads exactly n bytes from offset 0.
+func readWholeServerFile(t *testing.T, s *server.Server, path string, n int) []byte {
+	t.Helper()
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Offset: 0, Length: int64(n)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	return res.GetBuffer()
+}
+
 func TestGCReclaimsOnlyUnreferencedChunks(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))

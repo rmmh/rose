@@ -91,6 +91,19 @@ type Server struct {
 	writeOps      map[int64]*sync.Mutex
 	writeOpExpiry time.Duration
 	startTime     time.Time
+
+	// pinMu guards pinnedChunks. A pinned hash is a chunk an in-flight (prepared,
+	// uncommitted) write operation deduplicated against: the op reuses the chunk's
+	// existing bytes instead of rewriting them, so those bytes must stay live until
+	// the op commits (publishing a file version that takes the real refcount) or is
+	// abandoned. Reclamation -- gcLocked and compactLocked -- snapshots this set
+	// under pinMu and spares any chunk it names, closing the window where the last
+	// committed reference is deleted mid-write and the chunk is collected out from
+	// under the operation, leaving a hole. Pins are in-memory only: a crash discards
+	// every in-flight op, so the chunks revert to being governed by their committed
+	// refcounts, which is exactly correct.
+	pinMu        sync.Mutex
+	pinnedChunks map[int64]map[string]struct{} // write-op id -> set of pinned chunk hashes
 }
 
 // MaxVlogBytes is the 32-bit byte-addressable virtual-log boundary described
@@ -119,6 +132,7 @@ func NewServer(db *meta.DB) *Server {
 		maintenanceEvery:   time.Second,
 		handles:            make(map[int64]*FileHandle),
 		writeOps:           make(map[int64]*sync.Mutex),
+		pinnedChunks:       make(map[int64]map[string]struct{}),
 		writeOpExpiry:      DefaultWriteOpExpiry,
 		startTime:          time.Now(),
 		// Handle ids start at 1 so 0 is reserved as the "no handle" sentinel used
@@ -707,7 +721,14 @@ func (s *Server) GC(ctx context.Context) (int, error) {
 // gcLocked is the body of GC for callers that already hold maintRunMu (the
 // maintenance pass), so a pass does not deadlock on its own GC step.
 func (s *Server) gcLocked(ctx context.Context) (int, error) {
-	collected, err := s.db.GCChunks(ctx)
+	// Hold pinMu across the whole collection so a chunk pinned by a concurrent
+	// write is never raced past: a pin taken before this snapshot is observed and
+	// spared, and one taken after cannot slip in between the snapshot and the
+	// delete. The write path only mutates pinnedChunks (an in-memory map) under this
+	// lock, so holding it across the short GC transaction is cheap.
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	collected, err := s.db.GCChunks(ctx, s.pinnedHashesLocked())
 	if err != nil {
 		return 0, err
 	}

@@ -56,6 +56,9 @@ func (s *Server) ReapAbandonedWriteOps(ctx context.Context, ageThreshold time.Du
 			if err := s.db.AbandonWriteOp(ctx, op.ID); err != nil {
 				return reaped, err
 			}
+			// The op references nothing now; drop any chunk pins it held so the
+			// chunks it had deduplicated against become reclaimable again.
+			s.releasePins(op.ID)
 			reaped++
 		}
 	}

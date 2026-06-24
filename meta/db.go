@@ -10,8 +10,9 @@ import (
 
 // DB provides thread-safe access to the Rose metadata.
 type DB struct {
-	db              *sql.DB
-	chunkByHashStmt *sql.Stmt
+	db                  *sql.DB
+	chunkByHashStmt     *sql.Stmt
+	liveChunkByHashStmt *sql.Stmt
 }
 
 // Open creates or opens a metadata database at the given path.
@@ -51,18 +52,33 @@ func open(path string, durable bool) (*DB, error) {
 		return nil, fmt.Errorf("prepare chunk-by-hash query: %w", err)
 	}
 
-	return &DB{db: db, chunkByHashStmt: chunkByHashStmt}, nil
+	// Dedup reuses only chunks still referenced by a committed version; a
+	// refcount-0 chunk is dead and may already be mid-reclamation, so it must not
+	// be deduplicated against even though its row still exists.
+	liveChunkByHashStmt, err := db.Prepare("SELECT vlog_id, vaddr_offset, logical_len, compressed_len FROM chunk WHERE hash = ? AND refcount > 0")
+	if err != nil {
+		chunkByHashStmt.Close()
+		db.Close()
+		return nil, fmt.Errorf("prepare live-chunk-by-hash query: %w", err)
+	}
+
+	return &DB{db: db, chunkByHashStmt: chunkByHashStmt, liveChunkByHashStmt: liveChunkByHashStmt}, nil
 }
 
 // Close closes the database connection.
 func (d *DB) Close() error {
-	if d.chunkByHashStmt != nil {
-		if err := d.chunkByHashStmt.Close(); err != nil {
-			_ = d.db.Close()
-			return err
+	var firstErr error
+	for _, stmt := range []*sql.Stmt{d.chunkByHashStmt, d.liveChunkByHashStmt} {
+		if stmt != nil {
+			if err := stmt.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-	return d.db.Close()
+	if err := d.db.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 // GetDB returns the underlying sql.DB connection for testing purposes.

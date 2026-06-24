@@ -620,6 +620,10 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 		if _, err := s.db.CommitWriteOpVersion(ctx, op.ID, h.path(), time.Now().UnixNano(), placements); err != nil {
 			return nil, fmt.Errorf("publish write operation: %w", err)
 		}
+		// The committed file version now holds a real refcount on every chunk this
+		// operation deduplicated against, so the in-memory pins that protected them
+		// across the write are no longer needed.
+		s.releasePins(op.ID)
 	}
 	s.handlesMu.Lock()
 	delete(s.handles, req.GetHandle())
@@ -757,7 +761,12 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([
 func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, reserved map[uint32]int64) (meta.ChunkPlacement, *pendingChunk, error) {
 	sum := sha256.Sum256(data)
 	hash := sum[:15]
-	if p, ok, err := s.db.ChunkByHash(ctx, hash); err != nil {
+	// Pin-and-resolve rather than a bare lookup: a dedup hit reuses an existing
+	// chunk's bytes without rewriting them, so it must hold those bytes live
+	// against GC and compaction until this operation commits. The pin is released
+	// when the op commits (its file version takes the real refcount) or is
+	// abandoned.
+	if p, ok, err := s.pinAndResolveChunk(ctx, h.writeOpID, hash); err != nil {
 		return meta.ChunkPlacement{}, nil, err
 	} else if ok {
 		return p, nil, nil

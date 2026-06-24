@@ -181,10 +181,7 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 		}
 	}
 
-	if err := s.retireVlogLocked(ctx, sourceID); err != nil {
-		return err
-	}
-	return s.db.MarkJobDone(ctx, job.ID)
+	return s.finishCompactionLocked(ctx, sourceID, job.ID)
 }
 
 // compactECVlogLocked rewrites an EC vlog's live chunks into a fresh EC vlog and
@@ -232,10 +229,37 @@ func (s *Server) compactECVlogLocked(ctx context.Context, sourceID uint32, sourc
 		}
 	}
 
+	return s.finishCompactionLocked(ctx, sourceID, job.ID)
+}
+
+// finishCompactionLocked retires the drained source vlog and marks the job done,
+// unless an in-flight write operation still pins a chunk residing in the source.
+// A pinned chunk may have gone dead (refcount 0) after it was deduplicated
+// against, so it was not relocated out with the live set; retiring the source
+// would free its bytes out from under the uncommitted operation, leaving the
+// op's published version pointing at a reclaimed hole. In that case the job is
+// left running -- its live chunks are already relocated -- so a later pass retires
+// the source once the pin clears (after the op commits or is abandoned). The
+// caller must hold vlogMu.
+//
+// No newly-pinned chunk can name the source after this check: dedup only pins
+// live chunks (LiveChunkByHash), and every chunk live when compaction read the
+// source has already been relocated off it, so a fresh pin resolves to the
+// destination rather than the source.
+func (s *Server) finishCompactionLocked(ctx context.Context, sourceID uint32, jobID int64) error {
+	if pinned := s.pinnedHashList(); len(pinned) > 0 {
+		held, err := s.db.VlogHoldsAnyHash(ctx, sourceID, pinned)
+		if err != nil {
+			return err
+		}
+		if held {
+			return nil
+		}
+	}
 	if err := s.retireVlogLocked(ctx, sourceID); err != nil {
 		return err
 	}
-	return s.db.MarkJobDone(ctx, job.ID)
+	return s.db.MarkJobDone(ctx, jobID)
 }
 
 // retireVlogLocked drops a fully-drained vlog from the catalog and unmounts and
