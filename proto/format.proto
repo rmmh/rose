@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package rose.v1;
+option go_package = "github.com/rmmh/rose/proto";
+
+// PlogHeader is the protobuf payload of a plog's on-disk superblock (sector 0).
+// It makes a plog self-describing: its own identity, the cluster it belongs to,
+// the disk it lives on, and its vlog membership at creation time. UIDs are the
+// stable, collision-resistant identifiers; the small monotonic *_id fields are
+// runtime conveniences that can collide across wiped/recreated clusters. The
+// membership fields reflect the layout at creation; the metadata DB remains
+// authoritative for live placement.
+message PlogHeader {
+  bytes  cluster_uid = 1;  // 15 bytes, from the SQLite cluster record
+  bytes  plog_uid    = 2;  // 15 bytes, this plog's UID
+  uint32 plog_id     = 3;  // small monotonic int, runtime mapping
+  bytes  disk_uid    = 4;  // 15 bytes, identifies the physical disk
+  uint32 disk_id     = 14; // small int, config-relative
+  int64  created_at_nanos = 5; // unix nanos at creation
+  string writer_version   = 6; // software/build identifier (best-effort)
+
+  // Vlog membership ("vlog header") captured at creation.
+  bytes  vlog_uid          = 7;  // 15 bytes, owning vlog's UID
+  uint32 vlog_id           = 8;
+  uint32 shard_index       = 9;
+  string protection_scheme = 10; // NONE | DUPLICATE | EC
+  uint32 data_shards       = 11;
+  uint32 parity_shards     = 12;
+  // Indexed by shard_index; each entry is a 15-byte plog UID.
+  repeated bytes sibling_plog_uids = 13;
+}

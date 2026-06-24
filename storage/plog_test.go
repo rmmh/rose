@@ -84,7 +84,7 @@ func TestPlogDetectsBitrotOnRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Sector 0 lives in a completed block, so its hash is durably on disk.
-	corruptByte(t, path, 100)
+	corruptByte(t, path, CalcPhysical(100))
 	if _, err := p.Read(0, 256); !errors.Is(err, ErrBitrot) {
 		t.Fatalf("read of corrupt sector = %v, want ErrBitrot", err)
 	}
@@ -106,7 +106,7 @@ func TestPlogScrubReportsCorruption(t *testing.T) {
 	if res, err := p.Scrub(); err != nil || !res.Healthy() {
 		t.Fatalf("scrub of healthy plog: res=%+v err=%v", res, err)
 	}
-	corruptByte(t, path, dataPerBlock-50) // last data sector of block 0
+	corruptByte(t, path, CalcPhysical(dataPerBlock-50)) // last data sector of block 0
 	res, err := p.Scrub()
 	if err != nil {
 		t.Fatal(err)
@@ -202,8 +202,8 @@ func TestPlogTrailingBlockVerifiableAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() != 7*SectorSize {
-		t.Fatalf("file is %d bytes, want %d (5 sealed + ragged slot + trailer)", info.Size(), 7*SectorSize)
+	if info.Size() != plogHeaderSize+7*SectorSize {
+		t.Fatalf("file is %d bytes, want %d (superblock + 5 sealed + ragged slot + trailer)", info.Size(), plogHeaderSize+7*SectorSize)
 	}
 	trailerStart := info.Size() - SectorSize
 
@@ -219,7 +219,7 @@ func TestPlogTrailingBlockVerifiableAcrossRestart(t *testing.T) {
 	_ = reopened.Close()
 
 	// Rot a byte in the second sealed sector while the plog is closed.
-	corruptByte(t, path, SectorSize+100)
+	corruptByte(t, path, CalcPhysical(SectorSize+100))
 
 	reopened, err = OpenPlog(path, 1)
 	if err != nil {
@@ -267,8 +267,8 @@ func TestPlogOpenTrailerConsumedWhenBlockCompletes(t *testing.T) {
 	}
 	if info, err := os.Stat(path); err != nil {
 		t.Fatal(err)
-	} else if info.Size() != 5*SectorSize {
-		t.Fatalf("open block is %d bytes, want %d (3 sealed + ragged slot + trailer)", info.Size(), 5*SectorSize)
+	} else if info.Size() != plogHeaderSize+5*SectorSize {
+		t.Fatalf("open block is %d bytes, want %d (superblock + 3 sealed + ragged slot + trailer)", info.Size(), plogHeaderSize+5*SectorSize)
 	}
 
 	// Fill out exactly one full block: its hash sector lands in the main file and
@@ -284,8 +284,8 @@ func TestPlogOpenTrailerConsumedWhenBlockCompletes(t *testing.T) {
 	}
 	if info, err := os.Stat(path); err != nil {
 		t.Fatal(err)
-	} else if info.Size() != blockPhysical {
-		t.Fatalf("completed block is %d bytes, want %d (no trailing trailer)", info.Size(), int64(blockPhysical))
+	} else if info.Size() != plogHeaderSize+blockPhysical {
+		t.Fatalf("completed block is %d bytes, want %d (no trailing trailer)", info.Size(), int64(plogHeaderSize+blockPhysical))
 	}
 
 	// A restart reports just the block's logical bytes, with no phantom open block.
@@ -343,7 +343,7 @@ func TestDuplicateVlogSurvivesBitrot(t *testing.T) {
 	}
 
 	// Corrupt the first replica; the duplicate must still serve correct data.
-	corruptByte(t, pathA, 100)
+	corruptByte(t, pathA, CalcPhysical(100))
 	if _, err := plogA.Read(0, 256); !errors.Is(err, ErrBitrot) {
 		t.Fatalf("replica A read = %v, want ErrBitrot", err)
 	}

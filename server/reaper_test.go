@@ -323,7 +323,7 @@ func TestRecoverTornWriteFromCatalog(t *testing.T) {
 
 	// 2. Corrupt a byte in the first data sector (logical offset 100)
 	corruptByte := []byte{0xFF}
-	if _, err := f.WriteAt(corruptByte, 100); err != nil {
+	if _, err := f.WriteAt(corruptByte, storage.CalcPhysical(100)); err != nil {
 		t.Fatal(err)
 	}
 	f.Close()

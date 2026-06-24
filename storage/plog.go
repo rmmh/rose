@@ -11,12 +11,24 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	pb "github.com/rmmh/rose/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 // ErrBitrot is returned when a data sector's content no longer matches the
 // hash recorded for it. Callers protecting a virtual log with redundancy treat
 // it like a missing shard and fall through to another copy.
 var ErrBitrot = errors.New("bitrot detected")
+
+// ErrUnrecognizedPlogFormat is returned when a plog file lacks the superblock
+// magic: a foreign file, or a legacy headerless plog that predates the on-disk
+// format. Such files are not supported and must be wiped and recreated.
+var ErrUnrecognizedPlogFormat = errors.New("unrecognized plog format (missing superblock magic)")
+
+// ErrPlogHeaderCorrupt is returned when a plog superblock has the magic but
+// fails its HMAC or length checks: a torn write to sector 0, or tampering.
+var ErrPlogHeaderCorrupt = errors.New("plog superblock corrupt")
 
 // Plog represents an append-only physical log file on disk.
 //
@@ -53,6 +65,8 @@ type Plog struct {
 	hashes     []byte // hashes of sealed sectors in the current open block
 	writeBuf   []byte // reusable batched-write scratch, grown under p.mu
 	hashSector [SectorSize]byte
+
+	header *pb.PlogHeader // parsed superblock (sector 0)
 }
 
 // openTrailerMagic tags the inline open-block trailer sector Commit writes after
@@ -62,6 +76,20 @@ type Plog struct {
 const (
 	openTrailerMagic  = "ROSEOPB1"
 	openTrailerHeader = 12
+)
+
+// The plog superblock occupies sector 0, before any data. Its fixed prefix is an
+// 8-byte magic, a uint16 format version, and a uint32 protobuf payload length;
+// the marshaled PlogHeader follows, and the last HashSize bytes of the sector
+// hold an HMAC over everything before them. Data sectors begin at sector 1, so
+// every physical offset is shifted by plogHeaderSize (see CalcPhysical).
+const (
+	plogMagic            = "ROSEPLG1"
+	plogFormatVersion    = 1
+	plogHeaderSize       = SectorSize
+	plogHeaderPrefix     = 14               // magic(8) + version(2) + payloadLen(4)
+	plogHeaderHMACOffset = SectorSize - HashSize
+	plogHeaderMaxPayload = plogHeaderHMACOffset - plogHeaderPrefix
 )
 
 const (
@@ -102,11 +130,37 @@ func sectorHash(data []byte) [HashSize]byte {
 	return out
 }
 
-func OpenPlog(path string, id uint32) (*Plog, error) {
+// OpenOption configures OpenPlog.
+type OpenOption func(*openOptions)
+
+type openOptions struct {
+	header *pb.PlogHeader
+}
+
+// WithHeader supplies the superblock header stamped into a freshly created plog.
+// Production callers always pass it so the plog is self-describing; if omitted,
+// a freshly created plog gets an empty (identity-less) but otherwise valid
+// superblock. An existing file's own superblock is always authoritative.
+func WithHeader(h *pb.PlogHeader) OpenOption {
+	return func(o *openOptions) { o.header = h }
+}
+
+// OpenPlog opens or creates a plog. A freshly created (zero-length) file is
+// stamped with the WithHeader superblock (or an empty one if none is given); an
+// existing file's own superblock is authoritative and any WithHeader is ignored.
+func OpenPlog(path string, id uint32, opts ...OpenOption) (*Plog, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
-	return openPlogFile(path, id, os.O_RDWR|os.O_CREATE)
+	var o openOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	header := o.header
+	if header == nil {
+		header = &pb.PlogHeader{PlogId: id}
+	}
+	return openPlogFile(path, id, os.O_RDWR|os.O_CREATE, header)
 }
 
 // OpenExistingPlog opens an already-provisioned plog without creating it. If the
@@ -114,12 +168,13 @@ func OpenPlog(path string, id uint32) (*Plog, error) {
 // fs.ErrNotExist), letting recovery distinguish a genuinely lost shard (stub it
 // offline, or fail the durability gate) from one that is merely unreadable.
 // Unlike OpenPlog, whose O_CREATE would silently resurrect a missing shard as an
-// empty file and present it as valid, this never fabricates a shard.
+// empty file and present it as valid, this never fabricates a shard. It requires
+// a valid superblock and never writes one.
 func OpenExistingPlog(path string, id uint32) (*Plog, error) {
-	return openPlogFile(path, id, os.O_RDWR)
+	return openPlogFile(path, id, os.O_RDWR, nil)
 }
 
-func openPlogFile(path string, id uint32, flag int) (*Plog, error) {
+func openPlogFile(path string, id uint32, flag int, header *pb.PlogHeader) (*Plog, error) {
 	f, err := os.OpenFile(path, flag, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open plog: %w", err)
@@ -131,18 +186,96 @@ func openPlogFile(path string, id uint32, flag int) (*Plog, error) {
 	}
 
 	p := &Plog{
-		id:            id,
-		file:          f,
-		logicalLength: CalcLogical(info.Size()),
-		buf:           make([]byte, 0, SectorSize),
-		hashes:        make([]byte, 0, HashesPerBlock*HashSize),
-		writeBuf:      make([]byte, 0, 2*SectorSize),
+		id:       id,
+		file:     f,
+		buf:      make([]byte, 0, SectorSize),
+		hashes:   make([]byte, 0, HashesPerBlock*HashSize),
+		writeBuf: make([]byte, 0, 2*SectorSize),
 	}
+
+	if info.Size() == 0 {
+		// Fresh file: stamp the superblock and start with an empty data region.
+		if header == nil {
+			f.Close()
+			return nil, fmt.Errorf("open plog %d: new file requires a header", id)
+		}
+		if err := writeSuperblock(f, header); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("open plog %d: %w", id, err)
+		}
+		p.header = header
+		p.logicalLength = 0
+	} else {
+		hdr, err := readSuperblock(f)
+		if err != nil {
+			f.Close()
+			return nil, fmt.Errorf("open plog %d: %w", id, err)
+		}
+		p.header = hdr
+		p.logicalLength = CalcLogical(info.Size())
+	}
+
 	if err := p.reload(); err != nil {
 		f.Close()
 		return nil, err
 	}
 	return p, nil
+}
+
+// Header returns the parsed superblock of the plog. It is never nil for an open
+// plog.
+func (p *Plog) Header() *pb.PlogHeader { return p.header }
+
+// writeSuperblock marshals hdr into sector 0 with magic, version, length, and a
+// trailing HMAC, then writes it at offset 0.
+func writeSuperblock(f *os.File, hdr *pb.PlogHeader) error {
+	payload, err := proto.Marshal(hdr)
+	if err != nil {
+		return fmt.Errorf("marshal plog header: %w", err)
+	}
+	if len(payload) > plogHeaderMaxPayload {
+		return fmt.Errorf("plog header too large: %d > %d", len(payload), plogHeaderMaxPayload)
+	}
+	sec := make([]byte, plogHeaderSize)
+	copy(sec, plogMagic)
+	binary.LittleEndian.PutUint16(sec[8:10], plogFormatVersion)
+	binary.LittleEndian.PutUint32(sec[10:14], uint32(len(payload)))
+	copy(sec[plogHeaderPrefix:], payload)
+	mac := hmac.New(sha256.New, bitrotKey)
+	mac.Write(sec[:plogHeaderHMACOffset])
+	copy(sec[plogHeaderHMACOffset:], mac.Sum(nil)[:HashSize])
+	if _, err := f.WriteAt(sec, 0); err != nil {
+		return fmt.Errorf("write plog superblock: %w", err)
+	}
+	return nil
+}
+
+// readSuperblock reads and validates sector 0, returning the parsed header.
+func readSuperblock(f *os.File) (*pb.PlogHeader, error) {
+	sec := make([]byte, plogHeaderSize)
+	if n, err := f.ReadAt(sec, 0); err != nil && n < plogHeaderSize {
+		return nil, ErrUnrecognizedPlogFormat
+	}
+	if string(sec[:len(plogMagic)]) != plogMagic {
+		return nil, ErrUnrecognizedPlogFormat
+	}
+	if ver := binary.LittleEndian.Uint16(sec[8:10]); ver != plogFormatVersion {
+		return nil, fmt.Errorf("plog format version %d unsupported (want %d)", ver, plogFormatVersion)
+	}
+	mac := hmac.New(sha256.New, bitrotKey)
+	mac.Write(sec[:plogHeaderHMACOffset])
+	if !hmac.Equal(mac.Sum(nil)[:HashSize], sec[plogHeaderHMACOffset:plogHeaderHMACOffset+HashSize]) {
+		return nil, ErrPlogHeaderCorrupt
+	}
+	n := binary.LittleEndian.Uint32(sec[10:14])
+	if int(n) > plogHeaderMaxPayload {
+		return nil, ErrPlogHeaderCorrupt
+	}
+	var hdr pb.PlogHeader
+	if err := proto.Unmarshal(sec[plogHeaderPrefix:plogHeaderPrefix+int(n)], &hdr); err != nil {
+		return nil, fmt.Errorf("unmarshal plog header: %w", err)
+	}
+	return &hdr, nil
 }
 
 // reload reconstructs the in-memory open sector and the hashes of already
@@ -239,7 +372,7 @@ func (p *Plog) TruncateTo(logical int64) error {
 // start be block-aligned) means a real data sector left in the trailer's place
 // by a torn write is rejected rather than mistaken for one.
 func (p *Plog) recoverFromTrailer(size int64) bool {
-	if size < 2*SectorSize {
+	if size < plogHeaderSize+2*SectorSize {
 		return false
 	}
 	trailer := make([]byte, SectorSize)
@@ -264,11 +397,14 @@ func (p *Plog) recoverFromTrailer(size int64) bool {
 	}
 	// The trailer sits at block-position c+1, so the block begins c+1 sectors
 	// before it; that start must land on a block boundary to be the real thing.
+	// blockStartPhys is a physical file offset (superblock-inclusive), so the
+	// alignment check works in data-relative coordinates.
 	blockStartPhys := (size - SectorSize) - int64(c+1)*SectorSize
-	if blockStartPhys < 0 || blockStartPhys%blockPhysical != 0 {
+	dataRelStart := blockStartPhys - plogHeaderSize
+	if dataRelStart < 0 || dataRelStart%blockPhysical != 0 {
 		return false
 	}
-	blockStartLogical := (blockStartPhys / blockPhysical) * dataPerBlock
+	blockStartLogical := (dataRelStart / blockPhysical) * dataPerBlock
 	sealed := blockStartLogical + int64(c)*SectorSize
 	if raggedLen > 0 {
 		p.buf = p.buf[:raggedLen]
@@ -282,8 +418,13 @@ func (p *Plog) recoverFromTrailer(size int64) bool {
 	return true
 }
 
-// CalcLogical converts physical plog bytes to logical data bytes.
+// CalcLogical converts a physical plog file offset to logical data bytes. The
+// first sector is the superblock, so it is subtracted before the block math.
 func CalcLogical(phys int64) int64 {
+	phys -= plogHeaderSize
+	if phys < 0 {
+		return 0
+	}
 	// Every 255 * 4096 bytes of data is followed by 1 * 4096 bytes of hashes.
 	// We need to calculate how many data bytes are in `phys` bytes.
 	chunks := phys / blockPhysical
@@ -298,11 +439,19 @@ func CalcLogical(phys int64) int64 {
 	return logical
 }
 
-// CalcPhysical converts logical data bytes to physical plog bytes.
+// CalcPhysical converts logical data bytes to a physical plog file offset,
+// accounting for the leading superblock sector.
 func CalcPhysical(logical int64) int64 {
 	chunks := logical / dataPerBlock
 	rem := logical % dataPerBlock
-	return chunks*blockPhysical + rem
+	return plogHeaderSize + chunks*blockPhysical + rem
+}
+
+// hashSectorPhys returns the physical file offset of block blockIdx's hash
+// sector, which immediately follows that block's 255 data sectors. Like
+// CalcPhysical it includes the leading superblock sector.
+func hashSectorPhys(blockIdx int64) int64 {
+	return plogHeaderSize + blockIdx*blockPhysical + dataPerBlock
 }
 
 // Write appends data to the plog and returns the starting logical offset.
@@ -454,7 +603,7 @@ func (p *Plog) sealSector() error {
 		// The hash sector sits right after the 255 data sectors just sealed.
 		sealed := p.logicalLength - int64(len(p.buf))
 		blockIdx := sealed/dataPerBlock - 1
-		if _, err := p.file.WriteAt(p.hashSector[:], blockIdx*blockPhysical+dataPerBlock); err != nil {
+		if _, err := p.file.WriteAt(p.hashSector[:], hashSectorPhys(blockIdx)); err != nil {
 			return fmt.Errorf("write plog %d hash sector: %w", p.id, err)
 		}
 		p.hashes = p.hashes[:0]
@@ -547,9 +696,9 @@ func (p *Plog) sectorHashFor(sectorIdx, sealed int64) ([]byte, bool, error) {
 	blockEndLogical := (blockIdx + 1) * dataPerBlock
 
 	if sealed >= blockEndLogical {
-		hashSectorPhys := blockIdx*blockPhysical + dataPerBlock
+		hashPhys := hashSectorPhys(blockIdx)
 		hash := make([]byte, HashSize)
-		if _, err := p.file.ReadAt(hash, hashSectorPhys+posInBlock*HashSize); err != nil {
+		if _, err := p.file.ReadAt(hash, hashPhys+posInBlock*HashSize); err != nil {
 			return nil, false, fmt.Errorf("read plog %d hash sector %d: %w", p.id, blockIdx, err)
 		}
 		return hash, true, nil
@@ -592,7 +741,7 @@ func (p *Plog) Scrub() (ScrubResult, error) {
 	var res ScrubResult
 	for blockIdx := int64(0); blockIdx < completeBlocks; blockIdx++ {
 		hashSector := make([]byte, SectorSize)
-		if _, err := p.file.ReadAt(hashSector, blockIdx*blockPhysical+dataPerBlock); err != nil {
+		if _, err := p.file.ReadAt(hashSector, hashSectorPhys(blockIdx)); err != nil {
 			return res, fmt.Errorf("scrub plog %d hash sector %d: %w", p.id, blockIdx, err)
 		}
 		recorded := hashSector[:HashesPerBlock*HashSize]

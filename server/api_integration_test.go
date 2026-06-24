@@ -853,7 +853,7 @@ func TestScrubFlagsCorruptionAndReplicaServesGoodData(t *testing.T) {
 	if err != nil || len(entries) == 0 {
 		t.Fatalf("read disk1: %v", err)
 	}
-	corruptFileByte(t, filepath.Join(disk1, entries[0].Name()), 100)
+	corruptFileByte(t, filepath.Join(disk1, entries[0].Name()), storage.CalcPhysical(100))
 
 	scrubbed, err := s.Scrub()
 	if err != nil {
