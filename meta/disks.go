@@ -2,6 +2,7 @@ package meta
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/rmmh/rose/uid"
@@ -90,6 +91,9 @@ func (d *DB) ListDisks(ctx context.Context) ([]DiskInfo, error) {
 func (d *DB) DiskUID(ctx context.Context, diskID uint32) (uid.UID, error) {
 	var rawUID []byte
 	err := d.db.QueryRowContext(ctx, "SELECT uid FROM disk WHERE id = ?", diskID).Scan(&rawUID)
+	if err == sql.ErrNoRows {
+		return uid.UID{}, nil
+	}
 	if err != nil {
 		return uid.UID{}, err
 	}

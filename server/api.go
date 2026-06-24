@@ -997,11 +997,18 @@ func (s *Server) MakeVlog(ctx context.Context, req *pb.MakeVlogRequest) (*pb.Mak
 
 // Plog Operations
 func (s *Server) MakePlog(ctx context.Context, req *pb.MakePlogRequest) (*pb.MakePlogResponse, error) {
-	id, err := s.db.MakePlog(ctx, uid.New(), req.GetDiskId())
+	plogUID := uid.New()
+	id, err := s.db.MakePlog(ctx, plogUID, req.GetDiskId())
 	if err != nil {
 		return nil, err
 	}
-	plog, err := storage.OpenPlog(s.plogPath(req.GetDiskId(), id), id)
+	// A bare plog created via the RPC has no vlog membership yet, so its
+	// superblock carries only the cluster/plog/disk identity.
+	header, err := s.basePlogHeader(ctx, id, req.GetDiskId(), plogUID)
+	if err != nil {
+		return nil, err
+	}
+	plog, err := storage.OpenPlog(s.plogPath(req.GetDiskId(), id), id, storage.WithHeader(header))
 	if err != nil {
 		return nil, err
 	}

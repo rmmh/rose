@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/rmmh/rose/uid"
 )
 
 // Job is one entry in the durable maintenance work stream.
@@ -350,8 +352,15 @@ func (d *DB) RetireVlog(ctx context.Context, vlogID uint32) ([]PlogInfo, error) 
 // GetVlog returns one vlog's protection configuration.
 func (d *DB) GetVlog(ctx context.Context, vlogID uint32) (VlogInfo, error) {
 	var info VlogInfo
+	var rawUID []byte
 	err := d.db.QueryRowContext(ctx,
-		"SELECT id, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards FROM vlog WHERE id = ?", vlogID).
-		Scan(&info.ID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards)
-	return info, err
+		"SELECT id, uid, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards FROM vlog WHERE id = ?", vlogID).
+		Scan(&info.ID, &rawUID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards)
+	if err != nil {
+		return VlogInfo{}, err
+	}
+	if info.UID, err = uid.FromBytes(rawUID); err != nil {
+		return VlogInfo{}, fmt.Errorf("decode vlog %d uid: %w", vlogID, err)
+	}
+	return info, nil
 }

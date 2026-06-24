@@ -46,7 +46,10 @@ type Server struct {
 	// falls back to meta.DefaultBucketPolicy. Guarded by vlogMu.
 	bucketPolicies map[string]meta.BucketPolicy
 	dataDir        string
-	diskRoots      map[uint32]string
+	// clusterUID is the singleton cluster identity, cached from the metadata DB on
+	// Recover and stamped into every plog superblock written thereafter.
+	clusterUID uid.UID
+	diskRoots  map[uint32]string
 	// diskState caches the lifecycle state of every configured disk, kept in sync
 	// with the durable disk catalog. Configured disks start active.
 	diskState map[uint32]string
@@ -283,6 +286,13 @@ func (s *Server) Recover(ctx context.Context) error {
 	if err := s.reconcileDiskRoots(ctx); err != nil {
 		return err
 	}
+	// Cache the cluster identity so plog superblocks written during this run can be
+	// stamped with it without a per-write metadata query.
+	clusterUID, _, _, err := s.db.ClusterInfo(ctx)
+	if err != nil {
+		return err
+	}
+	s.clusterUID = clusterUID
 	disks, err := s.db.ListDisks(ctx)
 	if err != nil {
 		return err
@@ -606,9 +616,25 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 	if err != nil {
 		return 0, nil, err
 	}
-	clients := make([]storage.PlogClient, 0, clientCount)
+
+	// Phase 1: create and map every shard's plog, recording each one's UID so the
+	// full sibling set is known before any superblock is written. The header
+	// captures the membership at creation as a recovery hint; the metadata DB stays
+	// authoritative for live placement.
+	type shardPlog struct {
+		plogID  uint32
+		diskID  uint32
+		plogUID uid.UID
+		diskUID uid.UID
+	}
+	shards := make([]shardPlog, 0, clientCount)
+	siblingUIDs := make([][]byte, clientCount)
 	for shard := 0; shard < clientCount; shard++ {
 		diskID := diskIDs[shard]
+		diskUID, err := s.db.DiskUID(ctx, diskID)
+		if err != nil {
+			return 0, nil, fmt.Errorf("look up disk %d uid: %w", diskID, err)
+		}
 		plogUID := uid.New()
 		plogID, err := s.db.MakePlog(ctx, plogUID, diskID)
 		if err != nil {
@@ -617,11 +643,37 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 		if err := s.db.AssignPlogToVlog(ctx, id, shard, plogID); err != nil {
 			return 0, nil, err
 		}
-		plog, err := storage.OpenPlog(s.plogPath(diskID, plogID), plogID)
-		if err != nil {
-			return 0, nil, fmt.Errorf("open plog %d: %w", plogID, err)
+		shards = append(shards, shardPlog{plogID, diskID, plogUID, diskUID})
+		sib := plogUID
+		siblingUIDs[shard] = sib[:]
+	}
+
+	// Phase 2: open each plog with a fully populated superblock.
+	clients := make([]storage.PlogClient, 0, clientCount)
+	for shard, sp := range shards {
+		cluster := s.clusterUID
+		self := sp.plogUID
+		vu := vlogUID
+		du := sp.diskUID
+		header := &pb.PlogHeader{
+			ClusterUid:       cluster[:],
+			PlogUid:          self[:],
+			PlogId:           sp.plogID,
+			DiskUid:          du[:],
+			CreatedAtNanos:   time.Now().UnixNano(),
+			VlogUid:          vu[:],
+			VlogId:           id,
+			ShardIndex:       uint32(shard),
+			ProtectionScheme: scheme,
+			DataShards:       uint32(dataShards),
+			ParityShards:     uint32(parityShards),
+			SiblingPlogUids:  siblingUIDs,
 		}
-		s.plogs[plogID] = plog
+		plog, err := storage.OpenPlog(s.plogPath(sp.diskID, sp.plogID), sp.plogID, storage.WithHeader(header))
+		if err != nil {
+			return 0, nil, fmt.Errorf("open plog %d: %w", sp.plogID, err)
+		}
+		s.plogs[sp.plogID] = plog
 		clients = append(clients, &localPlogClient{plog: plog})
 	}
 	vlog, err := storage.NewVlog(id, scheme, dataShards, parityShards, clients, 0)
@@ -630,6 +682,69 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 	}
 	s.vlogs[id] = vlog
 	return id, vlog, nil
+}
+
+// basePlogHeader builds the cluster/plog/disk portion of a fresh plog's
+// superblock: the cluster identity, the plog's own UID and id, its disk UID, and
+// a creation timestamp. Vlog membership is layered on by the caller when the plog
+// backs a vlog shard.
+func (s *Server) basePlogHeader(ctx context.Context, plogID, diskID uint32, plogUID uid.UID) (*pb.PlogHeader, error) {
+	diskUID, err := s.db.DiskUID(ctx, diskID)
+	if err != nil {
+		return nil, fmt.Errorf("look up disk %d uid: %w", diskID, err)
+	}
+	cluster := s.clusterUID
+	self := plogUID
+	du := diskUID
+	return &pb.PlogHeader{
+		ClusterUid:     cluster[:],
+		PlogUid:        self[:],
+		PlogId:         plogID,
+		DiskUid:        du[:],
+		CreatedAtNanos: time.Now().UnixNano(),
+	}, nil
+}
+
+// stampVlogMembership records, on a fresh plog's header, the membership of the
+// vlog shard it backs: the vlog UID/id, this shard index, scheme and shard
+// counts, and the UIDs of every sibling shard plog. It is a best-effort recovery
+// hint captured at creation; the metadata DB stays authoritative for live
+// placement, so a sibling whose UID cannot be read is left zero rather than
+// failing the write.
+func (s *Server) stampVlogMembership(ctx context.Context, h *pb.PlogHeader, vlogID uint32, shardIdx int) error {
+	vinfo, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		return err
+	}
+	members, err := s.db.ListVlogPlogs(ctx, vlogID)
+	if err != nil {
+		return err
+	}
+	siblings := make([][]byte, len(members))
+	for _, m := range members {
+		su, err := s.db.PlogUID(ctx, m.PlogID)
+		if err != nil {
+			return err
+		}
+		if m.ShardIndex >= 0 && m.ShardIndex < len(siblings) {
+			sib := su
+			siblings[m.ShardIndex] = sib[:]
+		}
+	}
+	// This plog may not yet be mapped at shardIdx (e.g. a reprotect that flips the
+	// mapping only after the bytes are durable), so record our own UID there.
+	if shardIdx >= 0 && shardIdx < len(siblings) {
+		siblings[shardIdx] = h.PlogUid
+	}
+	vu := vinfo.UID
+	h.VlogUid = vu[:]
+	h.VlogId = vlogID
+	h.ShardIndex = uint32(shardIdx)
+	h.ProtectionScheme = vinfo.ProtectionScheme
+	h.DataShards = uint32(vinfo.DataShards)
+	h.ParityShards = uint32(vinfo.ParityShards)
+	h.SiblingPlogUids = siblings
+	return nil
 }
 
 // plogClientLocked returns the in-memory client for a shard's backing plog: the
