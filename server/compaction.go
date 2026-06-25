@@ -154,7 +154,7 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 		offset int64
 	}, 0, len(live))
 	for _, c := range live {
-		data, err := source.Read(ctx, c.VaddrOffset, c.LogicalLen)
+		data, err := source.Read(ctx, c.VaddrOffset, storage.ChunkHeaderSize+c.LogicalLen)
 		if err != nil {
 			return fmt.Errorf("compact: read chunk from vlog %d: %w", sourceID, err)
 		}

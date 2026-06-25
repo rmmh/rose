@@ -3,12 +3,16 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -39,6 +43,7 @@ type FileHandle struct {
 	chunker      *chunkers.Chunker
 	chunkerInput bytes.Reader
 	chunks       []meta.ChunkPlacement
+	fileID64     uint64
 }
 
 func (h *FileHandle) path() string {
@@ -86,6 +91,9 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 			return nil, fmt.Errorf("write operation key is already bound to %q", op.Path)
 		}
 		h.writeOpID, h.writeKey = op.ID, op.IdempotencyKey
+		if err := s.ensureRecoveryFileID(ctx, h, op); err != nil {
+			return nil, err
+		}
 		if err := s.buildCache(ctx, h); err != nil {
 			return nil, err
 		}
@@ -297,7 +305,7 @@ func (s *Server) readChunksAt(ctx context.Context, chunks []meta.ChunkPlacement,
 			if off+length < readEnd {
 				readEnd = off + length
 			}
-			data, err := vlog.Read(ctx, placement.VaddrOffset+(readStart-cur), int(readEnd-readStart))
+			data, err := vlog.Read(ctx, placement.VaddrOffset+storage.ChunkHeaderSize+(readStart-cur), int(readEnd-readStart))
 			if err != nil {
 				return nil, err
 			}
@@ -481,7 +489,32 @@ func (s *Server) ensureWriteOperation(ctx context.Context, h *FileHandle, handle
 		return err
 	}
 	h.writeOpID, h.writeKey = op.ID, key
+	if err := s.ensureRecoveryFileID(ctx, h, op); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Server) ensureRecoveryFileID(ctx context.Context, h *FileHandle, op meta.WriteOp) error {
+	if h.fileID64 != 0 {
+		return nil
+	}
+	if len(op.Tail) >= 8 {
+		h.fileID64 = binary.LittleEndian.Uint64(op.Tail[:8])
+		if h.fileID64 != 0 {
+			return nil
+		}
+	}
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return err
+	}
+	h.fileID64 = binary.LittleEndian.Uint64(buf[:])
+	if h.fileID64 == 0 {
+		h.fileID64 = uint64(time.Now().UnixNano())
+	}
+	binary.LittleEndian.PutUint64(buf[:], h.fileID64)
+	return s.db.SetWriteOpTail(ctx, op.ID, buf[:])
 }
 
 func (s *Server) leasedVlogForWriteReserved(ctx context.Context, opID int64, path string, n int, reserved map[uint32]int64) (uint32, *storage.Vlog, error) {
@@ -660,16 +693,32 @@ func (s *Server) buildCache(ctx context.Context, h *FileHandle) error {
 // The caller holds the operation lock.
 func (s *Server) spillCache(ctx context.Context, h *FileHandle) error {
 	for {
+		h.cache.mu.Lock()
+		startOffset := h.cache.settledLen
+		prev := placementHash64(h.cache.settled)
+		ordinal := len(h.cache.settled)
+		h.cache.mu.Unlock()
 		data := h.cache.spillPrefix()
 		if data == nil {
 			return nil
 		}
-		placements, err := s.storeChunks(ctx, h, data)
+		placements, err := s.storeChunks(ctx, h, data, startOffset, prev, ordinal, false)
 		if err != nil {
 			return err
 		}
 		h.cache.commitSpill(placements, int64(len(data)))
 	}
+}
+
+func placementHash64(placements []meta.ChunkPlacement) uint64 {
+	if len(placements) == 0 {
+		return 0
+	}
+	p := placements[len(placements)-1]
+	if len(p.Hash) >= 8 {
+		return binary.LittleEndian.Uint64(p.Hash[:8])
+	}
+	return 0
 }
 
 // pendingChunk is a new chunk's reserved vlog placement together with the bytes
@@ -720,7 +769,7 @@ func (h *FileHandle) chunkerForData(data []byte) (*chunkers.Chunker, error) {
 // durably (or reuses an existing one by content hash), returning the ordered
 // placements. The chunks tile the input exactly, so their logical lengths sum to
 // len(data).
-func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([]meta.ChunkPlacement, error) {
+func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte, startOffset int64, prevHash64 uint64, ordinalBase int, final bool) ([]meta.ChunkPlacement, error) {
 	chunker, err := h.chunkerForData(data)
 	if err != nil {
 		return nil, err
@@ -736,6 +785,8 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([
 	}()
 
 	reserved := map[uint32]int64{}
+	localOffset := int64(0)
+	ordinal := ordinalBase
 	for {
 		chunk, nextErr := chunker.Next()
 		if nextErr != nil && nextErr != io.EOF {
@@ -752,7 +803,9 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([
 			}
 			copy(chunkCopy, chunk)
 
-			p, plan, err := s.planChunk(ctx, h, chunkCopy, reserved)
+			fileOffset := startOffset + localOffset
+			isLast := final && nextErr == io.EOF
+			p, plan, err := s.planChunk(ctx, h, chunkCopy, reserved, fileOffset, prevHash64, ordinal, isLast)
 			if err != nil {
 				return nil, err
 			}
@@ -760,6 +813,9 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([
 			if plan != nil {
 				pending = append(pending, *plan)
 			}
+			prevHash64 = hash64(chunkCopy)
+			localOffset += int64(len(chunkCopy))
+			ordinal++
 		}
 		if nextErr == io.EOF {
 			break
@@ -775,7 +831,7 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte) ([
 // whose hash already exists is reused outright (dedup); otherwise its exact
 // reserved placement is returned alongside the bytes to seal, so a later grouped
 // vlog commit can make a whole batch durable together.
-func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, reserved map[uint32]int64) (meta.ChunkPlacement, *pendingChunk, error) {
+func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, reserved map[uint32]int64, fileOffset int64, prevHash64 uint64, ordinal int, last bool) (meta.ChunkPlacement, *pendingChunk, error) {
 	sum := sha256.Sum256(data)
 	hash := sum[:15]
 	// Pin-and-resolve rather than a bare lookup: a dedup hit reuses an existing
@@ -788,13 +844,74 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 	} else if ok {
 		return p, nil, nil
 	}
-	vlogID, _, err := s.leasedVlogForWriteReserved(ctx, h.writeOpID, h.path(), len(data), reserved)
+	recordLen := storage.ChunkHeaderSize + len(data)
+	vlogID, _, err := s.leasedVlogForWriteReserved(ctx, h.writeOpID, h.path(), recordLen, reserved)
 	if err != nil {
 		return meta.ChunkPlacement{}, nil, err
 	}
-	vaddr := reserved[vlogID] - int64(len(data))
-	pending := &pendingChunk{vlogID: vlogID, vaddr: vaddr, data: data}
+	vaddr := reserved[vlogID] - int64(recordLen)
+	record := make([]byte, recordLen)
+	flags := byte(0)
+	if fileOffset == 0 {
+		flags |= storage.ChunkFlagInitial
+	}
+	if last {
+		flags |= storage.ChunkFlagLast
+	}
+	hdr := storage.ChunkHeader{
+		Flags:      flags,
+		FileID:     h.fileID64,
+		ChunkHash:  binary.LittleEndian.Uint64(sum[:8]),
+		PayloadLen: uint32(len(data)),
+		FileOffset: uint64(fileOffset),
+		PrevHash:   prevHash64,
+		PathHint:   pathHint(h.path(), flags&storage.ChunkFlagInitial != 0, ordinal),
+	}
+	encoded := hdr.Encode()
+	copy(record, encoded[:])
+	copy(record[storage.ChunkHeaderSize:], data)
+	pending := &pendingChunk{vlogID: vlogID, vaddr: vaddr, data: record}
 	return meta.ChunkPlacement{Hash: append([]byte(nil), hash...), VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data), CompressedLen: len(data)}, pending, nil
+}
+
+func hash64(data []byte) uint64 {
+	sum := sha256.Sum256(data)
+	return binary.LittleEndian.Uint64(sum[:8])
+}
+
+func pathHint(path string, initial bool, ordinal int) [32]byte {
+	var out [32]byte
+	if path == "" {
+		return out
+	}
+	clean := filepath.Clean(path)
+	if clean == "." {
+		clean = ""
+	}
+	if initial {
+		if len(clean) < len(out) {
+			copy(out[:], clean)
+			return out
+		}
+		out[0] = byte(len(clean))
+		if len(clean) > 255 {
+			out[0] = 255
+		}
+		dir := filepath.Dir(clean)
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(dir))
+		binary.LittleEndian.PutUint32(out[1:5], h.Sum32())
+		copy(out[5:], clean[len(clean)-(len(out)-5):])
+		return out
+	}
+	if len(clean) == 0 {
+		return out
+	}
+	start := (ordinal * 16) % len(clean)
+	for i := 0; i < 16; i++ {
+		out[i] = clean[(start+i)%len(clean)]
+	}
+	return out
 }
 
 // sealChunks writes each new chunk's reserved bytes into its leased vlog,
@@ -925,7 +1042,7 @@ func (s *Server) finalizeCache(ctx context.Context, h *FileHandle) ([]meta.Chunk
 		if err != nil {
 			return nil, err
 		}
-		placements, err := s.storeChunks(ctx, h, data)
+		placements, err := s.storeChunks(ctx, h, data, pos, placementHash64(result), len(result), windowEnd == length)
 		if err != nil {
 			return nil, err
 		}

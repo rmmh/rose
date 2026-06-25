@@ -151,7 +151,7 @@ func (s *Server) writeChunksAsRows(ctx context.Context, txnID int64, source, des
 	offsets := make([]int64, len(chunks))
 	for i, c := range chunks {
 		offsets[i] = int64(len(buf))
-		data, err := source.Read(ctx, c.VaddrOffset, c.LogicalLen)
+		data, err := source.Read(ctx, c.VaddrOffset, storage.ChunkHeaderSize+c.LogicalLen)
 		if err != nil {
 			return fmt.Errorf("read chunk from vlog %d: %w", source.ID(), err)
 		}
@@ -187,7 +187,7 @@ func (s *Server) writeChunksAsRows(ctx context.Context, txnID int64, source, des
 func paddedRowLen(chunks []meta.ChunkLoc, sw int64) int64 {
 	var total int64
 	for _, c := range chunks {
-		total += int64(c.LogicalLen)
+		total += int64(storage.ChunkHeaderSize + c.LogicalLen)
 	}
 	if total == 0 || sw <= 0 {
 		return 0
@@ -210,7 +210,7 @@ func promotablePrefix(live []meta.ChunkLoc, sw int64) (count int, padded int64) 
 	var cum int64
 	bestPad := int64(-1)
 	for i, c := range live {
-		cum += int64(c.LogicalLen)
+		cum += int64(storage.ChunkHeaderSize + c.LogicalLen)
 		if cum < sw {
 			continue
 		}

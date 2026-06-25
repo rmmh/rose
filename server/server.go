@@ -556,7 +556,6 @@ func (s *Server) writeOpExpiryDuration() time.Duration {
 	return s.writeOpExpiry
 }
 
-
 // clearActiveVlogLocked drops any bucket whose active vlog is vlogID, so a
 // maintenance step retiring or relocating that vlog does not leave a bucket
 // appending into a vlog that is being reworked. The caller must hold vlogMu.
@@ -986,9 +985,10 @@ func (s *Server) RecoverChunks(ctx context.Context, plogID uint32, blockStartPhy
 			chunkLogicalStart = rowIdx*ecColumnBytes + offsetInCol
 		}
 		out[i] = storage.RecoveredChunk{
-			Hash:         c.Hash,
-			LogicalStart: chunkLogicalStart,
-			Length:       c.LogicalLen,
+			Hash:          c.Hash,
+			LogicalStart:  chunkLogicalStart,
+			Length:        storage.ChunkHeaderSize + c.LogicalLen,
+			PayloadOffset: storage.ChunkHeaderSize,
 		}
 	}
 

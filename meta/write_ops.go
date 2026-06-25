@@ -55,6 +55,11 @@ func (d *DB) WriteOpByKey(ctx context.Context, key string) (WriteOp, error) {
 	return op, nil
 }
 
+func (d *DB) SetWriteOpTail(ctx context.Context, id int64, tail []byte) error {
+	_, err := d.db.ExecContext(ctx, "UPDATE write_op SET tail = ? WHERE id = ? AND state = ?", tail, id, WriteOpPrepared)
+	return err
+}
+
 func (d *DB) ClaimVlogLease(ctx context.Context, vlogID uint32, opID int64, ordinal int) error {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -185,4 +190,3 @@ func (d *DB) ListPreparedWriteOps(ctx context.Context) ([]PreparedWriteOp, error
 	}
 	return ops, rows.Err()
 }
-

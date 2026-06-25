@@ -389,7 +389,7 @@ func unlinkServerFile(t *testing.T, s *Server, path string) {
 // rows with nothing left over, so promotion drains every live chunk out of the
 // staging vlog. The now-empty replica must be retired rather than left lingering.
 func TestPromoteRetiresFullyDrainedStaging(t *testing.T) {
-	defer storage.SetECColumnBytesForTest(64)() // stripe row = 64*3 = 192 bytes
+	defer storage.SetECColumnBytesForTest(88)() // stripe row = 88*3 = 264 bytes
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 4)
 	s.SetMaintenanceInterval(0)
@@ -397,8 +397,8 @@ func TestPromoteRetiresFullyDrainedStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Six 200-byte chunks: the whole-row prefix that minimizes padding consumes
-	// all of them, leaving the staging vlog empty after promotion.
+	// Six 200-byte payloads become 264-byte stored records with headers, so the
+	// whole-row prefix consumes all of them and leaves staging empty.
 	for i := 0; i < 6; i++ {
 		payload := make([]byte, 200)
 		rand.New(rand.NewSource(int64(20 + i))).Read(payload)
@@ -483,7 +483,7 @@ func TestPromoteRetiresEmptyStagingAfterDelete(t *testing.T) {
 // compaction repacks the survivors into a fresh EC vlog (whole rows only) and
 // retires the wasteful one.
 func TestCompactECVlogRepacksRowsAndReclaimsSpace(t *testing.T) {
-	defer storage.SetECColumnBytesForTest(64)() // stripe row = 192 bytes
+	defer storage.SetECColumnBytesForTest(88)() // stripe row = 264 bytes
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 4)
 	s.SetMaintenanceInterval(0)
@@ -562,12 +562,12 @@ func TestPromotablePrefix(t *testing.T) {
 		wantCount  int
 		wantPadded int64
 	}{
-		{"below one row", []int{10, 20}, 100, 0, 0},
-		{"exact single row", []int{100}, 100, 1, 100},
-		{"exact multi row", []int{60, 40, 100}, 100, 3, 200},
-		{"pads final row", []int{150}, 100, 1, 200},
-		{"prefers zero-pad cut and drains more", []int{50, 50, 30}, 100, 2, 100},
-		{"min pad over several prefixes", []int{90, 90, 90}, 100, 2, 200},
+		{"below one row", []int{10, 20}, 100, 2, 200},
+		{"exact single row", []int{100}, 100, 1, 200},
+		{"exact multi row", []int{60, 40, 100}, 100, 3, 400},
+		{"pads final row", []int{150}, 100, 1, 300},
+		{"prefers zero-pad cut and drains more", []int{50, 50, 30}, 100, 2, 300},
+		{"min pad over several prefixes", []int{90, 90, 90}, 100, 3, 500},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

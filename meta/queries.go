@@ -12,6 +12,8 @@ import (
 	"github.com/rmmh/rose/uid"
 )
 
+const chunkRecordHeaderSize = 64
+
 // MakeVlog creates a new vlog with the specified protection scheme. u is the
 // vlog's persistent UID, also stamped into the superblocks of its member plogs.
 func (d *DB) MakeVlog(ctx context.Context, u uid.UID, protectionScheme string, dataShards, parityShards int32) (uint32, error) {
@@ -192,11 +194,11 @@ func (u VlogUsage) WasteRatio() float64 {
 func (d *DB) VlogUsages(ctx context.Context) ([]VlogUsage, error) {
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT v.id, v.length,
-		       COALESCE(SUM(CASE WHEN c.refcount > 0 THEN c.compressed_len ELSE 0 END), 0)
+		       COALESCE(SUM(CASE WHEN c.refcount > 0 THEN c.compressed_len + ? ELSE 0 END), 0)
 		FROM vlog v
 		LEFT JOIN chunk c ON c.vlog_id = v.id
 		GROUP BY v.id, v.length
-		ORDER BY v.id`)
+		ORDER BY v.id`, chunkRecordHeaderSize)
 	if err != nil {
 		return nil, err
 	}
@@ -891,8 +893,8 @@ type ChunkInfo struct {
 // GetChunksInVlogRange returns all chunks in a vlog that overlap the virtual address range [startVaddr, endVaddr).
 func (d *DB) GetChunksInVlogRange(ctx context.Context, vlogID uint32, startVaddr, endVaddr int64) ([]ChunkInfo, error) {
 	rows, err := d.db.QueryContext(ctx,
-		"SELECT hash, vaddr_offset, logical_len FROM chunk WHERE vlog_id = ? AND (vaddr_offset + logical_len) > ? AND vaddr_offset < ? ORDER BY vaddr_offset",
-		vlogID, startVaddr, endVaddr)
+		"SELECT hash, vaddr_offset, logical_len FROM chunk WHERE vlog_id = ? AND (vaddr_offset + ? + logical_len) > ? AND (vaddr_offset + ?) < ? ORDER BY vaddr_offset",
+		vlogID, chunkRecordHeaderSize, startVaddr, chunkRecordHeaderSize, endVaddr)
 	if err != nil {
 		return nil, err
 	}

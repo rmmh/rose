@@ -55,10 +55,10 @@ var ErrPlogHeaderCorrupt = errors.New("plog superblock corrupt")
 // next Commit) the loader falls back to recomputing (trusting) the sectors,
 // exactly the pre-trailer behavior.
 type Plog struct {
-	mu            sync.Mutex
-	id            uint32
-	file          *os.File
-	logicalLength int64 // total logical bytes, including the open buffered sector
+	mu                sync.Mutex
+	id                uint32
+	file              *os.File
+	logicalLength     int64 // total logical bytes, including the open buffered sector
 	loadedFromTrailer bool  // set to true if loaded from a valid open-block trailer
 
 	buf        []byte // open trailing sector, 0..4096 bytes (sealed once full)
@@ -90,9 +90,9 @@ const PlogFormatVersion = plogFormatVersion
 
 const (
 	plogMagic            = "ROSEPLG1"
-	plogFormatVersion    = 1
+	plogFormatVersion    = 2
 	plogHeaderSize       = SectorSize
-	plogHeaderPrefix     = 14               // magic(8) + version(2) + payloadLen(4)
+	plogHeaderPrefix     = 14 // magic(8) + version(2) + payloadLen(4)
 	plogHeaderHMACOffset = SectorSize - HashSize
 	plogHeaderMaxPayload = plogHeaderHMACOffset - plogHeaderPrefix
 )
@@ -113,9 +113,10 @@ const (
 
 // RecoveredChunk describes a chunk's location and expected content hash.
 type RecoveredChunk struct {
-	Hash         []byte
-	LogicalStart int64
-	Length       int
+	Hash          []byte
+	LogicalStart  int64
+	Length        int
+	PayloadOffset int
 }
 
 // ChunkRecoverer is called when reload finds no valid trailer to recover the expected sector hashes
@@ -937,7 +938,16 @@ func (p *Plog) RecoverHashes(ctx context.Context, recoverer ChunkRecoverer) erro
 					sectorCorrupt = true
 					break
 				}
-				sum := sha256.Sum256(chunkBytes)
+				payload := chunkBytes
+				if c.PayloadOffset > 0 {
+					if c.PayloadOffset >= len(chunkBytes) {
+						cc = cachedChunk{valid: false}
+						chunkCache[hashKey] = cc
+						continue
+					}
+					payload = chunkBytes[c.PayloadOffset:]
+				}
+				sum := sha256.Sum256(payload)
 				if bytes.Equal(sum[:15], c.Hash) {
 					cc = cachedChunk{data: chunkBytes, valid: true}
 				} else {
@@ -997,4 +1007,3 @@ func (p *Plog) RecoverHashes(ctx context.Context, recoverer ChunkRecoverer) erro
 	p.hashes = newHashes
 	return nil
 }
-
