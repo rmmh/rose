@@ -117,6 +117,7 @@ type RecoveredChunk struct {
 	LogicalStart  int64
 	Length        int
 	PayloadOffset int
+	Validate      func([]byte) bool
 }
 
 // ChunkRecoverer is called when reload finds no valid trailer to recover the expected sector hashes
@@ -938,20 +939,28 @@ func (p *Plog) RecoverHashes(ctx context.Context, recoverer ChunkRecoverer) erro
 					sectorCorrupt = true
 					break
 				}
-				payload := chunkBytes
-				if c.PayloadOffset > 0 {
-					if c.PayloadOffset >= len(chunkBytes) {
+				if c.Validate != nil {
+					if c.Validate(chunkBytes) {
+						cc = cachedChunk{data: chunkBytes, valid: true}
+					} else {
 						cc = cachedChunk{valid: false}
-						chunkCache[hashKey] = cc
-						continue
 					}
-					payload = chunkBytes[c.PayloadOffset:]
-				}
-				sum := sha256.Sum256(payload)
-				if bytes.Equal(sum[:15], c.Hash) {
-					cc = cachedChunk{data: chunkBytes, valid: true}
 				} else {
-					cc = cachedChunk{valid: false}
+					payload := chunkBytes
+					if c.PayloadOffset > 0 {
+						if c.PayloadOffset >= len(chunkBytes) {
+							cc = cachedChunk{valid: false}
+							chunkCache[hashKey] = cc
+							continue
+						}
+						payload = chunkBytes[c.PayloadOffset:]
+					}
+					sum := sha256.Sum256(payload)
+					if bytes.Equal(sum[:15], c.Hash) {
+						cc = cachedChunk{data: chunkBytes, valid: true}
+					} else {
+						cc = cachedChunk{valid: false}
+					}
 				}
 				chunkCache[hashKey] = cc
 			}

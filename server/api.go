@@ -305,7 +305,7 @@ func (s *Server) readChunksAt(ctx context.Context, chunks []meta.ChunkPlacement,
 			if off+length < readEnd {
 				readEnd = off + length
 			}
-			data, err := vlog.Read(ctx, placement.VaddrOffset+storage.ChunkHeaderSize+(readStart-cur), int(readEnd-readStart))
+			data, err := s.readChunkPayload(ctx, vlog, placement, readStart-cur, int(readEnd-readStart))
 			if err != nil {
 				return nil, err
 			}
@@ -850,7 +850,6 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 		return meta.ChunkPlacement{}, nil, err
 	}
 	vaddr := reserved[vlogID] - int64(recordLen)
-	record := make([]byte, recordLen)
 	flags := byte(0)
 	if fileOffset == 0 {
 		flags |= storage.ChunkFlagInitial
@@ -867,9 +866,10 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 		PrevHash:   prevHash64,
 		PathHint:   pathHint(h.path(), flags&storage.ChunkFlagInitial != 0, ordinal),
 	}
-	encoded := hdr.Encode()
-	copy(record, encoded[:])
-	copy(record[storage.ChunkHeaderSize:], data)
+	record, err := s.encryptChunkRecord(ctx, vlogID, hash, hdr, data)
+	if err != nil {
+		return meta.ChunkPlacement{}, nil, err
+	}
 	pending := &pendingChunk{vlogID: vlogID, vaddr: vaddr, data: record}
 	return meta.ChunkPlacement{Hash: append([]byte(nil), hash...), VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data), CompressedLen: len(data)}, pending, nil
 }

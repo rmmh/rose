@@ -3,6 +3,8 @@ package storage
 import (
 	"encoding/binary"
 	"testing"
+
+	"github.com/rmmh/rose/uid"
 )
 
 func TestChunkHeaderEncodeDecodeInitialLayout(t *testing.T) {
@@ -40,6 +42,53 @@ func TestChunkHeaderEncodeDecodeInitialLayout(t *testing.T) {
 	}
 	if decoded.Flags != h.Flags || decoded.FileID != h.FileID || decoded.ChunkHash != h.ChunkHash || decoded.PayloadLen != h.PayloadLen || decoded.PathHint != h.PathHint {
 		t.Fatalf("decoded header mismatch: %+v", decoded)
+	}
+}
+
+func TestEncryptedChunkHeaderKeepsScanPrefixClear(t *testing.T) {
+	var clusterKey, vlogUID, chunkHash uid.UID
+	for i := range clusterKey {
+		clusterKey[i] = byte(i + 1)
+		vlogUID[i] = byte(i + 31)
+		chunkHash[i] = byte(i + 61)
+	}
+	var hint [32]byte
+	copy(hint[:], "private/path/hint")
+	h := ChunkHeader{
+		Flags:      ChunkFlagInitial | ChunkFlagLast,
+		FileID:     0x0102030405060708,
+		ChunkHash:  binary.LittleEndian.Uint64(chunkHash[:8]),
+		PayloadLen: 777,
+		PathHint:   hint,
+	}
+	key := DeriveVlogKey(clusterKey, vlogUID)
+	encoded, err := h.EncodeEncrypted(key, chunkHash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded[0:4]) != "RCHK" || encoded[4] != ChunkHeaderVersion {
+		t.Fatalf("clear magic/version corrupted: %x", encoded[:5])
+	}
+	if got := binary.LittleEndian.Uint32(encoded[6:10]); got != h.PayloadLen {
+		t.Fatalf("clear payload_len = %d, want %d", got, h.PayloadLen)
+	}
+	if got := binary.LittleEndian.Uint64(encoded[14:22]); got != h.ChunkHash {
+		t.Fatalf("clear chunk_hash64 = %#x, want %#x", got, h.ChunkHash)
+	}
+	if encoded[22] == h.Flags || string(encoded[32:48]) == string(h.PathHint[:16]) {
+		t.Fatalf("private header block was not encrypted")
+	}
+	decoded, err := DecodeEncryptedChunkHeader(encoded[:], key, chunkHash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Flags != h.Flags || decoded.FileID != h.FileID || decoded.ChunkHash != h.ChunkHash || decoded.PayloadLen != h.PayloadLen || decoded.PathHint != h.PathHint {
+		t.Fatalf("decoded encrypted header mismatch: %+v", decoded)
+	}
+	wrongKey := key
+	wrongKey[0] ^= 0xff
+	if _, err := DecodeEncryptedChunkHeader(encoded[:], wrongKey, chunkHash[:]); err == nil {
+		t.Fatal("wrong key decoded encrypted header")
 	}
 }
 

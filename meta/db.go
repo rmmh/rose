@@ -100,6 +100,8 @@ func initSchema(db *sql.DB, durable bool) error {
 		CREATE TABLE IF NOT EXISTS cluster (
 			id             INTEGER PRIMARY KEY CHECK (id = 1),
 			uid            BLOB    NOT NULL,
+			encryption_key BLOB    NOT NULL,
+			encryption_alg TEXT    NOT NULL,
 			format_version INTEGER NOT NULL,
 			feature_flags  INTEGER NOT NULL DEFAULT 0,
 			created_at     INTEGER NOT NULL

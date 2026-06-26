@@ -151,9 +151,13 @@ func (s *Server) writeChunksAsRows(ctx context.Context, txnID int64, source, des
 	offsets := make([]int64, len(chunks))
 	for i, c := range chunks {
 		offsets[i] = int64(len(buf))
-		data, err := source.Read(ctx, c.VaddrOffset, storage.ChunkHeaderSize+c.LogicalLen)
+		plain, err := s.readPlainChunkRecord(ctx, source, source.ID(), c)
 		if err != nil {
 			return fmt.Errorf("read chunk from vlog %d: %w", source.ID(), err)
+		}
+		data, err := s.encryptPlainChunkRecord(ctx, destID, c.Hash, plain)
+		if err != nil {
+			return fmt.Errorf("encrypt chunk for EC vlog %d: %w", destID, err)
 		}
 		buf = append(buf, data...)
 	}

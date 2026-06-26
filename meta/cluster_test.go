@@ -30,6 +30,16 @@ func TestClusterIdentitySingleton(t *testing.T) {
 	if flags != 0 {
 		t.Fatalf("feature flags = %d, want 0", flags)
 	}
+	enc, err := db.ClusterEncryption(ctx)
+	if err != nil {
+		t.Fatalf("cluster encryption: %v", err)
+	}
+	if enc.Key.IsZero() {
+		t.Fatal("cluster encryption key is zero")
+	}
+	if got, want := len(enc.Formatted), 27; got != want {
+		t.Fatalf("formatted key length = %d, want %d", got, want)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +56,13 @@ func TestClusterIdentitySingleton(t *testing.T) {
 	}
 	if again != clusterUID {
 		t.Fatalf("cluster uid changed across reopen: %s -> %s", clusterUID, again)
+	}
+	encAgain, err := db2.ClusterEncryption(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encAgain.Key != enc.Key {
+		t.Fatalf("cluster encryption key changed across reopen: %s -> %s", enc.Formatted, encAgain.Formatted)
 	}
 }
 

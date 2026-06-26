@@ -154,9 +154,13 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 		offset int64
 	}, 0, len(live))
 	for _, c := range live {
-		data, err := source.Read(ctx, c.VaddrOffset, storage.ChunkHeaderSize+c.LogicalLen)
+		plain, err := s.readPlainChunkRecord(ctx, source, sourceID, c)
 		if err != nil {
 			return fmt.Errorf("compact: read chunk from vlog %d: %w", sourceID, err)
+		}
+		data, err := s.encryptPlainChunkRecord(ctx, destID, c.Hash, plain)
+		if err != nil {
+			return fmt.Errorf("compact: encrypt chunk for vlog %d: %w", destID, err)
 		}
 		offset, err := dest.Write(ctx, 0, data)
 		if err != nil {
@@ -273,6 +277,7 @@ func (s *Server) retireVlogLocked(ctx context.Context, vlogID uint32) error {
 		return err
 	}
 	delete(s.vlogs, vlogID)
+	delete(s.vlogKeys, vlogID)
 	for _, p := range plogs {
 		if plog, ok := s.plogs[p.ID]; ok {
 			_ = plog.Close()

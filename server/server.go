@@ -49,6 +49,8 @@ type Server struct {
 	// clusterUID is the singleton cluster identity, cached from the metadata DB on
 	// Recover and stamped into every plog superblock written thereafter.
 	clusterUID uid.UID
+	clusterKey uid.UID
+	vlogKeys   map[uint32][16]byte
 	diskRoots  map[uint32]string
 	// diskState caches the lifecycle state of every configured disk, kept in sync
 	// with the durable disk catalog. Configured disks start active.
@@ -125,6 +127,7 @@ func NewServer(db *meta.DB) *Server {
 		offlinePlogs:       make(map[uint32]bool),
 		activeVlogByBucket: make(map[string]uint32),
 		bucketPolicies:     make(map[string]meta.BucketPolicy),
+		vlogKeys:           make(map[uint32][16]byte),
 		dataDir:            "data",
 		diskRoots:          map[uint32]string{1: "data"},
 		diskState:          make(map[uint32]string),
@@ -288,11 +291,9 @@ func (s *Server) Recover(ctx context.Context) error {
 	}
 	// Cache the cluster identity so plog superblocks written during this run can be
 	// stamped with it without a per-write metadata query.
-	clusterUID, _, _, err := s.db.ClusterInfo(ctx)
-	if err != nil {
+	if err := s.ensureClusterKeys(ctx); err != nil {
 		return err
 	}
-	s.clusterUID = clusterUID
 	disks, err := s.db.ListDisks(ctx)
 	if err != nil {
 		return err
@@ -387,6 +388,7 @@ func (s *Server) Recover(ctx context.Context) error {
 		return err
 	}
 	vlogs := make(map[uint32]*storage.Vlog, len(vlogInfos))
+	s.vlogKeys = make(map[uint32][16]byte, len(vlogInfos))
 	for _, info := range vlogInfos {
 		vlog, err := s.mountVlogLocked(ctx, info)
 		if err != nil {
@@ -470,6 +472,7 @@ func (s *Server) CloseStorage() {
 		delete(s.plogs, id)
 	}
 	s.vlogs = make(map[uint32]*storage.Vlog)
+	s.vlogKeys = make(map[uint32][16]byte)
 }
 
 // cleanPath canonicalizes a client path to the single form stored in the
@@ -610,6 +613,9 @@ func (s *Server) provisionStagingVlogLocked(ctx context.Context, targetData, tar
 // given distinct-node disks, mounts it, and registers it. The caller must hold
 // vlogMu.
 func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dataShards, parityShards, targetData, targetParity, clientCount int, diskIDs []uint32) (uint32, *storage.Vlog, error) {
+	if err := s.ensureClusterKeys(ctx); err != nil {
+		return 0, nil, err
+	}
 	vlogUID := uid.New()
 	id, err := s.db.MakeStagingVlog(ctx, vlogUID, scheme, int32(dataShards), int32(parityShards), int32(targetData), int32(targetParity))
 	if err != nil {
@@ -680,6 +686,7 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 		return 0, nil, fmt.Errorf("create vlog in memory: %w", err)
 	}
 	s.vlogs[id] = vlog
+	s.vlogKeys[id] = storage.DeriveVlogKey(s.clusterKey, vlogUID)
 	return id, vlog, nil
 }
 
@@ -688,6 +695,9 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 // a creation timestamp. Vlog membership is layered on by the caller when the plog
 // backs a vlog shard.
 func (s *Server) basePlogHeader(ctx context.Context, plogID, diskID uint32, plogUID uid.UID) (*pb.PlogHeader, error) {
+	if err := s.ensureClusterKeys(ctx); err != nil {
+		return nil, err
+	}
 	diskUID, err := s.db.DiskUID(ctx, diskID)
 	if err != nil {
 		return nil, fmt.Errorf("look up disk %d uid: %w", diskID, err)
@@ -702,6 +712,23 @@ func (s *Server) basePlogHeader(ctx context.Context, plogID, diskID uint32, plog
 		DiskUid:        du[:],
 		CreatedAtNanos: time.Now().UnixNano(),
 	}, nil
+}
+
+func (s *Server) ensureClusterKeys(ctx context.Context) error {
+	if !s.clusterUID.IsZero() && !s.clusterKey.IsZero() {
+		return nil
+	}
+	clusterUID, _, _, err := s.db.ClusterInfo(ctx)
+	if err != nil {
+		return err
+	}
+	enc, err := s.db.ClusterEncryption(ctx)
+	if err != nil {
+		return err
+	}
+	s.clusterUID = clusterUID
+	s.clusterKey = enc.Key
+	return nil
 }
 
 // stampVlogMembership records, on a fresh plog's header, the membership of the
@@ -784,6 +811,7 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 	if err != nil {
 		return nil, fmt.Errorf("mount vlog %d: %w", info.ID, err)
 	}
+	s.vlogKeys[info.ID] = storage.DeriveVlogKey(s.clusterKey, info.UID)
 	// The vlog length is restored authoritatively from the DB; reconcile each
 	// backing plog down to it so a crash that sealed rows to the files but never
 	// committed the new length leaves no orphan tail past the vlog cursor.
@@ -984,11 +1012,16 @@ func (s *Server) RecoverChunks(ctx context.Context, plogID uint32, blockStartPhy
 			offsetInCol := c.VaddrOffset % ecColumnBytes
 			chunkLogicalStart = rowIdx*ecColumnBytes + offsetInCol
 		}
+		validate, err := s.encryptedChunkRecordValidator(ctx, vlogID, c.Hash)
+		if err != nil {
+			return nil, err
+		}
 		out[i] = storage.RecoveredChunk{
 			Hash:          c.Hash,
 			LogicalStart:  chunkLogicalStart,
 			Length:        storage.ChunkHeaderSize + c.LogicalLen,
 			PayloadOffset: storage.ChunkHeaderSize,
+			Validate:      validate,
 		}
 	}
 
