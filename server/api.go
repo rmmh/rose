@@ -288,7 +288,7 @@ func (s *Server) readChunksAt(ctx context.Context, chunks []meta.ChunkPlacement,
 	if length <= 0 {
 		return nil, nil
 	}
-	var out []byte
+	out := make([]byte, 0, length)
 	var cur int64
 	for _, chunk := range chunks {
 		end := cur + int64(chunk.LogicalLen)
@@ -725,9 +725,14 @@ func placementHash64(placements []meta.ChunkPlacement) uint64 {
 // to seal there. The bytes are written to the append-only vlog and fsynced before
 // the operation publishes its file version; they never touch the metadata DB.
 type pendingChunk struct {
-	vlogID uint32
-	vaddr  int64
-	data   []byte
+	vlogID  uint32
+	vaddr   int64
+	header  [storage.ChunkHeaderSize]byte
+	payload []byte
+}
+
+func (c pendingChunk) len() int {
+	return storage.ChunkHeaderSize + len(c.payload)
 }
 
 // FastCDC chunk sizing. The target (normal) size is ~1 MB per the design in
@@ -805,6 +810,7 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte, st
 
 			fileOffset := startOffset + localOffset
 			isLast := final && nextErr == io.EOF
+			nextPrevHash64 := hash64(chunkCopy)
 			p, plan, err := s.planChunk(ctx, h, chunkCopy, reserved, fileOffset, prevHash64, ordinal, isLast)
 			if err != nil {
 				return nil, err
@@ -813,7 +819,7 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte, st
 			if plan != nil {
 				pending = append(pending, *plan)
 			}
-			prevHash64 = hash64(chunkCopy)
+			prevHash64 = nextPrevHash64
 			localOffset += int64(len(chunkCopy))
 			ordinal++
 		}
@@ -866,11 +872,11 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 		PrevHash:   prevHash64,
 		PathHint:   pathHint(h.path(), flags&storage.ChunkFlagInitial != 0, ordinal),
 	}
-	record, err := s.encryptChunkRecord(ctx, vlogID, hash, hdr, data)
+	header, err := s.encryptChunkInPlace(ctx, vlogID, hash, hdr, data)
 	if err != nil {
 		return meta.ChunkPlacement{}, nil, err
 	}
-	pending := &pendingChunk{vlogID: vlogID, vaddr: vaddr, data: record}
+	pending := &pendingChunk{vlogID: vlogID, vaddr: vaddr, header: header, payload: data}
 	return meta.ChunkPlacement{Hash: append([]byte(nil), hash...), VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data), CompressedLen: len(data)}, pending, nil
 }
 
@@ -953,7 +959,8 @@ func (s *Server) sealChunks(ctx context.Context, chunks []pendingChunk) error {
 		runStart := group[0].vaddr
 		runEnd := runStart
 		runParts := make([][]byte, 0, len(group))
-		for i, chunk := range group {
+		for i := range group {
+			chunk := &group[i]
 			if i > 0 && chunk.vaddr != runEnd {
 				if err := v.EnsureWrite(ctx, runStart, runParts); err != nil {
 					return err
@@ -961,8 +968,8 @@ func (s *Server) sealChunks(ctx context.Context, chunks []pendingChunk) error {
 				runStart = chunk.vaddr
 				runParts = runParts[:0]
 			}
-			runParts = append(runParts, chunk.data)
-			runEnd = chunk.vaddr + int64(len(chunk.data))
+			runParts = append(runParts, chunk.header[:], chunk.payload)
+			runEnd = chunk.vaddr + int64(chunk.len())
 		}
 		if err := v.EnsureWrite(ctx, runStart, runParts); err != nil {
 			return err

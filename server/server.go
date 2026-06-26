@@ -50,8 +50,9 @@ type Server struct {
 	// Recover and stamped into every plog superblock written thereafter.
 	clusterUID uid.UID
 	clusterKey uid.UID
-	vlogKeys   map[uint32][16]byte
 	diskRoots  map[uint32]string
+	keyMu      sync.RWMutex
+	vlogKeys   map[uint32][16]byte
 	// diskState caches the lifecycle state of every configured disk, kept in sync
 	// with the durable disk catalog. Configured disks start active.
 	diskState map[uint32]string
@@ -472,7 +473,9 @@ func (s *Server) CloseStorage() {
 		delete(s.plogs, id)
 	}
 	s.vlogs = make(map[uint32]*storage.Vlog)
+	s.keyMu.Lock()
 	s.vlogKeys = make(map[uint32][16]byte)
+	s.keyMu.Unlock()
 }
 
 // cleanPath canonicalizes a client path to the single form stored in the
@@ -686,7 +689,7 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 		return 0, nil, fmt.Errorf("create vlog in memory: %w", err)
 	}
 	s.vlogs[id] = vlog
-	s.vlogKeys[id] = storage.DeriveVlogKey(s.clusterKey, vlogUID)
+	s.setVlogKey(id, storage.DeriveVlogKey(s.clusterKey, vlogUID))
 	return id, vlog, nil
 }
 
@@ -811,7 +814,7 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 	if err != nil {
 		return nil, fmt.Errorf("mount vlog %d: %w", info.ID, err)
 	}
-	s.vlogKeys[info.ID] = storage.DeriveVlogKey(s.clusterKey, info.UID)
+	s.setVlogKey(info.ID, storage.DeriveVlogKey(s.clusterKey, info.UID))
 	// The vlog length is restored authoritatively from the DB; reconcile each
 	// backing plog down to it so a crash that sealed rows to the files but never
 	// committed the new length leaves no orphan tail past the vlog cursor.
@@ -819,6 +822,18 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 		return nil, fmt.Errorf("mount vlog %d: %w", info.ID, err)
 	}
 	return vlog, nil
+}
+
+func (s *Server) setVlogKey(vlogID uint32, key [16]byte) {
+	s.keyMu.Lock()
+	s.vlogKeys[vlogID] = key
+	s.keyMu.Unlock()
+}
+
+func (s *Server) deleteVlogKey(vlogID uint32) {
+	s.keyMu.Lock()
+	delete(s.vlogKeys, vlogID)
+	s.keyMu.Unlock()
 }
 
 type localPlogClient struct {

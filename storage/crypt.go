@@ -3,7 +3,6 @@ package storage
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -22,10 +21,7 @@ const (
 // and that vlog's persistent UID. The small numeric vlog id is deliberately not
 // part of the derivation.
 func DeriveVlogKey(clusterKey, vlogUID uid.UID) [16]byte {
-	mac := hmac.New(sha256.New, clusterKey[:])
-	mac.Write([]byte(vlogKeyLabel))
-	mac.Write(vlogUID[:])
-	sum := mac.Sum(nil)
+	sum := hmacSHA256(clusterKey[:], []byte(vlogKeyLabel), vlogUID[:])
 	var out [16]byte
 	copy(out[:], sum[:16])
 	return out
@@ -42,15 +38,31 @@ func DeriveChunkStream(vlogKey [16]byte, chunkHash []byte) ([16]byte, error) {
 }
 
 func DeriveChunkStreamHash64(vlogKey [16]byte, chunkHash64 uint64) [16]byte {
-	mac := hmac.New(sha256.New, vlogKey[:])
 	var hashBuf [8]byte
 	binary.LittleEndian.PutUint64(hashBuf[:], chunkHash64)
-	mac.Write([]byte(chunkStreamLabel))
-	mac.Write(hashBuf[:])
-	sum := mac.Sum(nil)
+	sum := hmacSHA256(vlogKey[:], []byte(chunkStreamLabel), hashBuf[:])
 	var out [16]byte
 	copy(out[:], sum[:16])
 	return out
+}
+
+func hmacSHA256(key, a, b []byte) [32]byte {
+	var ipad, opad [64]byte
+	copy(ipad[:], key)
+	copy(opad[:], key)
+	for i := 0; i < len(ipad); i++ {
+		ipad[i] ^= 0x36
+		opad[i] ^= 0x5c
+	}
+	var innerBuf [128]byte
+	n := copy(innerBuf[:], ipad[:])
+	n += copy(innerBuf[n:], a)
+	n += copy(innerBuf[n:], b)
+	inner := sha256.Sum256(innerBuf[:n])
+	var outerBuf [96]byte
+	n = copy(outerBuf[:], opad[:])
+	copy(outerBuf[n:], inner[:])
+	return sha256.Sum256(outerBuf[:n+sha256.Size])
 }
 
 // ApplyAES128CTR XORs buf with the AES-CTR stream positioned at recordOffset

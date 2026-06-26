@@ -277,7 +277,7 @@ func (s *Server) retireVlogLocked(ctx context.Context, vlogID uint32) error {
 		return err
 	}
 	delete(s.vlogs, vlogID)
-	delete(s.vlogKeys, vlogID)
+	s.deleteVlogKey(vlogID)
 	for _, p := range plogs {
 		if plog, ok := s.plogs[p.ID]; ok {
 			_ = plog.Close()

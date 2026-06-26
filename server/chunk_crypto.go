@@ -15,33 +15,46 @@ func (s *Server) keyForVlog(ctx context.Context, vlogID uint32) ([16]byte, error
 	if err := s.ensureClusterKeys(ctx); err != nil {
 		return [16]byte{}, err
 	}
+	s.keyMu.RLock()
+	key, ok := s.vlogKeys[vlogID]
+	s.keyMu.RUnlock()
+	if ok {
+		return key, nil
+	}
 	info, err := s.db.GetVlog(ctx, vlogID)
 	if err != nil {
 		return [16]byte{}, err
 	}
-	return storage.DeriveVlogKey(s.clusterKey, info.UID), nil
+	key = storage.DeriveVlogKey(s.clusterKey, info.UID)
+	s.setVlogKey(vlogID, key)
+	return key, nil
 }
 
 func (s *Server) encryptChunkRecord(ctx context.Context, vlogID uint32, hash []byte, hdr storage.ChunkHeader, payload []byte) ([]byte, error) {
-	key, err := s.keyForVlog(ctx, vlogID)
-	if err != nil {
-		return nil, err
-	}
-	encoded, err := hdr.EncodeEncrypted(key, hash)
-	if err != nil {
-		return nil, err
-	}
-	stream, err := storage.DeriveChunkStream(key, hash)
+	encoded, err := s.encryptChunkInPlace(ctx, vlogID, hash, hdr, payload)
 	if err != nil {
 		return nil, err
 	}
 	record := make([]byte, storage.ChunkHeaderSize+len(payload))
 	copy(record[:storage.ChunkHeaderSize], encoded[:])
 	copy(record[storage.ChunkHeaderSize:], payload)
-	if err := storage.ApplyAES128CTR(key, stream, storage.ChunkHeaderSize, record[storage.ChunkHeaderSize:]); err != nil {
-		return nil, err
-	}
 	return record, nil
+}
+
+func (s *Server) encryptChunkInPlace(ctx context.Context, vlogID uint32, hash []byte, hdr storage.ChunkHeader, payload []byte) ([storage.ChunkHeaderSize]byte, error) {
+	key, err := s.keyForVlog(ctx, vlogID)
+	if err != nil {
+		return [storage.ChunkHeaderSize]byte{}, err
+	}
+	encoded, err := hdr.EncodeEncrypted(key, hash)
+	if err != nil {
+		return [storage.ChunkHeaderSize]byte{}, err
+	}
+	stream, err := storage.DeriveChunkStream(key, hash)
+	if err != nil {
+		return [storage.ChunkHeaderSize]byte{}, err
+	}
+	return encoded, storage.ApplyAES128CTR(key, stream, storage.ChunkHeaderSize, payload)
 }
 
 func (s *Server) decryptChunkPayload(ctx context.Context, vlogID uint32, hash []byte, payloadOffset int64, ciphertext []byte) error {

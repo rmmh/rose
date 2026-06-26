@@ -11,6 +11,7 @@ import (
 	_ "github.com/PlakarKorp/go-cdc-chunkers/chunkers/fastcdc"
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
+	"github.com/rmmh/rose/storage"
 )
 
 func collectChunkSizes(t *testing.T, chunker *chunkers.Chunker) []int {
@@ -106,19 +107,27 @@ func TestSealChunksWritesAdjacentPendingChunksAsVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := v.Length()
+	var hdr [storage.ChunkHeaderSize]byte
 	chunks := []pendingChunk{
-		{vlogID: vlogID, vaddr: start, data: []byte("hello")},
-		{vlogID: vlogID, vaddr: start + 5, data: []byte("world")},
-		{vlogID: vlogID, vaddr: start + 10, data: []byte("!!")},
+		{vlogID: vlogID, vaddr: start, header: hdr, payload: []byte("hello")},
+		{vlogID: vlogID, vaddr: start + int64(storage.ChunkHeaderSize+5), header: hdr, payload: []byte("world")},
+		{vlogID: vlogID, vaddr: start + int64(2*storage.ChunkHeaderSize+10), header: hdr, payload: []byte("!!")},
 	}
 	if err := s.sealChunks(ctx, chunks); err != nil {
 		t.Fatal(err)
 	}
-	got, err := v.Read(ctx, start, 12)
+	want := make([]byte, 0, 3*storage.ChunkHeaderSize+12)
+	want = append(want, hdr[:]...)
+	want = append(want, "hello"...)
+	want = append(want, hdr[:]...)
+	want = append(want, "world"...)
+	want = append(want, hdr[:]...)
+	want = append(want, "!!"...)
+	got, err := v.Read(ctx, start, len(want))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, []byte("helloworld!!")) {
-		t.Fatalf("sealed bytes = %q, want %q", got, []byte("helloworld!!"))
+	if !bytes.Equal(got, want) {
+		t.Fatalf("sealed bytes = %q, want %q", got, want)
 	}
 }
