@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/rmmh/rose/meta"
@@ -248,22 +249,13 @@ func (s *Server) activeDiskIDs() []uint32 {
 	return ids
 }
 
-// distinctNodeDisksLocked returns live disks, at most one per node fault domain,
-// so a vlog's shards each land on a different node. With max <= 0 it returns one
-// disk for every distinct node. The caller must hold vlogMu.
-func (s *Server) distinctNodeDisksLocked(max int) []uint32 {
-	seen := make(map[uint32]bool)
-	var out []uint32
-	for _, id := range s.activeDiskIDs() {
-		n := s.nodeOf(id)
-		if seen[n] {
-			continue
-		}
-		seen[n] = true
-		out = append(out, id)
-		if max > 0 && len(out) >= max {
-			break
-		}
+// placementDisksLocked returns live disks eligible for new shards. Placement is
+// disk-fault-domain based: a vlog uses at most one shard per disk, but multiple
+// disks on one node may all participate. The caller must hold vlogMu.
+func (s *Server) placementDisksLocked(max int) []uint32 {
+	out := s.activeDiskIDs()
+	if max > 0 && len(out) > max {
+		out = out[:max]
 	}
 	return out
 }
@@ -577,9 +569,9 @@ func (s *Server) clearActiveVlogLocked(vlogID uint32) {
 // disks, and the in-memory clients, registering everything. The caller must
 // hold vlogMu.
 func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataShards, parityShards int) (uint32, *storage.Vlog, error) {
-	// One disk per node fault domain, so no two shards/copies of this vlog share
-	// a node (PlacementAllowed's NodeLevelDurability).
-	diskIDs := s.distinctNodeDisksLocked(0)
+	// One shard/copy per disk. A single node with multiple disks can host an EC
+	// or replicated vlog; node-loss protection is a stronger future policy.
+	diskIDs := s.placementDisksLocked(0)
 	if len(diskIDs) == 0 {
 		return 0, nil, fmt.Errorf("no active disks configured")
 	}
@@ -590,7 +582,7 @@ func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataSha
 	case "EC":
 		clientCount = dataShards + parityShards
 		if clientCount == 0 || clientCount > len(diskIDs) {
-			return 0, nil, fmt.Errorf("EC vlog needs 1..%d distinct-node disks, got %d", len(diskIDs), clientCount)
+			return 0, nil, fmt.Errorf("%w: EC vlog needs 1..%d active disks, got %d", syscall.ENOSPC, len(diskIDs), clientCount)
 		}
 	}
 	return s.provisionVlogCoreLocked(ctx, scheme, dataShards, parityShards, 0, 0, clientCount, diskIDs)
@@ -601,19 +593,19 @@ func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataSha
 // tolerance) tagged with the EC scheme its chunks will be promoted into. The
 // caller must hold vlogMu.
 func (s *Server) provisionStagingVlogLocked(ctx context.Context, targetData, targetParity int) (uint32, *storage.Vlog, error) {
-	diskIDs := s.distinctNodeDisksLocked(0)
+	diskIDs := s.placementDisksLocked(0)
 	if len(diskIDs) == 0 {
 		return 0, nil, fmt.Errorf("no active disks configured")
 	}
 	mirrors := targetParity + 1
 	if mirrors > len(diskIDs) {
-		return 0, nil, fmt.Errorf("EC staging needs %d distinct-node disks for m+1 mirrors, got %d", mirrors, len(diskIDs))
+		return 0, nil, fmt.Errorf("%w: EC staging needs %d active disks for m+1 mirrors, got %d", syscall.ENOSPC, mirrors, len(diskIDs))
 	}
 	return s.provisionVlogCoreLocked(ctx, "DUPLICATE", 1, 0, targetData, targetParity, mirrors, diskIDs)
 }
 
 // provisionVlogCoreLocked records a vlog, lays its clientCount shards across the
-// given distinct-node disks, mounts it, and registers it. The caller must hold
+// given disks, mounts it, and registers it. The caller must hold
 // vlogMu.
 func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dataShards, parityShards, targetData, targetParity, clientCount int, diskIDs []uint32) (uint32, *storage.Vlog, error) {
 	if err := s.ensureClusterKeys(ctx); err != nil {

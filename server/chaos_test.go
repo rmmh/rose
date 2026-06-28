@@ -44,7 +44,7 @@ import (
 // Bucket names the harness configures, one per protection scheme under test.
 const (
 	bucketEC     = "ec"     // EC 3+1: four shards across four nodes
-	bucketMirror = "mirror" // DUPLICATE: one copy per node fault domain
+	bucketMirror = "mirror" // DUPLICATE: one copy per active disk
 )
 
 // ramVolumeSeq makes each macOS RAM volume name unique within a process, so two
@@ -160,13 +160,12 @@ type chaosCluster struct {
 
 // newChaosCluster builds a cluster with nodes×disksPerNode RAM-backed disks,
 // recovers it, and configures the EC and mirror buckets. Disk IDs are assigned
-// densely (1..N*M) and mapped to node fault domains before Recover so placement
-// honors NodeLevelDurability. EC 3+1 needs four distinct nodes; the caller is
-// expected to pass nodes >= 4.
+// densely (1..N*M) and mapped to node fault domains before Recover so node
+// liveness can still be exercised. EC 3+1 needs four active disks.
 func newChaosCluster(t *testing.T, nodes, disksPerNode int) *chaosCluster {
 	t.Helper()
-	if nodes < 4 {
-		t.Fatalf("chaos cluster needs >= 4 nodes for EC 3+1, got %d", nodes)
+	if nodes*disksPerNode < 4 {
+		t.Fatalf("chaos cluster needs >= 4 disks for EC 3+1, got %d", nodes*disksPerNode)
 	}
 	metaDir := t.TempDir() // metadata DB lives on a normal disk so it survives restart
 	c := &chaosCluster{
@@ -202,8 +201,7 @@ func newChaosCluster(t *testing.T, nodes, disksPerNode int) *chaosCluster {
 	if err := c.srv.SetBucketPolicy(ctx, meta.BucketPolicy{Name: bucketEC, ProtectionScheme: "EC", DataShards: 3, ParityShards: 1}); err != nil {
 		t.Fatal(err)
 	}
-	// DUPLICATE mirrors across every node fault domain (one copy per node), so on
-	// a four-node cluster the mirror bucket holds four copies.
+	// DUPLICATE mirrors across every active disk.
 	if err := c.srv.SetBucketPolicy(ctx, meta.BucketPolicy{Name: bucketMirror, ProtectionScheme: "DUPLICATE", DataShards: 1, ParityShards: 0}); err != nil {
 		t.Fatal(err)
 	}

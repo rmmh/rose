@@ -267,11 +267,11 @@ func (c *virtualScaleCluster) readiness(vlogID uint32) (commit, readable bool) {
 	return live == len(shards), live >= int(info.DataShards)
 }
 
-// audit walks every persisted vlog/shard mapping and checks the TLA
-// NodeLevelDurability invariant. It uses one ordered catalog scan rather than a
-// query per vlog: the rows arrive grouped by vlog, so node colocation is checked
+// audit walks every persisted vlog/shard mapping and checks that no vlog places
+// two shards on the same disk. It uses one ordered catalog scan rather than a
+// query per vlog: the rows arrive grouped by vlog, so duplicate disks are checked
 // from a single reused per-vlog set.
-func (c *virtualScaleCluster) audit() (vlogs, plogs, colocated int) {
+func (c *virtualScaleCluster) audit() (vlogs, plogs, duplicated int) {
 	var curVlog uint32
 	first := true
 	seen := map[uint32]bool{}
@@ -282,16 +282,15 @@ func (c *virtualScaleCluster) audit() (vlogs, plogs, colocated int) {
 			clear(seen)
 		}
 		plogs++
-		node := c.diskNode[s.DiskID]
-		if seen[node] {
-			colocated++
+		if seen[s.DiskID] {
+			duplicated++
 		}
-		seen[node] = true
+		seen[s.DiskID] = true
 	})
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	return vlogs, plogs, colocated
+	return vlogs, plogs, duplicated
 }
 
 // readinessAll evaluates commit and read gates across all vlogs. Once the
@@ -335,10 +334,10 @@ func scalePostPopulate(t *testing.T, profile string, c *virtualScaleCluster) {
 	t.Logf("profile=%s op=scan-disk-plogs disks=%d plogs=%d elapsed=%s", profile, c.nodes*c.disksPerNode, plogs, seconds(time.Since(started)))
 
 	started = time.Now()
-	vlogs, mappedPlogs, colocated := c.audit()
-	t.Logf("profile=%s op=audit-placement vlogs=%d plogs=%d colocated=%d elapsed=%s", profile, vlogs, mappedPlogs, colocated, seconds(time.Since(started)))
-	if colocated != 0 {
-		t.Fatalf("profile=%s has %d node-colocated shards", profile, colocated)
+	vlogs, mappedPlogs, duplicated := c.audit()
+	t.Logf("profile=%s op=audit-placement vlogs=%d plogs=%d duplicate-disks=%d elapsed=%s", profile, vlogs, mappedPlogs, duplicated, seconds(time.Since(started)))
+	if duplicated != 0 {
+		t.Fatalf("profile=%s has %d disk-duplicated shards", profile, duplicated)
 	}
 
 	started = time.Now()

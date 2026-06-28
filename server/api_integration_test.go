@@ -181,8 +181,8 @@ func TestFileSnapshotNamespaceLifecycleOverGRPC(t *testing.T) {
 // rather than the default mirror. EC is deferred: the write lands in a replicated
 // staging vlog and only becomes coded once the maintenance promotion pass packs
 // it into whole stripe rows, so the test promotes explicitly and then asserts the
-// promoted vlog really is EC 3+1 with its four shards spread across four distinct
-// nodes (NodeLevelDurability), and that the file still reads back from it.
+// promoted vlog really is EC 3+1 with its four shards spread across four disks,
+// and that the file still reads back from it.
 func TestBucketECFileRoundTrip(t *testing.T) {
 	defer storage.SetECColumnBytesForTest(16 << 10)() // small stripe so 200 KB promotes
 	dir := t.TempDir()
@@ -193,8 +193,7 @@ func TestBucketECFileRoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 
-	// Four disks, each its own node (disk id == node id), so EC 3+1's four shards
-	// can land on four distinct nodes.
+	// Four disks are enough for EC 3+1, even when they are local to one server.
 	roots := map[uint32]string{}
 	for id := uint32(1); id <= 4; id++ {
 		roots[id] = filepath.Join(dir, fmt.Sprintf("disk-%d", id))
@@ -243,7 +242,7 @@ func TestBucketECFileRoundTrip(t *testing.T) {
 		t.Fatalf("EC file round-trip mismatch: got %d bytes, want %d", len(read.GetBuffer()), len(data))
 	}
 
-	// After promotion the file's bytes live in an EC 3+1 vlog, spread across four nodes.
+	// After promotion the file's bytes live in an EC 3+1 vlog, spread across four disks.
 	vlogs, err := db.ListVlogs(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -264,12 +263,12 @@ func TestBucketECFileRoundTrip(t *testing.T) {
 		if len(shards) != 4 {
 			t.Fatalf("EC vlog %d has %d shards, want 4", v.ID, len(shards))
 		}
-		nodes := map[uint32]bool{}
+		disks := map[uint32]bool{}
 		for _, sh := range shards {
-			nodes[sh.DiskID] = true // disk id == node id here
+			disks[sh.DiskID] = true
 		}
-		if len(nodes) != 4 {
-			t.Fatalf("EC vlog %d shards span %d nodes, want 4 (NodeLevelDurability)", v.ID, len(nodes))
+		if len(disks) != 4 {
+			t.Fatalf("EC vlog %d shards span %d disks, want 4", v.ID, len(disks))
 		}
 	}
 	if !sawEC {
@@ -915,7 +914,7 @@ func TestScrubAndRepairHealsBitrot(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 
-	// Four disks on four nodes so EC 3+1's four shards land on distinct nodes.
+	// Four disks are enough for EC 3+1's four shards.
 	roots := map[uint32]string{}
 	for id := uint32(1); id <= 4; id++ {
 		roots[id] = filepath.Join(dir, fmt.Sprintf("disk-%d", id))

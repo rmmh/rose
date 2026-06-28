@@ -206,11 +206,10 @@ func (i *chaosInjector) assertInvariants(ctx context.Context) {
 			seen = map[uint32]bool{}
 			placements[p.VlogID] = seen
 		}
-		node := i.cluster.nodeFor(p.DiskID)
-		if seen[node] {
-			i.t.Errorf("placement invariant: vlog %d has two shards on node %d", p.VlogID, node)
+		if seen[p.DiskID] {
+			i.t.Errorf("placement invariant: vlog %d has two shards on disk %d", p.VlogID, p.DiskID)
 		}
-		seen[node] = true
+		seen[p.DiskID] = true
 	})
 	if err != nil {
 		i.t.Errorf("placement audit: %v", err)

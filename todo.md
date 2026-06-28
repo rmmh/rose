@@ -98,6 +98,10 @@ replicated staging vlog and a maintenance-pass promotion step.
   memory so promotion and reconstruct avoid re-reading data plogs.
 - TODO (perf): fan out per-row shard writes concurrently (the new path encodes
   and writes rows sequentially for clarity first).
+- TODO (policy): add an opt-in node-fault-domain placement mode for EC and
+  replicas, so operators can require surviving whole-node loss when enough nodes
+  exist. The default local policy should remain disk-based so single-node
+  multi-disk EC works for development and small deployments.
 
 ## Bitrot and scrubbing (done)
 

@@ -39,15 +39,14 @@ func newNodeServer(t *testing.T, diskNodes map[uint32]uint32) *Server {
 	return s
 }
 
-func assertDistinctNodes(t *testing.T, s *Server, vlogID uint32) {
+func assertDistinctDisks(t *testing.T, s *Server, vlogID uint32) {
 	t.Helper()
-	seen := make(map[uint32]int) // node -> shard index already there
+	seen := make(map[uint32]int) // disk -> shard index already there
 	for _, sh := range mustShards(t, s, vlogID) {
-		n := s.nodeOf(sh.DiskID)
-		if other, ok := seen[n]; ok {
-			t.Fatalf("vlog %d shards %d and %d both on node %d (disk %d)", vlogID, other, sh.ShardIndex, n, sh.DiskID)
+		if other, ok := seen[sh.DiskID]; ok {
+			t.Fatalf("vlog %d shards %d and %d both on disk %d", vlogID, other, sh.ShardIndex, sh.DiskID)
 		}
-		seen[n] = sh.ShardIndex
+		seen[sh.DiskID] = sh.ShardIndex
 	}
 }
 
@@ -105,53 +104,69 @@ func TestNodeFailureDropsDisksFromLiveSet(t *testing.T) {
 	}
 }
 
-// TestNodeFaultDomainSpreadsShards checks PlacementAllowed's NodeLevelDurability:
-// no two shards of a vlog share a node, and provisioning fails when there are not
-// enough distinct nodes for the scheme.
-func TestNodeFaultDomainSpreadsShards(t *testing.T) {
+// TestDiskFaultDomainSpreadsShards checks placement's disk fault domain: no two
+// shards of a vlog share a disk, while multiple disks on one node may all
+// participate.
+func TestDiskFaultDomainSpreadsShards(t *testing.T) {
 	ctx := context.Background()
 	// Four disks but only two node fault domains.
 	s := newNodeServer(t, map[uint32]uint32{1: 10, 2: 10, 3: 20, 4: 20})
 
-	// EC 2+1 wants three distinct-node disks; only two nodes exist.
+	// EC 2+1 needs three disks and may use several disks on one node.
 	s.vlogMu.Lock()
-	_, _, err := s.provisionVlogLocked(ctx, "EC", 2, 1)
+	ecID, _, err := s.provisionVlogLocked(ctx, "EC", 2, 1)
 	s.vlogMu.Unlock()
-	if err == nil {
-		t.Fatal("EC 2+1 should fail with only two node fault domains")
+	if err != nil {
+		t.Fatalf("EC 2+1 with three available disks: %v", err)
 	}
+	assertDistinctDisks(t, s, ecID)
 
-	// DUPLICATE places one copy per node: two copies on distinct nodes, not four.
+	// DUPLICATE places one copy per active disk.
 	dupID := provision(t, s, "DUPLICATE", 1, 0)
-	if got := mustShards(t, s, dupID); len(got) != 2 {
-		t.Fatalf("DUPLICATE vlog has %d copies, want 2 (one per node)", len(got))
+	if got := mustShards(t, s, dupID); len(got) != 4 {
+		t.Fatalf("DUPLICATE vlog has %d copies, want 4 (one per disk)", len(got))
 	}
-	assertDistinctNodes(t, s, dupID)
+	assertDistinctDisks(t, s, dupID)
 
-	// EC 1+1 fits the two nodes, one shard each.
-	ecID := provision(t, s, "EC", 1, 1)
-	assertDistinctNodes(t, s, ecID)
+	// EC 1+1 uses two different disks.
+	ecID = provision(t, s, "EC", 1, 1)
+	assertDistinctDisks(t, s, ecID)
 }
 
-// TestDrainHonorsNodeFaultDomain checks that relocating a shard never collapses
-// two shards of a vlog onto one node, even when a spare disk shares a node with
-// an existing shard.
-func TestDrainHonorsNodeFaultDomain(t *testing.T) {
+func TestSingleNodeMultiDiskEC(t *testing.T) {
 	ctx := context.Background()
-	// disks 1,2 on distinct nodes; disk 3 shares node 20 with disk 2.
-	s := newNodeServer(t, map[uint32]uint32{1: 10, 2: 20, 3: 20})
+	s := newNodeServer(t, map[uint32]uint32{1: 10, 2: 10, 3: 10, 4: 10})
+
+	s.vlogMu.Lock()
+	vlogID, _, err := s.provisionVlogLocked(ctx, "EC", 3, 1)
+	s.vlogMu.Unlock()
+	if err != nil {
+		t.Fatalf("EC 3+1 on four disks in one node: %v", err)
+	}
+	assertDistinctDisks(t, s, vlogID)
+}
+
+// TestDrainHonorsDiskFaultDomain checks that relocating a shard never places two
+// shards of a vlog onto one disk, while a same-node spare disk is legal.
+func TestDrainHonorsDiskFaultDomain(t *testing.T) {
+	ctx := context.Background()
+	// disks 1,2 on distinct nodes initially; disk 3 is attached later as a spare
+	// sharing node 20 with disk 2.
+	s := newNodeServer(t, map[uint32]uint32{1: 10, 2: 20})
 	vlogID := provision(t, s, "DUPLICATE", 1, 0) // copies on nodes 10 and 20
 	writeVlog(t, s, vlogID, []byte("fault domain payload"))
+	spare := filepath.Join(t.TempDir(), "disk-3")
+	if err := os.MkdirAll(spare, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AttachDiskOnNode(ctx, 3, 20, spare, 0); err != nil {
+		t.Fatal(err)
+	}
 
-	// The copy on node 10 (disk 1) can only legally move to a disk on a node that
-	// does not already hold the other copy. Node 20 is taken by the other copy, so
-	// disk 3 is not allowed, and there is no other node: drain must fail.
-	if err := s.DrainDisk(ctx, 1); err == nil {
-		t.Fatal("drain succeeded though the only spare disk shares a node with the other copy")
+	if err := s.DrainDisk(ctx, 1); err != nil {
+		t.Fatal(err)
 	}
-	if got := s.DiskStates()[1]; got != meta.DiskDraining {
-		t.Fatalf("disk 1 state = %q, want draining (stuck without a legal destination)", got)
-	}
+	assertDistinctDisks(t, s, vlogID)
 }
 
 // TestNodeReturnCancelsReprotect checks the user-facing requirement: a node
