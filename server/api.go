@@ -47,6 +47,7 @@ type FileHandle struct {
 	chunkerInput bytes.Reader
 	chunks       []meta.ChunkPlacement
 	fileID64     uint64
+	writeSeq     int64
 }
 
 func (h *FileHandle) path() string {
@@ -516,7 +517,8 @@ func (s *Server) ensureWriteOperation(ctx context.Context, h *FileHandle, handle
 	if h.writeOpID != 0 {
 		return nil
 	}
-	key := fmt.Sprintf("legacy-handle-%d", handle)
+	key := fmt.Sprintf("legacy-handle-%d-%d", handle, h.writeSeq)
+	h.writeSeq++
 	op, err := s.db.CreateWriteOp(ctx, key, h.path())
 	if err != nil {
 		return err
@@ -639,44 +641,63 @@ func (s *Server) provisionForPolicyLocked(ctx context.Context, pol meta.BucketPo
 }
 
 func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResponse, error) {
+	if err := s.finishHandle(ctx, req.GetHandle(), true, req.GetIdempotencyKey()); err != nil {
+		return nil, err
+	}
+	return &pb.CloseResponse{}, nil
+}
+
+// FlushHandle publishes the current write cache for an open handle without
+// destroying the handle. FUSE Flush is issued for each close(2) of a duplicated
+// file descriptor, so later writes may still arrive on the same open file
+// description.
+func (s *Server) FlushHandle(ctx context.Context, handle int64) error {
+	return s.finishHandle(ctx, handle, false, "")
+}
+
+func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, idempotencyKey string) error {
 	s.handlesMu.Lock()
-	h, ok := s.handles[req.GetHandle()]
+	h, ok := s.handles[handle]
 	s.handlesMu.Unlock()
 	if !ok {
-		if req.GetIdempotencyKey() == "" {
-			return nil, fmt.Errorf("invalid handle")
+		if idempotencyKey == "" {
+			return fmt.Errorf("invalid handle")
 		}
-		op, err := s.db.WriteOpByKey(ctx, req.GetIdempotencyKey())
+		op, err := s.db.WriteOpByKey(ctx, idempotencyKey)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if op.State == meta.WriteOpCommitted {
-			return &pb.CloseResponse{}, nil
+			return nil
 		}
-		return nil, fmt.Errorf("write operation %q has no active handle", req.GetIdempotencyKey())
+		return fmt.Errorf("write operation %q has no active handle", idempotencyKey)
 	}
 	if h.writeOpID == 0 {
-		s.handlesMu.Lock()
-		delete(s.handles, req.GetHandle())
-		s.handlesMu.Unlock()
-		return &pb.CloseResponse{}, nil
+		if remove {
+			s.handlesMu.Lock()
+			delete(s.handles, handle)
+			s.handlesMu.Unlock()
+		}
+		return nil
 	}
 	mu := s.writeOperationLock(h.writeOpID)
 	mu.Lock()
 	defer mu.Unlock()
 	op, err := s.db.WriteOpByKey(ctx, h.writeKey)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	var placements []meta.ChunkPlacement
+	var fileID int64
 	if op.State != meta.WriteOpCommitted {
 		if h.cache == nil {
 			if err := s.buildCache(ctx, h); err != nil {
-				return nil, err
+				return err
 			}
 		}
-		placements, err := s.finalizeCache(ctx, h)
+		placements, err = s.finalizeCache(ctx, h)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		// Make every vlog this operation wrote durable, then record each one's
 		// new length, before publishing the file version. The commit must precede
@@ -686,7 +707,7 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 		// leased across all spills, since leases are not released until commit.
 		leases, err := s.db.WriteOpLeases(ctx, op.ID)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, vlogID := range leases {
 			s.vlogMu.Lock()
@@ -696,24 +717,38 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 				continue
 			}
 			if err := v.Commit(ctx, op.ID); err != nil {
-				return nil, err
+				return err
 			}
 			if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
-				return nil, err
+				return err
 			}
 		}
-		if _, err := s.db.CommitWriteOpVersion(ctx, op.ID, h.path(), h.mtimeOrNow(), placements); err != nil {
-			return nil, fmt.Errorf("publish write operation: %w", err)
+		fileID, err = s.db.CommitWriteOpVersion(ctx, op.ID, h.path(), h.mtimeOrNow(), placements)
+		if err != nil {
+			return fmt.Errorf("publish write operation: %w", err)
 		}
 		// The committed file version now holds a real refcount on every chunk this
 		// operation deduplicated against, so the in-memory pins that protected them
 		// across the write are no longer needed.
 		s.releasePins(op.ID)
+	} else {
+		fileID = h.id
+		placements = h.chunks
 	}
-	s.handlesMu.Lock()
-	delete(s.handles, req.GetHandle())
-	s.handlesMu.Unlock()
-	return &pb.CloseResponse{}, nil
+	if remove {
+		s.handlesMu.Lock()
+		delete(s.handles, handle)
+		s.handlesMu.Unlock()
+	} else {
+		h.id = fileID
+		h.chunks = placements
+		h.cache = nil
+		h.writeOpID = 0
+		h.writeKey = ""
+		h.fileID64 = 0
+		h.mtimeNs.Store(0)
+	}
+	return nil
 }
 
 // buildCache loads the base version open at this handle and constructs its write

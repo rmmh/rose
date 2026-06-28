@@ -148,6 +148,26 @@ func TestFuseCopyAppearsInImmediateList(t *testing.T) {
 	}
 }
 
+func TestFuseShellRedirectionWritesAfterDupClose(t *testing.T) {
+	mnt := mountRose(t)
+
+	bucket := filepath.Join(mnt, "bucket")
+	retryNoSys(t, "mkdir", func() error { return os.Mkdir(bucket, 0755) })
+	dst := filepath.Join(bucket, "redir.txt")
+	retryNoSys(t, "shell redirect", func() error {
+		return exec.Command("sh", "-c", "echo test > \"$1\"", "sh", dst).Run()
+	})
+
+	var got []byte
+	retryNoSys(t, "read redirected", func() (err error) {
+		got, err = os.ReadFile(dst)
+		return err
+	})
+	if string(got) != "test\n" {
+		t.Fatalf("redirected content = %q, want %q", got, "test\n")
+	}
+}
+
 func TestFuseFileTimes(t *testing.T) {
 	mnt := mountRose(t)
 

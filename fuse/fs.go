@@ -305,7 +305,10 @@ func (h *roseHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 }
 
 func (h *roseHandle) Flush(ctx context.Context) syscall.Errno {
-	return h.close(ctx)
+	if err := h.srv.FlushHandle(ctx, h.handle); err != nil {
+		return opErrno(ctx, err)
+	}
+	return 0
 }
 
 func (h *roseHandle) Release(ctx context.Context) syscall.Errno {

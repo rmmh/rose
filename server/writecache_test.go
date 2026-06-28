@@ -170,6 +170,34 @@ func TestWriteCacheReadYourWrites(t *testing.T) {
 	_, _ = s.Close(ctx, &pb.CloseRequest{Handle: h, IdempotencyKey: "ryw"})
 }
 
+func TestFlushHandlePublishesWithoutClosing(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/f", OperationKey: "flush-first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := open.GetHandle()
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: h, Offset: 0, Buffer: []byte("hello")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushHandle(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(t, s, "/f"); !bytes.Equal(got, []byte("hello")) {
+		t.Fatalf("after flush got %q, want %q", got, "hello")
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: h, Offset: 5, Buffer: []byte(" world")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: h}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(t, s, "/f"); !bytes.Equal(got, []byte("hello world")) {
+		t.Fatalf("after close got %q, want %q", got, "hello world")
+	}
+}
+
 // TestWriteCacheLargeAppendSpills writes a file larger than the spill threshold
 // as many kernel-sized chunks, so the cache spills durable chunks mid-stream and
 // the final splice stitches the settled prefix to the in-memory tail. The content
