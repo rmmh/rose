@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -141,15 +142,18 @@ func main() {
 	var fuseServer *fuse.Server
 	if *mountPoint != "" {
 		fuseRoot := rosefuse.NewRoseRoot(roseServer)
+		mountOpts := fuse.MountOptions{
+			FsName: "rose",
+			Debug:  *debug,
+		}
+		if runtime.GOOS == "darwin" {
+			// macFUSE otherwise probes AppleDouble (._*) sidecars and xattrs on
+			// every op, emitting macFUSE-private opcodes go-fuse does not
+			// implement (surfacing as spurious I/O errors).
+			mountOpts.Options = []string{"noappledouble", "noapplexattr"}
+		}
 		serverOptions := &fs.Options{
-			MountOptions: fuse.MountOptions{
-				FsName: "rose",
-				Debug:  *debug,
-				// macFUSE otherwise probes AppleDouble (._*) sidecars and xattrs on
-				// every op, emitting macFUSE-private opcodes go-fuse does not
-				// implement (surfacing as spurious I/O errors). No-ops on Linux.
-				Options: []string{"noappledouble", "noapplexattr"},
-			},
+			MountOptions: mountOpts,
 		}
 		log.Printf("Mounting FUSE on %s...", *mountPoint)
 		os.MkdirAll(*mountPoint, 0755)
