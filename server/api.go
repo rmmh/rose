@@ -1115,16 +1115,24 @@ func (s *Server) finalizeCache(ctx context.Context, h *FileHandle) ([]meta.Chunk
 				break
 			}
 		}
-		data, err := c.ReadAt(ctx, pos, windowEnd-pos)
-		if err != nil {
-			return nil, err
+		// Process the dirty window in bounded batches to avoid materializing a
+		// huge allocation when the file was truncated to a very large size.
+		for pos < windowEnd {
+			batchEnd := windowEnd
+			if batchEnd-pos > spillThreshold {
+				batchEnd = pos + spillThreshold
+			}
+			data, err := c.ReadAt(ctx, pos, batchEnd-pos)
+			if err != nil {
+				return nil, err
+			}
+			placements, err := s.storeChunks(ctx, h, data, pos, placementHash64(result), len(result), batchEnd == length)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, placements...)
+			pos = batchEnd
 		}
-		placements, err := s.storeChunks(ctx, h, data, pos, placementHash64(result), len(result), windowEnd == length)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, placements...)
-		pos = windowEnd
 	}
 	return result, nil
 }

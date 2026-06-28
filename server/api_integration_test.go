@@ -14,6 +14,8 @@ import (
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
 	"github.com/rmmh/rose/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
@@ -1119,4 +1121,42 @@ func TestDuplicatePlacementUsesEveryConfiguredDisk(t *testing.T) {
 	if !bytes.Equal(read.GetBuffer(), []byte("replicated across disks")) {
 		t.Fatalf("recovered replicated read = %q", read.GetBuffer())
 	}
+}
+
+// TestHugeTruncateAndClose verifies that closing a handle after truncating to a
+// very large size does not panic. Previously finalizeCache materialized the
+// entire sparse region as one allocation (makeslice: len out of range).
+//
+// TODO: make sparse file fills more efficient
+func TestHugeTruncateAndClose(t *testing.T) {
+	if os.Getenv("ROSE_SLOW") != "1" {
+		t.Skip("slow: fills 10 GiB of zeros in 4 MiB batches; set ROSE_SLOW=1 to run")
+	}
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	s := server.NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
+	ctx := context.Background()
+
+	const hugeSize = 10 << 30 // 10 GiB: large enough to exercise multi-batch finalize across many spillThreshold windows
+
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/huge"})
+	require.NoError(t, err)
+	_, err = s.Truncate(ctx, &pb.TruncateRequest{Handle: open.GetHandle(), Size: hugeSize})
+	require.NoError(t, err)
+	_, err = s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()})
+	require.NoError(t, err)
+
+	// The committed file should report the truncated size.
+	attr, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/huge"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(hugeSize), attr.GetSize())
+
+	// Reading at an arbitrary offset within the file should return zeros.
+	reopen, err := s.Open(ctx, &pb.OpenRequest{Path: "/huge"})
+	require.NoError(t, err)
+	res, err := s.Read(ctx, &pb.ReadRequest{Handle: reopen.GetHandle(), Offset: hugeSize / 2, Length: 16})
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, 16), res.GetBuffer())
 }
