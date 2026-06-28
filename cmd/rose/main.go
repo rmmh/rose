@@ -31,7 +31,7 @@ import (
 var (
 	mountPoint = flag.String("mount", "", "Mount point for FUSE (optional)")
 	metaDir    = flag.String("metadir", "", "Directory for SQLite metadata storage")
-	dataDirs   = flag.String("datadirs", "", "Comma-separated list of directories for physical logs")
+	dataDirs   = flag.String("datadirs", "", "Comma-separated list of directories for physical logs; extra positional dirs are also accepted")
 	rpcAddr    = flag.String("rpc", ":50051", "RPC listen address")
 	webdavAddr = flag.String("webdav", "", "WebDAV listen address (e.g. :8080); empty disables it")
 	protection = flag.String("protection", "", "Default protection for new buckets: \"N\" for N-way duplication, or \"N+K\" for erasure coding with N data and K parity shards (e.g. 3 or 3+2). Empty keeps the built-in 2-copy mirror.")
@@ -63,11 +63,28 @@ func parseProtection(s string) (meta.BucketPolicy, bool, error) {
 	return meta.BucketPolicy{ProtectionScheme: "DUPLICATE", DataShards: n}, true, nil
 }
 
+func parseDataDirs(first string, extra []string) []string {
+	var dirs []string
+	for _, part := range strings.Split(first, ",") {
+		if part != "" {
+			dirs = append(dirs, part)
+		}
+	}
+	for _, arg := range extra {
+		for _, part := range strings.Split(arg, ",") {
+			if part != "" {
+				dirs = append(dirs, part)
+			}
+		}
+	}
+	return dirs
+}
+
 func main() {
 	flag.Parse()
 
 	if *metaDir == "" || *dataDirs == "" {
-		log.Fatalf("Missing required arguments. Usage: ./rose --metadir <dir> --datadirs <dir1,dir2> [--mount <dir>] [--webdav :8080]")
+		log.Fatalf("Missing required arguments. Usage: ./rose --metadir <dir> --datadirs <dir1,dir2> [dir3 ...] [--mount <dir>] [--webdav :8080]")
 	}
 
 	logLevel := slog.LevelInfo
@@ -84,8 +101,10 @@ func main() {
 	}
 	defer db.Close()
 
-	// Parse Data Directories
-	dirs := strings.Split(*dataDirs, ",")
+	// Parse Data Directories. Shell brace expansion such as
+	// `-datadirs /mnt/d{1,2,3,4}` arrives as one flag value plus three
+	// positional args, so accept both forms.
+	dirs := parseDataDirs(*dataDirs, flag.Args())
 	diskRoots := make(map[uint32]string, len(dirs))
 	for index, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -105,6 +124,9 @@ func main() {
 	if pol, ok, err := parseProtection(*protection); err != nil {
 		log.Fatal(err)
 	} else if ok {
+		if pol.ProtectionScheme == "EC" && len(dirs) < pol.DataShards+pol.ParityShards {
+			log.Fatalf("Default EC protection %s needs at least %d data directories, got %d", *protection, pol.DataShards+pol.ParityShards, len(dirs))
+		}
 		roseServer.SetDefaultProtection(pol)
 		log.Printf("Default protection: %s", *protection)
 	}
