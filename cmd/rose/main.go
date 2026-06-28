@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -155,11 +156,22 @@ func main() {
 		serverOptions := &fs.Options{
 			MountOptions: mountOpts,
 		}
+		ttl := time.Duration(0)
+		serverOptions.EntryTimeout = &ttl
+		serverOptions.AttrTimeout = &ttl
+		serverOptions.NegativeTimeout = &ttl
 		log.Printf("Mounting FUSE on %s...", *mountPoint)
 		os.MkdirAll(*mountPoint, 0755)
 		fuseServer, err = fs.Mount(*mountPoint, fuseRoot, serverOptions)
 		if err != nil {
-			log.Fatalf("Mount FUSE failed: %v", err)
+			log.Printf("Initial FUSE mount on %s failed: %v; trying lazy unmount before retry", *mountPoint, err)
+			if unmountErr := lazyUnmount(*mountPoint); unmountErr != nil {
+				log.Printf("Lazy unmount of %s before mount retry failed: %v", *mountPoint, unmountErr)
+			}
+			fuseServer, err = fs.Mount(*mountPoint, fuseRoot, serverOptions)
+			if err != nil {
+				log.Fatalf("Mount FUSE failed after retry: %v", err)
+			}
 		}
 
 		// Wait for the kernel INIT handshake to finish; operations issued before it
@@ -193,7 +205,10 @@ func main() {
 	if fuseServer != nil {
 		log.Printf("Unmounting FUSE from %s...", *mountPoint)
 		if err := fuseServer.Unmount(); err != nil {
-			log.Printf("Warning: failed to unmount FUSE: %v", err)
+			log.Printf("Normal FUSE unmount failed: %v; trying lazy unmount", err)
+			if lazyErr := lazyUnmount(*mountPoint); lazyErr != nil {
+				log.Printf("Warning: failed to lazily unmount FUSE: %v", lazyErr)
+			}
 		}
 	}
 	if webdavServer != nil {

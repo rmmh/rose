@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,6 +30,9 @@ var mountOwner = fuse.Owner{Uid: uint32(os.Getuid()), Gid: uint32(os.Getgid())}
 func opErrno(ctx context.Context, err error) syscall.Errno {
 	if ctx.Err() != nil {
 		return syscall.EINTR
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		return syscall.ENOSPC
 	}
 	slog.Error("fuse op failed", "err", err)
 	return syscall.EIO
@@ -202,8 +206,14 @@ func (f *RoseFile) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 	out.Owner = mountOwner
 	if m, ok := in.GetMTime(); ok {
 		mtime := m.UnixNano()
-		if _, err := f.srv.Setattr(ctx, &pb.SetattrRequest{Path: f.path, Mtime: &mtime}); err != nil {
-			return opErrno(ctx, err)
+		if h, isRose := fh.(*roseHandle); isRose {
+			if err := f.srv.SetHandleMtime(ctx, h.handle, mtime); err != nil {
+				return opErrno(ctx, err)
+			}
+		} else {
+			if _, err := f.srv.Setattr(ctx, &pb.SetattrRequest{Path: f.path, Mtime: &mtime}); err != nil {
+				return opErrno(ctx, err)
+			}
 		}
 		setTimes(&out.Attr, mtime)
 	}
@@ -269,6 +279,7 @@ type roseHandle struct {
 	srv    *server.Server
 	handle int64
 	path   string
+	closed atomic.Bool
 }
 
 var (
@@ -294,13 +305,20 @@ func (h *roseHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 }
 
 func (h *roseHandle) Flush(ctx context.Context) syscall.Errno {
-	// Flush is called on close(2) of every file descriptor, but multiple descriptors (e.g. from dup)
-	// can share the same open handle. We must not close/destroy the server-side handle until
-	// Release is called when the last descriptor is closed, so Flush is a no-op.
-	return 0
+	return h.close(ctx)
 }
 
 func (h *roseHandle) Release(ctx context.Context) syscall.Errno {
-	h.srv.Close(ctx, &pb.CloseRequest{Handle: h.handle})
+	return h.close(ctx)
+}
+
+func (h *roseHandle) close(ctx context.Context) syscall.Errno {
+	if !h.closed.CompareAndSwap(false, true) {
+		return 0
+	}
+	if _, err := h.srv.Close(ctx, &pb.CloseRequest{Handle: h.handle}); err != nil {
+		h.closed.Store(false)
+		return opErrno(ctx, err)
+	}
 	return 0
 }

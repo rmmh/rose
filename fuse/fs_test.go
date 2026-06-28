@@ -3,6 +3,7 @@ package fuse_test
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	rosefuse "github.com/rmmh/rose/fuse"
 	"github.com/rmmh/rose/meta"
 	"github.com/rmmh/rose/server"
+	"golang.org/x/sys/unix"
 )
 
 // retryNoSys retries an op a few times while macFUSE returns ENOSYS. macFUSE
@@ -53,6 +55,7 @@ func mountRose(t *testing.T) string {
 		t.Fatal(err)
 	}
 	root := rosefuse.NewRoseRoot(srv)
+	ttl := time.Duration(0)
 	fuseServer, err := gofuse.Mount(mnt, root, &gofuse.Options{
 		MountOptions: fuse.MountOptions{
 			FsName: "rose-test",
@@ -61,6 +64,9 @@ func mountRose(t *testing.T) string {
 			// (surfacing as spurious ENOSYS). These are no-ops on Linux.
 			Options: []string{"noappledouble", "noapplexattr"},
 		},
+		EntryTimeout:    &ttl,
+		AttrTimeout:     &ttl,
+		NegativeTimeout: &ttl,
 	})
 	if err != nil {
 		t.Skipf("FUSE mount unavailable: %v", err)
@@ -77,6 +83,69 @@ func mountRose(t *testing.T) string {
 		}
 	})
 	return mnt
+}
+
+func TestFuseTouchStyleCreateAndSetTimesBeforeClose(t *testing.T) {
+	mnt := mountRose(t)
+
+	bucket := filepath.Join(mnt, "bucket")
+	retryNoSys(t, "mkdir", func() error { return os.Mkdir(bucket, 0755) })
+	path := filepath.Join(bucket, "foo")
+	want := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	var f *os.File
+	retryNoSys(t, "create", func() (err error) {
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
+		return err
+	})
+	tv := []unix.Timeval{
+		unix.NsecToTimeval(want.UnixNano()),
+		unix.NsecToTimeval(want.UnixNano()),
+	}
+	retryNoSys(t, "futimes", func() error { return unix.Futimes(int(f.Fd()), tv) })
+	retryNoSys(t, "close", f.Close)
+
+	var fi os.FileInfo
+	retryNoSys(t, "stat", func() (err error) { fi, err = os.Stat(path); return })
+	if fi.Size() != 0 {
+		t.Fatalf("size = %d, want 0", fi.Size())
+	}
+	if !fi.ModTime().Equal(want) {
+		t.Fatalf("mtime = %v, want %v", fi.ModTime().UTC(), want)
+	}
+}
+
+func TestFuseCopyAppearsInImmediateList(t *testing.T) {
+	mnt := mountRose(t)
+
+	bucket := filepath.Join(mnt, "bucket")
+	retryNoSys(t, "mkdir", func() error { return os.Mkdir(bucket, 0755) })
+	src := filepath.Join(t.TempDir(), "copied.txt")
+	want := []byte("copied through cp\n")
+	if err := os.WriteFile(src, want, 0644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(bucket, "copied.txt")
+	retryNoSys(t, "cp", func() error {
+		return exec.Command("cp", src, dst).Run()
+	})
+
+	var ents []os.DirEntry
+	retryNoSys(t, "readdir after cp", func() (err error) {
+		ents, err = os.ReadDir(bucket)
+		return err
+	})
+	if len(ents) != 1 || ents[0].Name() != "copied.txt" {
+		t.Fatalf("listing = %v, want [copied.txt]", ents)
+	}
+	var got []byte
+	retryNoSys(t, "read copied", func() (err error) {
+		got, err = os.ReadFile(dst)
+		return err
+	})
+	if string(got) != string(want) {
+		t.Fatalf("copied content = %q, want %q", got, want)
+	}
 }
 
 func TestFuseFileTimes(t *testing.T) {

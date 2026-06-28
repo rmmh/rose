@@ -36,6 +36,9 @@ type FileHandle struct {
 	snapshotID uint64
 	writeOpID  int64
 	writeKey   string
+	// mtimeNs is an optional mtime override for an open write handle. FUSE can
+	// receive futimens before a newly-created file has a published namespace row.
+	mtimeNs atomic.Int64
 	// cache holds pending modifications for a writable handle: it coalesces
 	// out-of-order/overlapping writes, serves read-your-writes, and produces the
 	// spliced placement list at Close. Nil for read-only and snapshot handles.
@@ -54,6 +57,13 @@ func (h *FileHandle) path() string {
 }
 
 func (h *FileHandle) setPath(path string) { h.pathPtr.Store(&path) }
+
+func (h *FileHandle) mtimeOrNow() int64 {
+	if mtime := h.mtimeNs.Load(); mtime != 0 {
+		return mtime
+	}
+	return time.Now().UnixNano()
+}
 
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	// Simple implementation
@@ -368,7 +378,7 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 		h, ok := s.handles[req.GetHandle()]
 		s.handlesMu.Unlock()
 		if ok && h.cache != nil {
-			return &pb.GetattrResponse{Size: h.cache.Length(), Mtime: time.Now().UnixNano()}, nil
+			return &pb.GetattrResponse{Size: h.cache.Length(), Mtime: h.mtimeOrNow()}, nil
 		}
 	}
 	entry, ok, err := s.db.StatPath(ctx, req.GetPath())
@@ -396,6 +406,29 @@ func (s *Server) Setattr(ctx context.Context, req *pb.SetattrRequest) (*pb.Setat
 		}
 	}
 	return &pb.SetattrResponse{}, nil
+}
+
+// SetHandleMtime applies an mtime update to an open handle. For unpublished
+// write handles, the value is carried until Close publishes the file head.
+func (s *Server) SetHandleMtime(ctx context.Context, handle int64, mtime int64) error {
+	s.handlesMu.Lock()
+	h, ok := s.handles[handle]
+	s.handlesMu.Unlock()
+	if !ok {
+		return fmt.Errorf("invalid handle")
+	}
+	if h.writeOpID != 0 {
+		h.mtimeNs.Store(mtime)
+		return nil
+	}
+	ok, err := s.db.SetMtime(ctx, h.path(), mtime)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("path not found: %q", h.path())
+	}
+	return nil
 }
 
 func (s *Server) ListDir(ctx context.Context, req *pb.ListDirRequest) (*pb.ListDirResponse, error) {
@@ -623,7 +656,9 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 		return nil, fmt.Errorf("write operation %q has no active handle", req.GetIdempotencyKey())
 	}
 	if h.writeOpID == 0 {
+		s.handlesMu.Lock()
 		delete(s.handles, req.GetHandle())
+		s.handlesMu.Unlock()
 		return &pb.CloseResponse{}, nil
 	}
 	mu := s.writeOperationLock(h.writeOpID)
@@ -667,7 +702,7 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 				return nil, err
 			}
 		}
-		if _, err := s.db.CommitWriteOpVersion(ctx, op.ID, h.path(), time.Now().UnixNano(), placements); err != nil {
+		if _, err := s.db.CommitWriteOpVersion(ctx, op.ID, h.path(), h.mtimeOrNow(), placements); err != nil {
 			return nil, fmt.Errorf("publish write operation: %w", err)
 		}
 		// The committed file version now holds a real refcount on every chunk this
