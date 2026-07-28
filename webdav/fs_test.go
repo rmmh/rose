@@ -309,4 +309,32 @@ func TestWebDAVFileModes(t *testing.T) {
 	if err := statWrite.Close(); err != nil {
 		t.Fatal(err)
 	}
+
+	forcedAppend, err := fs.OpenFile(ctx, "/file", os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := forcedAppend.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := forcedAppend.Write([]byte("Q")); err != nil {
+		t.Fatal(err)
+	}
+	if err := forcedAppend.Close(); err != nil {
+		t.Fatal(err)
+	}
+	check, err = fs.OpenFile(ctx, "/file", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = io.ReadAll(check)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := check.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "newXinal!Q" {
+		t.Fatalf("append after seek produced %q, want %q", got, "newXinal!Q")
+	}
 }

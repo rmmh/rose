@@ -135,6 +135,7 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 			handle:   resp.GetHandle(),
 			writing:  true,
 			readable: flag&os.O_WRONLY == 0,
+			append:   flag&os.O_APPEND != 0,
 			size:     size,
 			writeOff: writeOff,
 		}, nil
@@ -173,6 +174,7 @@ type roseFile struct {
 	handle   int64
 	writing  bool
 	readable bool
+	append   bool
 
 	size  int64
 	mtime int64
@@ -211,6 +213,9 @@ func (f *roseFile) Read(p []byte) (int, error) {
 func (f *roseFile) Write(p []byte) (int, error) {
 	if !f.writing {
 		return 0, os.ErrPermission
+	}
+	if f.append {
+		f.writeOff = f.size
 	}
 	if _, err := f.srv.Write(f.ctx, &pb.WriteRequest{Handle: f.handle, Buffer: p, Offset: f.writeOff}); err != nil {
 		return 0, err
