@@ -828,6 +828,12 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 		if mapping.ShardIndex != index {
 			return nil, fmt.Errorf("vlog %d has non-contiguous shard mapping", info.ID)
 		}
+		if p, ok := s.plogs[mapping.PlogID]; ok {
+			h := p.Header()
+			if h.GetVlogId() != info.ID || !bytes.Equal(h.GetVlogUid(), info.UID[:]) {
+				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock belongs to another vlog", info.ID, index, mapping.PlogID)
+			}
+		}
 		client, err := s.plogClientLocked(mapping.PlogID)
 		if err != nil {
 			return nil, fmt.Errorf("mount vlog %d: %w", info.ID, err)

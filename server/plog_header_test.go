@@ -195,4 +195,23 @@ func TestPlogSuperblockMembership(t *testing.T) {
 		recovered.CloseStorage()
 		t.Fatal("recovery adopted a replacement with another plog UID")
 	}
+
+	if err := os.Remove(victimPath); err != nil {
+		t.Fatal(err)
+	}
+	wrongVlogHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
+	wrongVlogHeader.VlogUid = append([]byte(nil), wrongVlogHeader.VlogUid...)
+	wrongVlogHeader.VlogUid[0] ^= 0xff
+	wrongVlog, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(wrongVlogHeader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wrongVlog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered = NewServerWithDiskRoots(db, roots)
+	if err := recovered.Recover(ctx); err == nil {
+		recovered.CloseStorage()
+		t.Fatal("recovery adopted a plog assigned to another vlog")
+	}
 }
