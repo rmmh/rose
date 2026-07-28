@@ -844,8 +844,15 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		// across the write are no longer needed.
 		s.releasePins(op.ID)
 	} else {
-		fileID = h.id
-		placements = h.chunks
+		fileID = op.FileID
+		placements, err = s.db.FileVersionChunks(ctx, fileID)
+		if err != nil {
+			return err
+		}
+		committedMtime, err = s.db.FileVersionMtime(ctx, fileID)
+		if err != nil {
+			return err
+		}
 	}
 	if remove {
 		s.handlesMu.Lock()

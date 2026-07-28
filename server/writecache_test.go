@@ -201,6 +201,35 @@ func TestFlushHandlePublishesWithoutClosing(t *testing.T) {
 	}
 }
 
+func TestFlushRetryHandleConvergesAfterPeerCommit(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	first, err := s.Open(ctx, &pb.OpenRequest{Path: "/peer-flush", OperationKey: "peer-flush"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Open(ctx, &pb.OpenRequest{Path: "/peer-flush", OperationKey: "peer-flush"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: first.GetHandle(), Buffer: []byte("committed")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: first.GetHandle(), IdempotencyKey: "peer-flush"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushHandle(ctx, second.GetHandle()); err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.Read(ctx, &pb.ReadRequest{Handle: second.GetHandle(), Length: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), []byte("committed")) {
+		t.Fatalf("retry handle after flush read %q, want committed", read.GetBuffer())
+	}
+}
+
 // TestWriteCacheLargeAppendSpills writes a file larger than the spill threshold
 // as many kernel-sized chunks, so the cache spills durable chunks mid-stream and
 // the final splice stitches the settled prefix to the in-memory tail. The content
