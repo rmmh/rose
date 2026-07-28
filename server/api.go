@@ -1348,6 +1348,9 @@ func (s *Server) MakeVlog(ctx context.Context, req *pb.MakeVlogRequest) (*pb.Mak
 func (s *Server) MakePlog(ctx context.Context, req *pb.MakePlogRequest) (*pb.MakePlogResponse, error) {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
+	if _, ok := s.diskRoots[req.GetDiskId()]; !ok {
+		return nil, fmt.Errorf("disk %d is not configured", req.GetDiskId())
+	}
 	plogUID := uid.New()
 	id, err := s.db.MakePlog(ctx, plogUID, req.GetDiskId())
 	if err != nil {

@@ -398,6 +398,9 @@ func TestVlogECRealPlogWholeRows(t *testing.T) {
 func TestPlogCommitOverGRPC(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()
+	if _, err := client.MakePlog(ctx, &pb.MakePlogRequest{DiskId: 999}); err == nil {
+		t.Fatal("MakePlog on an unconfigured disk succeeded")
+	}
 	plog, err := client.MakePlog(ctx, &pb.MakePlogRequest{DiskId: 1})
 	if err != nil {
 		t.Fatal(err)
