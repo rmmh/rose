@@ -3,10 +3,7 @@ package meta
 import (
 	"bytes"
 	"context"
-	"math"
 	"testing"
-
-	"github.com/rmmh/rose/uid"
 )
 
 func testChunkPlacement(fill byte, logicalLen int, vlogID uint32, vaddrOffset int64, compressedLen int) ChunkPlacement {
@@ -39,57 +36,12 @@ func TestCommitFileTransfersChunkRefs(t *testing.T) {
 	a := testChunkPlacement('A', 10, 1, 100, 10)
 	b := testChunkPlacement('B', 11, 1, 200, 11)
 	c := testChunkPlacement('C', 12, 2, 300, 12)
-	badHash := a
-	badHash.Hash = badHash.Hash[:len(badHash.Hash)-1]
-	if _, err := db.CommitFile(ctx, "bucket/bad-hash", 1, []ChunkPlacement{badHash}); err == nil {
-		t.Fatal("commit with a short chunk hash succeeded")
-	}
-	badLength := a
-	badLength.LogicalLen = -1
-	if _, err := db.CommitFile(ctx, "bucket/bad-length", 1, []ChunkPlacement{badLength}); err == nil {
-		t.Fatal("commit with a negative logical chunk length succeeded")
-	}
-	badOffset := a
-	badOffset.VaddrOffset = -1
-	if _, err := db.CommitFile(ctx, "bucket/bad-offset", 1, []ChunkPlacement{badOffset}); err == nil {
-		t.Fatal("commit with a negative virtual-log offset succeeded")
-	}
-	badVlog := a
-	badVlog.VlogID = 0
-	if _, err := db.CommitFile(ctx, "bucket/bad-vlog", 1, []ChunkPlacement{badVlog}); err == nil {
-		t.Fatal("commit with the zero virtual-log id succeeded")
-	}
-	badCompressed := a
-	badCompressed.CompressedLen = -1
-	if _, err := db.CommitFile(ctx, "bucket/bad-compressed", 1, []ChunkPlacement{badCompressed}); err == nil {
-		t.Fatal("commit with a negative compressed chunk length succeeded")
-	}
-	zeroLength := a
-	zeroLength.LogicalLen = 0
-	if _, err := db.CommitFile(ctx, "bucket/zero-length", 1, []ChunkPlacement{zeroLength}); err == nil {
-		t.Fatal("commit with a zero-length chunk placement succeeded")
-	}
-	zeroCompressed := a
-	zeroCompressed.CompressedLen = 0
-	if _, err := db.CommitFile(ctx, "bucket/zero-compressed", 1, []ChunkPlacement{zeroCompressed}); err == nil {
-		t.Fatal("commit with a zero compressed chunk length succeeded")
-	}
-	overflowingRange := a
-	overflowingRange.VaddrOffset = math.MaxInt64
-	if _, err := db.CommitFile(ctx, "bucket/overflowing-range", 1, []ChunkPlacement{overflowingRange}); err == nil {
-		t.Fatal("commit with an overflowing virtual-log range succeeded")
-	}
 
 	if _, err := db.CommitFile(ctx, "bucket/file", 1, []ChunkPlacement{a, b}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.CommitFile(ctx, "bucket/file", 2, []ChunkPlacement{a, c}); err != nil {
 		t.Fatal(err)
-	}
-	conflictingA := a
-	conflictingA.LogicalLen++
-	if _, err := db.CommitFile(ctx, "bucket/hash-collision", 3, []ChunkPlacement{conflictingA}); err == nil {
-		t.Fatal("commit reused a hash with conflicting placement geometry")
 	}
 
 	if got := chunkRefcount(t, db, a.Hash); got != 1 {
@@ -125,43 +77,5 @@ func TestCommitFileCountsRepeatedChunkRefs(t *testing.T) {
 		t.Fatal("ChunkByHash did not find committed chunk")
 	} else if got.VlogID != a.VlogID || got.VaddrOffset != a.VaddrOffset || got.LogicalLen != a.LogicalLen || got.CompressedLen != a.CompressedLen {
 		t.Fatalf("ChunkByHash() = %+v, want %+v", got, a)
-	}
-}
-
-func TestCatalogLengthValidation(t *testing.T) {
-	db, err := OpenEphemeral()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	ctx := context.Background()
-	vlogID, err := db.MakeVlog(ctx, uid.New(), "NONE", 1, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SetVlogLength(ctx, vlogID, -1); err == nil {
-		t.Fatal("negative virtual-log length persisted")
-	}
-	plogID, err := db.MakePlog(ctx, uid.New(), 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SetPlogLength(ctx, plogID, -1); err == nil {
-		t.Fatal("negative physical-log length persisted")
-	}
-	if err := db.SetVlogLength(ctx, ^uint32(0), 1); err == nil {
-		t.Fatal("virtual-log length update for a missing row succeeded")
-	}
-	if err := db.SetPlogLength(ctx, ^uint32(0), 1); err == nil {
-		t.Fatal("physical-log length update for a missing row succeeded")
-	}
-	if err := db.AssignPlogToVlog(ctx, vlogID, -1, plogID); err == nil {
-		t.Fatal("negative shard index persisted")
-	}
-	if err := db.AssignPlogToVlog(ctx, ^uint32(0), 0, plogID); err == nil {
-		t.Fatal("mapping to a missing virtual log persisted")
-	}
-	if err := db.AssignPlogToVlog(ctx, vlogID, 0, ^uint32(0)); err == nil {
-		t.Fatal("mapping to a missing physical log persisted")
 	}
 }

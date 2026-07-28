@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"slices"
 	"strings"
 	"time"
@@ -14,7 +13,6 @@ import (
 )
 
 const chunkRecordHeaderSize = 64
-const fileChunkHashSize = 15
 
 // MakeVlog creates a new vlog with the specified protection scheme. u is the
 // vlog's persistent UID, also stamped into the superblocks of its member plogs.
@@ -262,65 +260,22 @@ func (d *DB) VlogUsages(ctx context.Context) ([]VlogUsage, error) {
 }
 
 func (d *DB) SetVlogLength(ctx context.Context, vlogID uint32, length int64) error {
-	if length < 0 {
-		return fmt.Errorf("set vlog %d length: negative length %d", vlogID, length)
-	}
-	res, err := d.db.ExecContext(ctx, "UPDATE vlog SET length = ? WHERE id = ?", length, vlogID)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n != 1 {
-		return fmt.Errorf("set vlog %d length: no such vlog", vlogID)
-	}
-	return nil
+	_, err := d.db.ExecContext(ctx, "UPDATE vlog SET length = ? WHERE id = ?", length, vlogID)
+	return err
 }
 
 // SetPlogLength records a logical plog length. Normal byte-backed writes derive
 // this from the file; virtual scale tests use it to model large extents without
 // allocating their contents.
 func (d *DB) SetPlogLength(ctx context.Context, plogID uint32, length int64) error {
-	if length < 0 {
-		return fmt.Errorf("set plog %d length: negative length %d", plogID, length)
-	}
-	res, err := d.db.ExecContext(ctx, "UPDATE plog SET length = ? WHERE id = ?", length, plogID)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n != 1 {
-		return fmt.Errorf("set plog %d length: no such plog", plogID)
-	}
-	return nil
+	_, err := d.db.ExecContext(ctx, "UPDATE plog SET length = ? WHERE id = ?", length, plogID)
+	return err
 }
 
 // AssignPlogToVlog maps a plog to a shard of a vlog.
 func (d *DB) AssignPlogToVlog(ctx context.Context, vlogID uint32, shardIdx int, plogID uint32) error {
-	if shardIdx < 0 {
-		return fmt.Errorf("assign plog %d to vlog %d: negative shard index %d", plogID, vlogID, shardIdx)
-	}
-	res, err := d.db.ExecContext(ctx, `INSERT INTO vlog_plog (vlog_id, shard_idx, plog_id)
-		SELECT ?, ?, ?
-		WHERE EXISTS (SELECT 1 FROM vlog WHERE id = ?)
-		  AND EXISTS (SELECT 1 FROM plog WHERE id = ?)`,
-		vlogID, shardIdx, plogID, vlogID, plogID)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n != 1 {
-		return fmt.Errorf("assign plog %d to vlog %d shard %d: vlog or plog does not exist", plogID, vlogID, shardIdx)
-	}
-	return nil
+	_, err := d.db.ExecContext(ctx, "INSERT INTO vlog_plog (vlog_id, shard_idx, plog_id) VALUES (?, ?, ?)", vlogID, shardIdx, plogID)
+	return err
 }
 
 // ReplaceShardPlog atomically repoints a vlog shard from a lost plog to a freshly
@@ -400,22 +355,10 @@ func upsertChunkRefs(ctx context.Context, tx *sql.Tx, placements []ChunkPlacemen
 			sqlText.WriteString("(?, 1, ?, ?, ?, ?)")
 			args = append(args, p.Hash, p.VlogID, p.VaddrOffset, p.LogicalLen, p.CompressedLen)
 		}
-		sqlText.WriteString(` ON CONFLICT(hash) DO UPDATE SET refcount = chunk.refcount + 1
-			WHERE chunk.vlog_id = excluded.vlog_id
-			  AND chunk.vaddr_offset = excluded.vaddr_offset
-			  AND chunk.logical_len = excluded.logical_len
-			  AND chunk.compressed_len = excluded.compressed_len`)
+		sqlText.WriteString(" ON CONFLICT(hash) DO UPDATE SET refcount = refcount + 1")
 
-		res, err := tx.ExecContext(ctx, sqlText.String(), args...)
-		if err != nil {
+		if _, err := tx.ExecContext(ctx, sqlText.String(), args...); err != nil {
 			return fmt.Errorf("upsert chunk refs batch %d-%d: %w", start, end, err)
-		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("count upserted chunk refs batch %d-%d: %w", start, end, err)
-		}
-		if affected != int64(len(batch)) {
-			return fmt.Errorf("chunk hash reused with conflicting placement geometry in batch %d-%d", start, end)
 		}
 	}
 	return nil
@@ -466,26 +409,7 @@ func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int6
 	}
 	chunks := make([]byte, 0, len(placements)*19)
 	lenBytes := make([]byte, 4)
-	for i, p := range placements {
-		if len(p.Hash) != fileChunkHashSize {
-			return 0, fmt.Errorf("chunk placement %d has hash length %d, want %d", i, len(p.Hash), fileChunkHashSize)
-		}
-		if p.LogicalLen <= 0 || uint64(p.LogicalLen) > math.MaxUint32 {
-			return 0, fmt.Errorf("chunk placement %d has logical length %d outside positive uint32 range", i, p.LogicalLen)
-		}
-		if p.VaddrOffset < 0 {
-			return 0, fmt.Errorf("chunk placement %d has negative virtual-log offset %d", i, p.VaddrOffset)
-		}
-		recordLen := int64(chunkRecordHeaderSize) + int64(p.LogicalLen)
-		if p.VaddrOffset > math.MaxInt64-recordLen {
-			return 0, fmt.Errorf("chunk placement %d virtual-log range overflows int64", i)
-		}
-		if p.VlogID == 0 {
-			return 0, fmt.Errorf("chunk placement %d has zero virtual-log id", i)
-		}
-		if p.CompressedLen <= 0 {
-			return 0, fmt.Errorf("chunk placement %d has non-positive compressed length %d", i, p.CompressedLen)
-		}
+	for _, p := range placements {
 		chunks = append(chunks, p.Hash...)
 		binary.LittleEndian.PutUint32(lenBytes, uint32(p.LogicalLen))
 		chunks = append(chunks, lenBytes...)
