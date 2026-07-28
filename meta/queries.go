@@ -352,6 +352,12 @@ func fileChunks(ctx context.Context, tx *sql.Tx, fileID int64) ([]byte, error) {
 // version bump. It is the shared body of CommitFile, CommitWriteOp, and
 // CommitWriteOpVersion.
 func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int64, placements []ChunkPlacement) (int64, error) {
+	var isDir int
+	if err := tx.QueryRowContext(ctx, "SELECT 1 FROM dir WHERE path = ?", path).Scan(&isDir); err == nil {
+		return 0, fmt.Errorf("cannot publish file over directory %q", path)
+	} else if err != sql.ErrNoRows {
+		return 0, fmt.Errorf("check destination type: %w", err)
+	}
 	chunks := make([]byte, 0, len(placements)*19)
 	lenBytes := make([]byte, 4)
 	for _, p := range placements {

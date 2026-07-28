@@ -138,6 +138,25 @@ func TestMkdirRejectsFilePath(t *testing.T) {
 	}
 }
 
+func TestCommitFileRejectsDirectoryPath(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.Mkdir(ctx, "existing-dir", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CommitFile(ctx, "existing-dir", 2, nil); err == nil {
+		t.Fatal("file commit over existing directory succeeded")
+	}
+	entry, ok, err := db.StatPath(ctx, "existing-dir")
+	if err != nil || !ok || !entry.IsDir {
+		t.Fatalf("directory changed after rejected commit: entry=%+v ok=%v err=%v", entry, ok, err)
+	}
+}
+
 func TestRenameDirectorySubtree(t *testing.T) {
 	db, err := OpenEphemeral()
 	if err != nil {
