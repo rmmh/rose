@@ -58,6 +58,9 @@ func TestVlog_DeterministicSimulation_Duplicate(t *testing.T) {
 	if _, err := NewVlog(1, "UNKNOWN", 0, 0, []PlogClient{&simulatedPlogClient{}}, 0); err == nil {
 		t.Fatal("vlog with unknown protection scheme succeeded")
 	}
+	if _, err := NewVlog(1, "NONE", 0, 0, []PlogClient{&simulatedPlogClient{}}, -1); err == nil {
+		t.Fatal("vlog with negative initial length succeeded")
+	}
 
 	seed := int64(1337)
 

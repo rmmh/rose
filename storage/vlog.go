@@ -94,6 +94,9 @@ func SetECColumnBytesForTest(n int64) func() {
 // For DUPLICATE, it's just a variable list of mirrors.
 // For EC, length must be dataShards + parityShards.
 func NewVlog(id uint32, scheme string, data, parity int, clients []PlogClient, initialLength int64) (*Vlog, error) {
+	if initialLength < 0 {
+		return nil, fmt.Errorf("vlog initial length must be non-negative, got %d", initialLength)
+	}
 	switch scheme {
 	case "NONE", "DUPLICATE", "EC":
 	default:
