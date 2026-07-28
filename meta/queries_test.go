@@ -41,6 +41,11 @@ func TestCommitFileTransfersChunkRefs(t *testing.T) {
 	if _, err := db.CommitFile(ctx, "bucket/bad-hash", 1, []ChunkPlacement{badHash}); err == nil {
 		t.Fatal("commit with a short chunk hash succeeded")
 	}
+	badLength := a
+	badLength.LogicalLen = -1
+	if _, err := db.CommitFile(ctx, "bucket/bad-length", 1, []ChunkPlacement{badLength}); err == nil {
+		t.Fatal("commit with a negative logical chunk length succeeded")
+	}
 
 	if _, err := db.CommitFile(ctx, "bucket/file", 1, []ChunkPlacement{a, b}); err != nil {
 		t.Fatal(err)

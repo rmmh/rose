@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -368,6 +369,9 @@ func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int6
 	for i, p := range placements {
 		if len(p.Hash) != fileChunkHashSize {
 			return 0, fmt.Errorf("chunk placement %d has hash length %d, want %d", i, len(p.Hash), fileChunkHashSize)
+		}
+		if p.LogicalLen < 0 || uint64(p.LogicalLen) > math.MaxUint32 {
+			return 0, fmt.Errorf("chunk placement %d has logical length %d outside uint32 range", i, p.LogicalLen)
 		}
 		chunks = append(chunks, p.Hash...)
 		binary.LittleEndian.PutUint32(lenBytes, uint32(p.LogicalLen))
