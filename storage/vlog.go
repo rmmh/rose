@@ -123,6 +123,9 @@ func NewVlog(id uint32, scheme string, data, parity int, clients []PlogClient, i
 			return nil, fmt.Errorf("create reedsolomon encoder: %w", err)
 		}
 		v.encoder = enc
+		if initialLength%v.stripeWidth() != 0 {
+			return nil, fmt.Errorf("EC vlog initial length %d is not a multiple of stripe width %d", initialLength, v.stripeWidth())
+		}
 	}
 
 	return v, nil
