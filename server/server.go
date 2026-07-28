@@ -843,6 +843,10 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock geometry %d+%d does not match %d+%d",
 					info.ID, index, mapping.PlogID, h.GetDataShards(), h.GetParityShards(), info.DataShards, info.ParityShards)
 			}
+			siblings := h.GetSiblingPlogUids()
+			if index >= len(siblings) || !bytes.Equal(siblings[index], h.GetPlogUid()) {
+				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock sibling table contradicts its plog UID", info.ID, index, mapping.PlogID)
+			}
 		}
 		client, err := s.plogClientLocked(mapping.PlogID)
 		if err != nil {
