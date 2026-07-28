@@ -99,6 +99,11 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 	path := clean(name)
 	writing := flag&(os.O_WRONLY|os.O_RDWR) != 0
 	if writing {
+		if flag&os.O_CREATE == 0 {
+			if _, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path}); err != nil {
+				return nil, os.ErrNotExist
+			}
+		}
 		// Bind a fresh write operation so even a zero-byte PUT publishes a file
 		// head on Close.
 		key := fmt.Sprintf("webdav-%s-%d", path, time.Now().UnixNano())

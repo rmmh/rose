@@ -206,4 +206,8 @@ func TestWebDAVFileModes(t *testing.T) {
 	if _, err := writeOnly.Read(make([]byte, 1)); !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("read through write-only WebDAV handle error = %v, want permission denied", err)
 	}
+
+	if _, err := fs.OpenFile(ctx, "/missing", os.O_WRONLY, 0o644); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("write open without O_CREATE error = %v, want not exist", err)
+	}
 }
