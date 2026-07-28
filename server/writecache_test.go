@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rmmh/rose/meta"
@@ -603,6 +604,85 @@ func TestWriteCacheDeterministicStateMachine(t *testing.T) {
 	}
 	if got := readAll(t, s, "/state-machine"); !bytes.Equal(got, oracle) {
 		t.Fatalf("reopened content mismatch: got %x, want %x", got, oracle)
+	}
+}
+
+func TestConcurrentFirstWritesShareInitializedOperation(t *testing.T) {
+	const writers = 32
+	s := newServer(t)
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/concurrent-first-write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := s.Write(ctx, &pb.WriteRequest{
+				Handle: open.GetHandle(),
+				Offset: int64(i),
+				Buffer: []byte{byte(i + 1)},
+			})
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	want := make([]byte, writers)
+	for i := range want {
+		want[i] = byte(i + 1)
+	}
+	if got := readAll(t, s, "/concurrent-first-write"); !bytes.Equal(got, want) {
+		t.Fatalf("concurrent content = %x, want %x", got, want)
+	}
+}
+
+func TestConcurrentFirstWriteAndReadSynchronizeCache(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	for i := 0; i < 64; i++ {
+		open, err := s.Open(ctx, &pb.OpenRequest{Path: fmt.Sprintf("/write-read-%d", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		errs := make(chan error, 2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte("x")})
+			errs <- err
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := s.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Length: 1})
+			errs <- err
+		}()
+		close(start)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

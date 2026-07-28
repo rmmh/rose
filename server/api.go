@@ -29,7 +29,8 @@ import (
 )
 
 type FileHandle struct {
-	id int64
+	stateMu sync.Mutex
+	id      int64
 	// pathPtr is the namespace path the handle commits to. It is read on the
 	// write path without the handle's write-op lock and mutated by Rename (to
 	// retarget an open handle to its new name), so access goes through atomic
@@ -217,9 +218,14 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 // handle matched. The caller must hold no handle lock.
 func (s *Server) retargetOpenHandles(ctx context.Context, oldPath, newPath string) (bool, error) {
 	s.handlesMu.Lock()
-	defer s.handlesMu.Unlock()
-	found := false
+	handles := make([]*FileHandle, 0, len(s.handles))
 	for _, h := range s.handles {
+		handles = append(handles, h)
+	}
+	s.handlesMu.Unlock()
+	found := false
+	for _, h := range handles {
+		h.stateMu.Lock()
 		path := h.path()
 		target := ""
 		if path == oldPath {
@@ -230,12 +236,14 @@ func (s *Server) retargetOpenHandles(ctx context.Context, oldPath, newPath strin
 		if target != "" {
 			if h.writeOpID != 0 {
 				if err := s.db.RetargetPreparedWriteOp(ctx, h.writeOpID, target); err != nil {
+					h.stateMu.Unlock()
 					return found, err
 				}
 			}
 			h.setPath(target)
 			found = true
 		}
+		h.stateMu.Unlock()
 	}
 	return found, nil
 }
@@ -275,6 +283,8 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 		slog.Error("Write failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
 	}
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
 	if h.snapshotID != 0 {
 		return nil, fmt.Errorf("snapshot handles are read-only")
 	}
@@ -325,6 +335,8 @@ func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRespons
 		slog.Error("Read failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
 	}
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
 	if err := s.refreshCommittedHandle(ctx, h); err != nil {
 		return nil, err
 	}
@@ -441,19 +453,26 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 		h, ok := s.handles[req.GetHandle()]
 		s.handlesMu.Unlock()
 		if ok {
+			h.stateMu.Lock()
 			if err := s.refreshCommittedHandle(ctx, h); err != nil {
+				h.stateMu.Unlock()
 				return nil, err
 			}
-		}
-		if ok && h.cache != nil {
-			return &pb.GetattrResponse{Size: h.cache.Length(), Mtime: h.mtimeOrNow()}, nil
-		}
-		if ok && h.id != 0 {
-			var size int64
-			for _, chunk := range h.chunks {
-				size += int64(chunk.LogicalLen)
+			if h.cache != nil {
+				response := &pb.GetattrResponse{Size: h.cache.Length(), Mtime: h.mtimeOrNow()}
+				h.stateMu.Unlock()
+				return response, nil
 			}
-			return &pb.GetattrResponse{Size: size, Mtime: h.openedMtime}, nil
+			if h.id != 0 {
+				var size int64
+				for _, chunk := range h.chunks {
+					size += int64(chunk.LogicalLen)
+				}
+				response := &pb.GetattrResponse{Size: size, Mtime: h.openedMtime}
+				h.stateMu.Unlock()
+				return response, nil
+			}
+			h.stateMu.Unlock()
 		}
 	}
 	entry, ok, err := s.db.StatPath(ctx, req.GetPath())
@@ -522,6 +541,8 @@ func (s *Server) SetHandleMtime(ctx context.Context, handle int64, mtime int64) 
 	if !ok {
 		return fmt.Errorf("invalid handle")
 	}
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
 	if h.snapshotID != 0 {
 		return fmt.Errorf("snapshot handles are read-only")
 	}
@@ -623,11 +644,6 @@ func (s *Server) writeOperationLock(id int64) *sync.Mutex {
 // opened a read handle and then wrote it. New clients must supply operation_key
 // to Open so an unknown Open outcome itself is retryable.
 func (s *Server) ensureWriteOperation(ctx context.Context, h *FileHandle, handle int64) error {
-	if h.writeOpID != 0 {
-		return nil
-	}
-	s.handlesMu.Lock()
-	defer s.handlesMu.Unlock()
 	if h.writeOpID != 0 {
 		return nil
 	}
@@ -786,6 +802,8 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		}
 		return fmt.Errorf("write operation %q has no active handle", idempotencyKey)
 	}
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
 	if h.writeOpID == 0 {
 		if remove {
 			s.handlesMu.Lock()
@@ -1275,6 +1293,8 @@ func (s *Server) Truncate(ctx context.Context, req *pb.TruncateRequest) (*pb.Tru
 		if !ok {
 			return nil, fmt.Errorf("invalid handle")
 		}
+		h.stateMu.Lock()
+		defer h.stateMu.Unlock()
 		if h.snapshotID != 0 {
 			return nil, fmt.Errorf("snapshot handles are read-only")
 		}
