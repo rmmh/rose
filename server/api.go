@@ -75,6 +75,11 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	if path == "" {
 		return nil, fmt.Errorf("path cannot be empty")
 	}
+	if entry, exists, err := s.db.StatPath(ctx, path); err != nil {
+		return nil, err
+	} else if exists && entry.IsDir {
+		return nil, fmt.Errorf("path is a directory: %q", path)
+	}
 
 	id, err := s.db.OpenFile(ctx, path)
 	if err != nil {

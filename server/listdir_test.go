@@ -79,3 +79,14 @@ func TestListDirAndMkdirRmdir(t *testing.T) {
 		t.Fatalf("rmdir empty: %v", err)
 	}
 }
+
+func TestOpenRejectsDirectoryPath(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	if _, err := s.Mkdir(ctx, &pb.MkdirRequest{Path: "/directory"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Open(ctx, &pb.OpenRequest{Path: "/directory"}); err == nil {
+		t.Fatal("Open returned a regular-file handle for a directory")
+	}
+}
