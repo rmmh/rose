@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"testing"
 )
@@ -60,6 +61,17 @@ func TestVlog_DeterministicSimulation_Duplicate(t *testing.T) {
 	}
 	if _, err := NewVlog(1, "NONE", 0, 0, []PlogClient{&simulatedPlogClient{}}, -1); err == nil {
 		t.Fatal("vlog with negative initial length succeeded")
+	}
+	overflowClient := &simulatedPlogClient{}
+	overflowVlog, err := NewVlog(1, "NONE", 0, 0, []PlogClient{overflowClient}, math.MaxInt64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := overflowVlog.Write(context.Background(), 1, []byte{1}); err == nil {
+		t.Fatal("write that overflows virtual-log length succeeded")
+	}
+	if len(overflowClient.data) != 0 {
+		t.Fatal("overflowing virtual-log write reached physical storage")
 	}
 
 	seed := int64(1337)

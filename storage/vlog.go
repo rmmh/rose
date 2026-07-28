@@ -144,6 +144,9 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 	defer v.writeMu.Unlock()
 
 	logicalLen := int64(len(data))
+	if logicalLen > math.MaxInt64-atomic.LoadInt64(&v.length) {
+		return 0, fmt.Errorf("vlog %d write would overflow logical length", v.id)
+	}
 
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
 		// Write to all clients concurrently
