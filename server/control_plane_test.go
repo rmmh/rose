@@ -113,6 +113,35 @@ func TestSetBucketPolicyRejectsInvalidGeometry(t *testing.T) {
 	}
 }
 
+func TestSetBucketPolicyCanonicalizesAndValidatesName(t *testing.T) {
+	s := newControlPlaneServer(t, 2)
+	ctx := context.Background()
+	if err := s.SetBucketPolicy(ctx, meta.BucketPolicy{
+		Name:             "//canonical/",
+		ProtectionScheme: "DUPLICATE",
+		DataShards:       1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.GetDB().GetBucketPolicy(ctx, "canonical"); err != nil || !ok {
+		t.Fatalf("canonical policy missing: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := s.GetDB().GetBucketPolicy(ctx, "//canonical/"); err != nil || ok {
+		t.Fatalf("noncanonical policy key persisted: ok=%v err=%v", ok, err)
+	}
+	nested := meta.BucketPolicy{
+		Name:             "nested/bucket",
+		ProtectionScheme: "DUPLICATE",
+		DataShards:       1,
+	}
+	if err := s.SetBucketPolicy(ctx, nested); err == nil {
+		t.Fatal("nested bucket policy name succeeded")
+	}
+	if _, ok, err := s.GetDB().GetBucketPolicy(ctx, nested.Name); err != nil || ok {
+		t.Fatalf("nested policy persisted: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestRawPlogRPCsSynchronizeRegistryAccess(t *testing.T) {
 	s := newControlPlaneServer(t, 1)
 	ctx := context.Background()

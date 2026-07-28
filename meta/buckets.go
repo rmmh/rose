@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // BucketPolicy is the protection scheme a bucket's files are written under. It
@@ -29,6 +30,10 @@ func DefaultBucketPolicy(name string) BucketPolicy {
 
 // SetBucketPolicy records (or replaces) the protection policy for a bucket.
 func (d *DB) SetBucketPolicy(ctx context.Context, p BucketPolicy) error {
+	p.Name = cleanPath(p.Name)
+	if strings.Contains(p.Name, "/") {
+		return fmt.Errorf("bucket name %q is not a top-level path component", p.Name)
+	}
 	switch p.ProtectionScheme {
 	case "NONE", "DUPLICATE":
 		if p.DataShards != 1 || p.ParityShards != 0 {

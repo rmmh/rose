@@ -502,6 +502,7 @@ func bucketOf(path string) string {
 // already provisioned for it are unaffected. It is the operator knob that makes
 // the file path write EC or N-way DUPLICATE instead of the default mirror.
 func (s *Server) SetBucketPolicy(ctx context.Context, p meta.BucketPolicy) error {
+	p.Name = cleanPath(p.Name)
 	if err := s.db.SetBucketPolicy(ctx, p); err != nil {
 		return err
 	}
