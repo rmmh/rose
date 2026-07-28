@@ -379,6 +379,15 @@ func (s *Server) Recover(ctx context.Context) error {
 			_ = plog.Close()
 			return fmt.Errorf("recover plog %d on disk %d: superblock belongs to another cluster", info.ID, info.DiskID)
 		}
+		diskUID, err := s.db.DiskUID(ctx, info.DiskID)
+		if err != nil {
+			_ = plog.Close()
+			return fmt.Errorf("recover plog %d on disk %d: load disk identity: %w", info.ID, info.DiskID, err)
+		}
+		if !bytes.Equal(plog.Header().GetDiskUid(), diskUID[:]) {
+			_ = plog.Close()
+			return fmt.Errorf("recover plog %d on disk %d: superblock belongs to another disk", info.ID, info.DiskID)
+		}
 		plogByID[info.ID] = plog
 	}
 	s.plogs = plogByID
