@@ -301,6 +301,29 @@ func TestRenameRejectsFileDirectoryTypeCollisions(t *testing.T) {
 	}
 }
 
+func TestRenameDirectoryReplacesEmptyDirectory(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	commitEmptyFile(t, db, "source/child")
+	if err := db.Mkdir(ctx, "empty-destination", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RenameFile(ctx, "source", "empty-destination"); err != nil {
+		t.Fatalf("rename over empty directory: %v", err)
+	}
+	if _, ok, err := db.StatPath(ctx, "source"); err != nil || ok {
+		t.Fatalf("source remains after rename: ok=%v err=%v", ok, err)
+	}
+	entry, ok, err := db.StatPath(ctx, "empty-destination/child")
+	if err != nil || !ok || entry.IsDir {
+		t.Fatalf("moved child missing: entry=%+v ok=%v err=%v", entry, ok, err)
+	}
+}
+
 func TestRenameFileSetsParent(t *testing.T) {
 	db, err := OpenEphemeral()
 	if err != nil {

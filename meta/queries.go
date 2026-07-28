@@ -810,6 +810,25 @@ func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 		} else if derr != sql.ErrNoRows {
 			return derr
 		}
+		var destinationDir int
+		if derr := tx.QueryRowContext(ctx, "SELECT 1 FROM dir WHERE path = ?", newPath).Scan(&destinationDir); derr == nil {
+			var child int
+			if err := tx.QueryRowContext(ctx, "SELECT 1 FROM file_head WHERE parent = ? LIMIT 1", newPath).Scan(&child); err == nil {
+				return fmt.Errorf("cannot replace non-empty directory %q", newPath)
+			} else if err != sql.ErrNoRows {
+				return err
+			}
+			if err := tx.QueryRowContext(ctx, "SELECT 1 FROM dir WHERE parent = ? LIMIT 1", newPath).Scan(&child); err == nil {
+				return fmt.Errorf("cannot replace non-empty directory %q", newPath)
+			} else if err != sql.ErrNoRows {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM dir WHERE path = ?", newPath); err != nil {
+				return err
+			}
+		} else if derr != sql.ErrNoRows {
+			return derr
+		}
 		if err := renameDirSubtree(ctx, tx, oldPath, newPath); err != nil {
 			return err
 		}
