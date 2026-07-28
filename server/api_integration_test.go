@@ -1175,3 +1175,27 @@ func TestOpenHandlePreservesEpochMtime(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, attr.GetMtime())
 }
+
+func TestSnapshotHandleRejectsMtimeMutation(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	writeAt(t, s, "/snapshot-mtime", -1, [][2]any{{0, []byte("data")}})
+	firstMtime := int64(10)
+	_, err := s.Setattr(ctx, &pb.SetattrRequest{Path: "/snapshot-mtime", Mtime: &firstMtime})
+	require.NoError(t, err)
+	snapshot, err := s.CreateSnapshot(ctx, &pb.CreateSnapshotRequest{Name: "mtime-snapshot"})
+	require.NoError(t, err)
+	liveMtime := int64(20)
+	_, err = s.Setattr(ctx, &pb.SetattrRequest{Path: "/snapshot-mtime", Mtime: &liveMtime})
+	require.NoError(t, err)
+	open, err := s.OpenSnapshot(ctx, &pb.OpenSnapshotRequest{
+		SnapshotId: snapshot.GetSnapshotId(),
+		Path:       "/snapshot-mtime",
+	})
+	require.NoError(t, err)
+
+	require.Error(t, s.SetHandleMtime(ctx, open.GetHandle(), 30))
+	live, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/snapshot-mtime"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(20), live.GetMtime())
+}

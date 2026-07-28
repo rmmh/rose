@@ -443,6 +443,9 @@ func (s *Server) SetHandleMtime(ctx context.Context, handle int64, mtime int64) 
 	if !ok {
 		return fmt.Errorf("invalid handle")
 	}
+	if h.snapshotID != 0 {
+		return fmt.Errorf("snapshot handles are read-only")
+	}
 	if h.writeOpID != 0 {
 		h.mtimeNs.Store(mtime)
 		h.mtimeSet.Store(true)
