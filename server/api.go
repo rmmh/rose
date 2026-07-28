@@ -53,6 +53,7 @@ type FileHandle struct {
 	fileID64     uint64
 	writeSeq     int64
 	openedMtime  int64
+	pinOwner     int64
 }
 
 func (h *FileHandle) path() string {
@@ -100,11 +101,11 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	}
 
 	s.handlesMu.Lock()
-	defer s.handlesMu.Unlock()
 	hid := s.handleCounter
 	s.handleCounter++
+	s.handlesMu.Unlock()
 
-	h := &FileHandle{id: id, chunks: chunks, openedMtime: openedMtime}
+	h := &FileHandle{id: id, chunks: chunks, openedMtime: openedMtime, pinOwner: handlePinOwner(hid)}
 	h.setPath(path)
 	if req.GetOperationKey() != "" {
 		op, err := s.db.CreateWriteOp(ctx, req.GetOperationKey(), path)
@@ -122,10 +123,6 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 			return nil, err
 		}
 	}
-	s.handles[hid] = h
-
-	slog.Info("Open", "handle", hid, "id", id, "path", path)
-
 	ack := int64(0)
 	if h.writeOpID != 0 {
 		op, err := s.db.WriteOpByKey(ctx, h.writeKey)
@@ -134,6 +131,12 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 		}
 		ack = op.AcknowledgedOffset
 	}
+	s.replacePins(h.pinOwner, chunks)
+	s.handlesMu.Lock()
+	s.handles[hid] = h
+	s.handlesMu.Unlock()
+
+	slog.Info("Open", "handle", hid, "id", id, "path", path)
 	return &pb.OpenResponse{Handle: hid, AcknowledgedOffset: ack}, nil
 }
 
@@ -154,16 +157,22 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 		return nil, err
 	}
 	s.handlesMu.Lock()
-	defer s.handlesMu.Unlock()
 	hid := s.handleCounter
 	s.handleCounter++
+	s.handlesMu.Unlock()
 	mtime, err := s.db.SnapshotFileMtime(ctx, req.GetSnapshotId(), path)
 	if err != nil {
 		return nil, err
 	}
-	hs := &FileHandle{id: id, snapshotID: req.GetSnapshotId(), chunks: chunks, openedMtime: mtime}
+	hs := &FileHandle{
+		id: id, snapshotID: req.GetSnapshotId(), chunks: chunks,
+		openedMtime: mtime, pinOwner: handlePinOwner(hid),
+	}
 	hs.setPath(path)
+	s.replacePins(hs.pinOwner, chunks)
+	s.handlesMu.Lock()
 	s.handles[hid] = hs
+	s.handlesMu.Unlock()
 	return &pb.OpenResponse{Handle: hid}, nil
 }
 
@@ -513,6 +522,7 @@ func (s *Server) refreshCommittedHandle(ctx context.Context, h *FileHandle) erro
 		return err
 	}
 	h.cache = nil
+	s.replacePins(h.pinOwner, chunks)
 	return nil
 }
 
@@ -809,6 +819,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 			s.handlesMu.Lock()
 			delete(s.handles, handle)
 			s.handlesMu.Unlock()
+			s.releasePins(h.pinOwner)
 		}
 		return nil
 	}
@@ -880,6 +891,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		s.handlesMu.Lock()
 		delete(s.handles, handle)
 		s.handlesMu.Unlock()
+		s.releasePins(h.pinOwner)
 	} else {
 		h.id = fileID
 		h.chunks = placements
@@ -890,6 +902,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		h.fileID64 = 0
 		h.mtimeNs.Store(0)
 		h.mtimeSet.Store(false)
+		s.replacePins(h.pinOwner, placements)
 	}
 	return nil
 }

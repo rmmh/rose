@@ -6,6 +6,25 @@ import (
 	"github.com/rmmh/rose/meta"
 )
 
+func handlePinOwner(handle int64) int64 { return -handle }
+
+// replacePins makes owner hold exactly the hashes referenced by chunks. Open
+// handles use this when they are created and after a Flush publishes a new
+// version; an empty placement list simply clears the owner.
+func (s *Server) replacePins(owner int64, chunks []meta.ChunkPlacement) {
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	if len(chunks) == 0 {
+		delete(s.pinnedChunks, owner)
+		return
+	}
+	set := make(map[string]struct{}, len(chunks))
+	for _, chunk := range chunks {
+		set[string(chunk.Hash)] = struct{}{}
+	}
+	s.pinnedChunks[owner] = set
+}
+
 // pinAndResolveChunk records that write operation opID is reusing the chunk with
 // the given content hash (deduplication) and returns its current placement. The
 // pin is published before the chunk is resolved, and reclamation consults the pin
@@ -51,13 +70,11 @@ func (s *Server) pinAndResolveChunk(ctx context.Context, opID int64, hash []byte
 	return p, ok, nil
 }
 
-// releasePins drops every chunk pin held by a write operation, called once its
-// fate is durable: after commit (its file version now carries the real refcounts)
-// or after abandonment (it references nothing). Reclamation may then treat those
-// chunks normally. It is safe to call for an op that pinned nothing.
-func (s *Server) releasePins(opID int64) {
+// releasePins drops every chunk pin held by an operation or handle. It is safe
+// to call for an owner that pinned nothing.
+func (s *Server) releasePins(owner int64) {
 	s.pinMu.Lock()
-	delete(s.pinnedChunks, opID)
+	delete(s.pinnedChunks, owner)
 	s.pinMu.Unlock()
 }
 

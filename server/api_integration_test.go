@@ -699,6 +699,52 @@ func TestCompactionRewritesVlogAndReclaimsSpace(t *testing.T) {
 	}
 }
 
+func TestOpenHandleSurvivesUnlinkAndCompaction(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := server.NewServerWithDataDir(db, filepath.Join(dir, "disk"))
+	ctx := context.Background()
+
+	data := bytes.Repeat([]byte("open-handle-data"), 4096)
+	writeServerFile(t, s, "/open", data)
+	opened, err := s.Open(ctx, &pb.OpenRequest{Path: "/open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Unlink(ctx, &pb.UnlinkRequest{Path: "/open"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.GC(ctx); err != nil {
+		t.Fatal(err)
+	} else if n != 0 {
+		t.Fatalf("GC collected %d chunks still held by an open handle", n)
+	}
+	if n, err := s.Compact(ctx, server.CompactionPolicy{
+		MinWasteRatio: 0,
+		MinDeadBytes:  1,
+		MaxJobs:       1,
+	}); err != nil {
+		t.Fatal(err)
+	} else if n != 1 {
+		t.Fatalf("compacted %d vlogs, want 1", n)
+	}
+
+	read, err := s.Read(ctx, &pb.ReadRequest{
+		Handle: opened.GetHandle(),
+		Length: int64(len(data)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), data) {
+		t.Fatalf("open handle read %d bytes after unlink and compaction, want %d", len(read.GetBuffer()), len(data))
+	}
+}
+
 func TestCompactionResumesAfterRestart(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))

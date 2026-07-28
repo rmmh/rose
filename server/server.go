@@ -102,18 +102,14 @@ type Server struct {
 	writeOpExpiry time.Duration
 	startTime     time.Time
 
-	// pinMu guards pinnedChunks. A pinned hash is a chunk an in-flight (prepared,
-	// uncommitted) write operation deduplicated against: the op reuses the chunk's
-	// existing bytes instead of rewriting them, so those bytes must stay live until
-	// the op commits (publishing a file version that takes the real refcount) or is
-	// abandoned. Reclamation -- gcLocked and compactLocked -- snapshots this set
-	// under pinMu and spares any chunk it names, closing the window where the last
-	// committed reference is deleted mid-write and the chunk is collected out from
-	// under the operation, leaving a hole. Pins are in-memory only: a crash discards
-	// every in-flight op, so the chunks revert to being governed by their committed
-	// refcounts, which is exactly correct.
+	// pinMu guards pinnedChunks. A pinned hash is either reused by an in-flight
+	// write operation or referenced by a live file handle. Reclamation -- gcLocked
+	// and compactLocked -- snapshots this set and spares every named chunk, so a
+	// deduplicated write or an open-but-unlinked file cannot lose its bytes.
+	// Positive owners are write-operation ids; negative owners are handle ids.
+	// Pins are in-memory only: a crash discards both in-flight writes and handles.
 	pinMu        sync.Mutex
-	pinnedChunks map[int64]map[string]struct{} // write-op id -> set of pinned chunk hashes
+	pinnedChunks map[int64]map[string]struct{}
 }
 
 // MaxVlogBytes is the 32-bit byte-addressable virtual-log boundary described
