@@ -142,4 +142,11 @@ func TestCatalogLengthValidation(t *testing.T) {
 	if err := db.SetVlogLength(ctx, vlogID, -1); err == nil {
 		t.Fatal("negative virtual-log length persisted")
 	}
+	plogID, err := db.MakePlog(ctx, uid.New(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetPlogLength(ctx, plogID, -1); err == nil {
+		t.Fatal("negative physical-log length persisted")
+	}
 }

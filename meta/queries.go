@@ -273,6 +273,9 @@ func (d *DB) SetVlogLength(ctx context.Context, vlogID uint32, length int64) err
 // this from the file; virtual scale tests use it to model large extents without
 // allocating their contents.
 func (d *DB) SetPlogLength(ctx context.Context, plogID uint32, length int64) error {
+	if length < 0 {
+		return fmt.Errorf("set plog %d length: negative length %d", plogID, length)
+	}
 	_, err := d.db.ExecContext(ctx, "UPDATE plog SET length = ? WHERE id = ?", length, plogID)
 	return err
 }
