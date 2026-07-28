@@ -1,9 +1,11 @@
 package webdav_test
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -130,5 +132,37 @@ func TestWebDAVMoveAndEmptyPut(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET renamed status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestWebDAVCloseReportsCommitFailure(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	srv := server.NewServerWithDiskRoots(db, map[uint32]string{
+		1: filepath.Join(dir, "disk-1"),
+		2: filepath.Join(dir, "disk-2"),
+	})
+	ctx := context.Background()
+	if err := srv.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	file, err := rosewebdav.New(srv).OpenFile(ctx, "/degraded", os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("must not acknowledge")); err != nil {
+		t.Fatal(err)
+	}
+	for _, diskID := range []uint32{1, 2} {
+		if err := srv.SetDiskState(ctx, diskID, meta.DiskFailed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err == nil {
+		t.Fatal("WebDAV close hid degraded commit failure")
 	}
 }

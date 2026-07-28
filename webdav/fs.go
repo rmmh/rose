@@ -243,7 +243,9 @@ func (f *roseFile) Stat() (os.FileInfo, error) {
 
 func (f *roseFile) Close() error {
 	if f.handle != 0 {
-		f.srv.Close(f.ctx, &pb.CloseRequest{Handle: f.handle})
+		if _, err := f.srv.Close(f.ctx, &pb.CloseRequest{Handle: f.handle}); err != nil {
+			return err
+		}
 		f.handle = 0
 	}
 	return nil
