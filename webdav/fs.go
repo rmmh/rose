@@ -175,6 +175,9 @@ func (f *roseFile) Read(p []byte) (int, error) {
 }
 
 func (f *roseFile) Write(p []byte) (int, error) {
+	if !f.writing {
+		return 0, os.ErrPermission
+	}
 	if _, err := f.srv.Write(f.ctx, &pb.WriteRequest{Handle: f.handle, Buffer: p, Offset: f.writeOff}); err != nil {
 		return 0, err
 	}

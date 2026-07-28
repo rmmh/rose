@@ -166,3 +166,34 @@ func TestWebDAVCloseReportsCommitFailure(t *testing.T) {
 		t.Fatal("WebDAV close hid degraded commit failure")
 	}
 }
+
+func TestWebDAVFileModes(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	fs := rosewebdav.New(server.NewServerWithDataDir(db, filepath.Join(dir, "plogs")))
+	ctx := context.Background()
+
+	file, err := fs.OpenFile(ctx, "/file", os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	readOnly, err := fs.OpenFile(ctx, "/file", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	if _, err := readOnly.Write([]byte("corruption")); err == nil {
+		t.Fatal("write through read-only WebDAV handle succeeded")
+	}
+}
