@@ -265,6 +265,9 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) er
 	if offset != atomic.LoadInt64(&v.length) {
 		return fmt.Errorf("ensure write vlog %d: offset %d does not match length %d", v.id, offset, v.length)
 	}
+	if int64(total) > math.MaxInt64-offset {
+		return fmt.Errorf("ensure write vlog %d would overflow logical length", v.id)
+	}
 
 	if v.scheme == "EC" {
 		sw := v.stripeWidth()

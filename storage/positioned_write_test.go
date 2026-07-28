@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"testing"
 
@@ -38,6 +39,23 @@ type commitFailingPlogClient struct {
 	fail bool
 }
 
+type acceptingPositionedClient struct {
+	ensureCalls int
+}
+
+func (*acceptingPositionedClient) Write(context.Context, int64, []byte) (int64, error) {
+	return 0, nil
+}
+
+func (*acceptingPositionedClient) Read(context.Context, int64, int) ([]byte, error) {
+	return nil, nil
+}
+
+func (c *acceptingPositionedClient) EnsureAppend(context.Context, int64, []byte) error {
+	c.ensureCalls++
+	return nil
+}
+
 func (c *commitFailingPlogClient) Commit(ctx context.Context, txnID int64) error {
 	if c.fail {
 		return fmt.Errorf("injected commit failure")
@@ -65,6 +83,12 @@ func TestPlogEnsureAppendRetriesPartialRange(t *testing.T) {
 }
 
 func TestVlogEnsureWriteRetriesPartialReplicaFanout(t *testing.T) {
+	overflowClient := &acceptingPositionedClient{}
+	overflowVlog, err := NewVlog(99, "NONE", 0, 0, []PlogClient{overflowClient}, math.MaxInt64)
+	require.NoError(t, err)
+	require.Error(t, overflowVlog.EnsureWrite(context.Background(), math.MaxInt64, [][]byte{{1}}))
+	assert.Zero(t, overflowClient.ensureCalls, "overflowing write reached physical storage")
+
 	dir := t.TempDir()
 	a, err := OpenPlog(filepath.Join(dir, "a"), 1)
 	require.NoError(t, err)
