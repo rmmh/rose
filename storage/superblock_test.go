@@ -16,15 +16,15 @@ func sampleHeader(id uint32) *pb.PlogHeader {
 	self := uid.New()
 	sib := uid.New()
 	return &pb.PlogHeader{
-		ClusterUid:      cluster[:],
-		PlogUid:         self[:],
-		PlogId:          id,
-		VlogId:          42,
-		ShardIndex:      1,
+		ClusterUid:       cluster[:],
+		PlogUid:          self[:],
+		PlogId:           id,
+		VlogId:           42,
+		ShardIndex:       1,
 		ProtectionScheme: "EC",
-		DataShards:      4,
-		ParityShards:    2,
-		SiblingPlogUids: [][]byte{self[:], sib[:]},
+		DataShards:       4,
+		ParityShards:     2,
+		SiblingPlogUids:  [][]byte{self[:], sib[:]},
 	}
 }
 
@@ -37,6 +37,10 @@ func TestSuperblockRoundTrip(t *testing.T) {
 	}
 	if err := p.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+	if wrong, err := OpenExistingPlog(path, 2); err == nil {
+		_ = wrong.Close()
+		t.Fatal("plog with mismatched embedded id opened successfully")
 	}
 
 	reopened, err := OpenExistingPlog(path, 1)
