@@ -963,6 +963,9 @@ func readServerFile(t *testing.T, s *server.Server, path string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
 	return res.GetBuffer()
 }
 
@@ -975,6 +978,9 @@ func readSnapshotFile(t *testing.T, s *server.Server, snapshotID uint64, path st
 	}
 	res, err := s.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Offset: 0, Length: 1 << 20})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
 		t.Fatal(err)
 	}
 	return res.GetBuffer()

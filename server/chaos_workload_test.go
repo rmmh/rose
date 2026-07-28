@@ -364,6 +364,11 @@ func (w *workload) doRead(ctx context.Context, client pb.RoseClient, workerID in
 		w.readFailure(ctx, path, err)
 		return
 	}
+	defer func() {
+		if _, err := client.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+			w.recordOpErr(ctx, err)
+		}
+	}()
 	read, err := client.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Offset: 0, Length: int64(st.len)})
 	if err != nil {
 		w.readFailure(ctx, path, err)
@@ -475,9 +480,14 @@ func (w *workload) doSnapshotVerify(ctx context.Context, client pb.RoseClient, r
 		}
 		read, err := client.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Offset: 0, Length: int64(st.len)})
 		if err != nil {
+			_, _ = client.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()})
 			if !shuttingDown(ctx, err) && !w.degraded() {
 				w.t.Errorf("snapshot %d path %s read failed: %v", id, path, err)
 			}
+			continue
+		}
+		if _, err := client.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+			w.recordOpErr(ctx, err)
 			continue
 		}
 		if sha256.Sum256(read.GetBuffer()) != st.sum {
@@ -541,7 +551,12 @@ func (w *workload) verifyAll(ctx context.Context) {
 		}
 		read, err := client.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Offset: 0, Length: int64(st.len)})
 		if err != nil {
+			_, _ = client.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()})
 			w.t.Errorf("final sweep: read %s: %v", path, err)
+			continue
+		}
+		if _, err := client.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+			w.t.Errorf("final sweep: close %s: %v", path, err)
 			continue
 		}
 		if sha256.Sum256(read.GetBuffer()) != st.sum || len(read.GetBuffer()) != st.len {
