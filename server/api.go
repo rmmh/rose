@@ -1191,7 +1191,9 @@ func (s *Server) Truncate(ctx context.Context, req *pb.TruncateRequest) (*pb.Tru
 				return nil, err
 			}
 		}
-		h.cache.Truncate(req.GetSize())
+		if err := h.cache.Truncate(ctx, req.GetSize()); err != nil {
+			return nil, err
+		}
 		return &pb.TruncateResponse{}, nil
 	}
 

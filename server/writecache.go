@@ -221,7 +221,7 @@ func (c *writeCache) readLocked(ctx context.Context, off, length int64) ([]byte,
 
 // Truncate sets the logical size to n: dropping/clipping overlay and settled data
 // beyond n when shrinking, or extending with a zero hole when growing.
-func (c *writeCache) Truncate(n int64) {
+func (c *writeCache) Truncate(ctx context.Context, n int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.length = n
@@ -240,9 +240,9 @@ func (c *writeCache) Truncate(n int64) {
 		c.baseLen = n
 	}
 	if c.settledLen > n {
-		// Trim the settled prefix to whole chunks within [0,n). A truncate that
-		// cuts mid-settled-chunk (only reachable after a spill) leaves the
-		// remainder as a zero hole, which the first cut does not preserve.
+		// Trim the settled prefix to whole chunks within [0,n). If n cuts through
+		// a settled chunk, retain the committed bytes before n as a dirty span so
+		// reads and finalization preserve the truncated prefix.
 		var ns int64
 		var ks []meta.ChunkPlacement
 		for _, p := range c.settled {
@@ -252,9 +252,17 @@ func (c *writeCache) Truncate(n int64) {
 			ns += int64(p.LogicalLen)
 			ks = append(ks, p)
 		}
+		if ns < n {
+			data, err := c.read(ctx, c.settled, ns, n-ns)
+			if err != nil {
+				return err
+			}
+			c.spans = append([]span{{start: ns, data: data}}, c.spans...)
+		}
 		c.settled = ks
 		c.settledLen = ns
 	}
+	return nil
 }
 
 // spillPrefix returns the bytes of the contiguous dirty prefix above settledLen

@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rmmh/rose/meta"
@@ -458,6 +460,140 @@ func TestZeroLengthWriteDoesNotExtendFile(t *testing.T) {
 	}
 	if got := readAll(t, s, "/zero-write"); !bytes.Equal(got, []byte("base")) {
 		t.Fatalf("content after zero-length write = %q, want base", got)
+	}
+}
+
+func TestWriteCacheDeterministicStateMachine(t *testing.T) {
+	const (
+		steps   = 400
+		maxSize = 512
+	)
+	ctx := context.Background()
+	s := newServer(t)
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/state-machine", OperationKey: "state-machine-initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := open.GetHandle()
+	rng := rand.New(rand.NewSource(0x5eed))
+	var oracle []byte
+	var history []string
+
+	for step := 0; step < steps; step++ {
+		switch rng.Intn(4) {
+		case 0, 1:
+			off := rng.Intn(maxSize)
+			data := make([]byte, rng.Intn(33))
+			if _, err := rng.Read(data); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Write(ctx, &pb.WriteRequest{Handle: handle, Offset: int64(off), Buffer: data}); err != nil {
+				t.Fatalf("step %d write: %v", step, err)
+			}
+			history = append(history, fmt.Sprintf("%d: write off=%d len=%d", step, off, len(data)))
+			if len(data) > 0 {
+				end := off + len(data)
+				if end > len(oracle) {
+					oracle = append(oracle, make([]byte, end-len(oracle))...)
+				}
+				copy(oracle[off:end], data)
+			}
+		case 2:
+			size := rng.Intn(maxSize + 1)
+			if _, err := s.Truncate(ctx, &pb.TruncateRequest{Handle: handle, Size: int64(size)}); err != nil {
+				t.Fatalf("step %d truncate: %v", step, err)
+			}
+			history = append(history, fmt.Sprintf("%d: truncate size=%d", step, size))
+			if size < len(oracle) {
+				oracle = oracle[:size]
+			} else {
+				oracle = append(oracle, make([]byte, size-len(oracle))...)
+			}
+		case 3:
+			off := rng.Intn(maxSize)
+			length := rng.Intn(65)
+			got, err := s.Read(ctx, &pb.ReadRequest{Handle: handle, Offset: int64(off), Length: int64(length)})
+			if err != nil {
+				t.Fatalf("step %d read: %v", step, err)
+			}
+			end := min(off+length, len(oracle))
+			var want []byte
+			if off < len(oracle) {
+				want = oracle[off:end]
+			}
+			if !bytes.Equal(got.GetBuffer(), want) {
+				t.Fatalf("step %d read [%d,%d): got %x, want %x", step, off, off+length, got.GetBuffer(), want)
+			}
+			history = append(history, fmt.Sprintf("%d: read off=%d len=%d", step, off, length))
+		}
+		if step%23 == 22 {
+			if err := s.FlushHandle(ctx, handle); err != nil {
+				t.Fatalf("step %d flush: %v", step, err)
+			}
+			history = append(history, fmt.Sprintf("%d: flush", step))
+		}
+		got, err := s.Read(ctx, &pb.ReadRequest{Handle: handle, Length: int64(len(oracle) + 1)})
+		if err != nil {
+			t.Fatalf("step %d verify read: %v", step, err)
+		}
+		if !bytes.Equal(got.GetBuffer(), oracle) {
+			start := max(0, len(history)-20)
+			t.Fatalf("step %d full content mismatch: got len=%d, want len=%d\ntrace:\n%s",
+				step, len(got.GetBuffer()), len(oracle), strings.Join(history[start:], "\n"))
+		}
+		attr, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/state-machine", Handle: handle})
+		if err != nil {
+			t.Fatalf("step %d getattr: %v", step, err)
+		}
+		if attr.GetSize() != int64(len(oracle)) {
+			t.Fatalf("step %d size = %d, want %d", step, attr.GetSize(), len(oracle))
+		}
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: handle}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(t, s, "/state-machine"); !bytes.Equal(got, oracle) {
+		t.Fatalf("reopened content mismatch: got %x, want %x", got, oracle)
+	}
+}
+
+func TestTruncateThroughSpilledChunkPreservesPrefix(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/spill-truncate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 5<<20)
+	for i := range data {
+		data[i] = byte(i*31 + 7)
+	}
+	for off := 0; off < len(data); off += 128 << 10 {
+		end := min(off+(128<<10), len(data))
+		if _, err := s.Write(ctx, &pb.WriteRequest{
+			Handle: open.GetHandle(),
+			Offset: int64(off),
+			Buffer: data[off:end],
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const truncated = 2_000_003
+	if _, err := s.Truncate(ctx, &pb.TruncateRequest{Handle: open.GetHandle(), Size: truncated}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Length: truncated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.GetBuffer(), data[:truncated]) {
+		t.Fatalf("read after truncating spilled data does not preserve prefix")
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(t, s, "/spill-truncate"); !bytes.Equal(got, data[:truncated]) {
+		t.Fatal("committed truncate lost prefix bytes")
 	}
 }
 
