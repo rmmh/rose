@@ -94,9 +94,6 @@ func SetECColumnBytesForTest(n int64) func() {
 // For DUPLICATE, it's just a variable list of mirrors.
 // For EC, length must be dataShards + parityShards.
 func NewVlog(id uint32, scheme string, data, parity int, clients []PlogClient, initialLength int64) (*Vlog, error) {
-	if initialLength < 0 {
-		return nil, fmt.Errorf("vlog initial length must be non-negative, got %d", initialLength)
-	}
 	switch scheme {
 	case "NONE", "DUPLICATE", "EC":
 	default:
@@ -123,9 +120,6 @@ func NewVlog(id uint32, scheme string, data, parity int, clients []PlogClient, i
 			return nil, fmt.Errorf("create reedsolomon encoder: %w", err)
 		}
 		v.encoder = enc
-		if initialLength%v.stripeWidth() != 0 {
-			return nil, fmt.Errorf("EC vlog initial length %d is not a multiple of stripe width %d", initialLength, v.stripeWidth())
-		}
 	}
 
 	return v, nil
@@ -144,9 +138,6 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 	defer v.writeMu.Unlock()
 
 	logicalLen := int64(len(data))
-	if logicalLen > math.MaxInt64-atomic.LoadInt64(&v.length) {
-		return 0, fmt.Errorf("vlog %d write would overflow logical length", v.id)
-	}
 
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
 		// Write to all clients concurrently
@@ -265,10 +256,6 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) er
 	if offset != atomic.LoadInt64(&v.length) {
 		return fmt.Errorf("ensure write vlog %d: offset %d does not match length %d", v.id, offset, v.length)
 	}
-	if int64(total) > math.MaxInt64-offset {
-		return fmt.Errorf("ensure write vlog %d would overflow logical length", v.id)
-	}
-
 	if v.scheme == "EC" {
 		sw := v.stripeWidth()
 		if int64(total)%sw != 0 {

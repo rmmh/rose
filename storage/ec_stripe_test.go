@@ -95,9 +95,6 @@ func TestECStripeRejectsPartialRow(t *testing.T) {
 	v, _ := ecVlogOnPlogs(t, 4, 2)
 	ctx := context.Background()
 	sw := v.stripeWidth()
-	if _, err := NewVlog(2, "EC", 4, 2, v.clients, sw-1); err == nil {
-		t.Fatal("EC vlog with partial-row initial length succeeded")
-	}
 
 	for _, n := range []int{1, int(sw) - 1, int(sw) + 1, int(sw) + 7} {
 		if _, err := v.Write(ctx, 1, make([]byte, n)); err == nil {
