@@ -111,7 +111,14 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 		if _, err := f.srv.Truncate(ctx, &pb.TruncateRequest{Handle: resp.GetHandle(), Size: 0}); err != nil {
 			return nil, err
 		}
-		return &roseFile{ctx: ctx, srv: f.srv, path: path, handle: resp.GetHandle(), writing: true}, nil
+		return &roseFile{
+			ctx:      ctx,
+			srv:      f.srv,
+			path:     path,
+			handle:   resp.GetHandle(),
+			writing:  true,
+			readable: flag&os.O_WRONLY == 0,
+		}, nil
 	}
 
 	attr, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path})
@@ -119,12 +126,13 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 		return nil, os.ErrNotExist
 	}
 	rf := &roseFile{
-		ctx:   ctx,
-		srv:   f.srv,
-		path:  path,
-		size:  attr.GetSize(),
-		mtime: attr.GetMtime(),
-		isDir: attr.GetIsDir(),
+		ctx:      ctx,
+		srv:      f.srv,
+		path:     path,
+		size:     attr.GetSize(),
+		mtime:    attr.GetMtime(),
+		isDir:    attr.GetIsDir(),
+		readable: true,
 	}
 	if !attr.GetIsDir() {
 		resp, err := f.srv.Open(ctx, &pb.OpenRequest{Path: path})
@@ -140,11 +148,12 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 // one mode: reading (random-access via Read/Seek) or writing (sequential append
 // committed on Close).
 type roseFile struct {
-	ctx     context.Context
-	srv     *server.Server
-	path    string
-	handle  int64
-	writing bool
+	ctx      context.Context
+	srv      *server.Server
+	path     string
+	handle   int64
+	writing  bool
+	readable bool
 
 	size  int64
 	mtime int64
@@ -159,6 +168,9 @@ type roseFile struct {
 var _ webdav.File = (*roseFile)(nil)
 
 func (f *roseFile) Read(p []byte) (int, error) {
+	if !f.readable {
+		return 0, os.ErrPermission
+	}
 	if f.isDir {
 		return 0, fmt.Errorf("is a directory")
 	}

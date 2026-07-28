@@ -2,6 +2,7 @@ package webdav_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -195,5 +196,14 @@ func TestWebDAVFileModes(t *testing.T) {
 	defer readOnly.Close()
 	if _, err := readOnly.Write([]byte("corruption")); err == nil {
 		t.Fatal("write through read-only WebDAV handle succeeded")
+	}
+
+	writeOnly, err := fs.OpenFile(ctx, "/write-only", os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writeOnly.Close()
+	if _, err := writeOnly.Read(make([]byte, 1)); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("read through write-only WebDAV handle error = %v, want permission denied", err)
 	}
 }
