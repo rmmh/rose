@@ -66,6 +66,11 @@ func TestCommitFileTransfersChunkRefs(t *testing.T) {
 	if _, err := db.CommitFile(ctx, "bucket/zero-length", 1, []ChunkPlacement{zeroLength}); err == nil {
 		t.Fatal("commit with a zero-length chunk placement succeeded")
 	}
+	zeroCompressed := a
+	zeroCompressed.CompressedLen = 0
+	if _, err := db.CommitFile(ctx, "bucket/zero-compressed", 1, []ChunkPlacement{zeroCompressed}); err == nil {
+		t.Fatal("commit with a zero compressed chunk length succeeded")
+	}
 
 	if _, err := db.CommitFile(ctx, "bucket/file", 1, []ChunkPlacement{a, b}); err != nil {
 		t.Fatal(err)

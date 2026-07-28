@@ -379,8 +379,8 @@ func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int6
 		if p.VlogID == 0 {
 			return 0, fmt.Errorf("chunk placement %d has zero virtual-log id", i)
 		}
-		if p.CompressedLen < 0 {
-			return 0, fmt.Errorf("chunk placement %d has negative compressed length %d", i, p.CompressedLen)
+		if p.CompressedLen <= 0 {
+			return 0, fmt.Errorf("chunk placement %d has non-positive compressed length %d", i, p.CompressedLen)
 		}
 		chunks = append(chunks, p.Hash...)
 		binary.LittleEndian.PutUint32(lenBytes, uint32(p.LogicalLen))
