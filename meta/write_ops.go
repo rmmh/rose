@@ -61,6 +61,17 @@ func (d *DB) SetWriteOpTail(ctx context.Context, id int64, tail []byte) error {
 	return err
 }
 
+// RetargetPreparedWriteOp moves a live write intent with its namespace path.
+// Committed and abandoned operations retain their historical binding.
+func (d *DB) RetargetPreparedWriteOp(ctx context.Context, id int64, path string) error {
+	path = cleanPath(path)
+	if path == "" {
+		return fmt.Errorf("write operation path is required")
+	}
+	_, err := d.db.ExecContext(ctx, "UPDATE write_op SET path = ? WHERE id = ? AND state = ?", path, id, WriteOpPrepared)
+	return err
+}
+
 func (d *DB) ClaimVlogLease(ctx context.Context, vlogID uint32, opID int64, ordinal int) error {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {

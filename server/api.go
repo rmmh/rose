@@ -185,7 +185,9 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 		// write handle whose data has not been published yet -- rsync renames its
 		// temp file into place before closing it. Retarget the live handle so its
 		// pending bytes commit at the new path on Close, and report success.
-		if s.retargetOpenHandles(oldPath, newPath) {
+		if found, retargetErr := s.retargetOpenHandles(ctx, oldPath, newPath); retargetErr != nil {
+			return nil, retargetErr
+		} else if found {
 			return &pb.RenameResponse{}, nil
 		}
 		return nil, err
@@ -195,7 +197,9 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 	}
 	// The committed head moved; redirect any open write handle on the old path so
 	// a later Close republishes at the new path instead of resurrecting the old.
-	s.retargetOpenHandles(oldPath, newPath)
+	if _, err := s.retargetOpenHandles(ctx, oldPath, newPath); err != nil {
+		return nil, err
+	}
 	return &pb.RenameResponse{}, nil
 }
 
@@ -203,23 +207,29 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 // when it is a directory, so pending writes follow the namespace rename rather
 // than recreating an entry below the old name on Close. It reports whether any
 // handle matched. The caller must hold no handle lock.
-func (s *Server) retargetOpenHandles(oldPath, newPath string) bool {
+func (s *Server) retargetOpenHandles(ctx context.Context, oldPath, newPath string) (bool, error) {
 	s.handlesMu.Lock()
 	defer s.handlesMu.Unlock()
 	found := false
 	for _, h := range s.handles {
 		path := h.path()
+		target := ""
 		if path == oldPath {
-			h.setPath(newPath)
-			found = true
-			continue
+			target = newPath
+		} else if strings.HasPrefix(path, oldPath+"/") {
+			target = newPath + strings.TrimPrefix(path, oldPath)
 		}
-		if strings.HasPrefix(path, oldPath+"/") {
-			h.setPath(newPath + strings.TrimPrefix(path, oldPath))
+		if target != "" {
+			if h.writeOpID != 0 {
+				if err := s.db.RetargetPreparedWriteOp(ctx, h.writeOpID, target); err != nil {
+					return found, err
+				}
+			}
+			h.setPath(target)
 			found = true
 		}
 	}
-	return found
+	return found, nil
 }
 
 func (s *Server) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequest) (*pb.CreateSnapshotResponse, error) {
