@@ -56,6 +56,11 @@ func TestCommitFileTransfersChunkRefs(t *testing.T) {
 	if _, err := db.CommitFile(ctx, "bucket/bad-vlog", 1, []ChunkPlacement{badVlog}); err == nil {
 		t.Fatal("commit with the zero virtual-log id succeeded")
 	}
+	badCompressed := a
+	badCompressed.CompressedLen = -1
+	if _, err := db.CommitFile(ctx, "bucket/bad-compressed", 1, []ChunkPlacement{badCompressed}); err == nil {
+		t.Fatal("commit with a negative compressed chunk length succeeded")
+	}
 
 	if _, err := db.CommitFile(ctx, "bucket/file", 1, []ChunkPlacement{a, b}); err != nil {
 		t.Fatal(err)
