@@ -131,7 +131,8 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 	if req.GetPath() == "" || req.GetSnapshotId() == 0 {
 		return nil, fmt.Errorf("snapshot_id and path are required")
 	}
-	id, err := s.db.OpenSnapshotFile(ctx, req.GetSnapshotId(), cleanPath(req.GetPath()))
+	path := cleanPath(req.GetPath())
+	id, err := s.db.OpenSnapshotFile(ctx, req.GetSnapshotId(), path)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +148,7 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 	hid := s.handleCounter
 	s.handleCounter++
 	hs := &FileHandle{id: id, snapshotID: req.GetSnapshotId(), chunks: chunks}
-	hs.setPath(req.GetPath())
+	hs.setPath(path)
 	s.handles[hid] = hs
 	return &pb.OpenResponse{Handle: hid}, nil
 }
@@ -407,7 +408,7 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 			return &pb.GetattrResponse{Size: h.cache.Length(), Mtime: h.mtimeOrNow()}, nil
 		}
 		if ok && h.snapshotID != 0 {
-			mtime, err := s.db.FileVersionMtime(ctx, h.id)
+			mtime, err := s.db.SnapshotFileMtime(ctx, h.snapshotID, h.path())
 			if err != nil {
 				return nil, err
 			}

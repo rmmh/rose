@@ -478,6 +478,35 @@ func TestSetMtimeLeavesSnapshotFrozen(t *testing.T) {
 	}
 }
 
+func TestSnapshotCapturesCurrentLiveMtime(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.CommitFile(ctx, "b/f.txt", 100, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetMtime(ctx, "b/f.txt", 200); err != nil {
+		t.Fatal(err)
+	}
+	snapshotID, err := db.CreateSnapshot(ctx, "after-utimes", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetMtime(ctx, "b/f.txt", 300); err != nil {
+		t.Fatal(err)
+	}
+	mtime, err := db.SnapshotFileMtime(ctx, snapshotID, "b/f.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mtime != 200 {
+		t.Fatalf("snapshot mtime = %d, want live value 200 at capture", mtime)
+	}
+}
+
 func TestSplitPath(t *testing.T) {
 	cases := []struct{ in, parent, name string }{
 		{"a", "", "a"},

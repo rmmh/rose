@@ -155,6 +155,7 @@ func initSchema(db *sql.DB, durable bool) error {
 			snapshot_id INTEGER NOT NULL REFERENCES snapshot(id) ON DELETE CASCADE,
 			path TEXT NOT NULL,
 			file_id INTEGER NOT NULL REFERENCES file(id),
+			mtime INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (snapshot_id, path)
 		);
 

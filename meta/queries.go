@@ -602,14 +602,6 @@ func (d *DB) FileVersionChunks(ctx context.Context, fileID int64) ([]ChunkPlacem
 	return out, nil
 }
 
-// FileVersionMtime returns the immutable timestamp stored on a specific file
-// version. Unlike file_head.mtime, this remains frozen for snapshots.
-func (d *DB) FileVersionMtime(ctx context.Context, fileID int64) (int64, error) {
-	var mtime int64
-	err := d.db.QueryRowContext(ctx, "SELECT mtime FROM file WHERE id = ?", fileID).Scan(&mtime)
-	return mtime, err
-}
-
 // ChunkByHash looks up the placement of an already-stored chunk by its content
 // hash. It backs dedup during the splice: a freshly recomputed chunk whose hash
 // is already present reuses that placement instead of writing its bytes again.
@@ -675,7 +667,7 @@ func (d *DB) CreateSnapshot(ctx context.Context, name string, createdAt int64) (
 	if err != nil {
 		return 0, err
 	}
-	rows, err := tx.QueryContext(ctx, "SELECT path, file_id FROM file_head")
+	rows, err := tx.QueryContext(ctx, "SELECT path, file_id, mtime FROM file_head")
 	if err != nil {
 		return 0, err
 	}
@@ -683,10 +675,11 @@ func (d *DB) CreateSnapshot(ctx context.Context, name string, createdAt int64) (
 	for rows.Next() {
 		var path string
 		var fileID int64
-		if err := rows.Scan(&path, &fileID); err != nil {
+		var mtime int64
+		if err := rows.Scan(&path, &fileID, &mtime); err != nil {
 			return 0, err
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO snapshot_file (snapshot_id, path, file_id) VALUES (?, ?, ?)", id, path, fileID); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO snapshot_file (snapshot_id, path, file_id, mtime) VALUES (?, ?, ?, ?)", id, path, fileID, mtime); err != nil {
 			return 0, err
 		}
 		chunks, err := fileChunks(ctx, tx, fileID)
@@ -746,6 +739,14 @@ func (d *DB) OpenSnapshotFile(ctx context.Context, snapshotID uint64, path strin
 		return 0, nil
 	}
 	return fileID, err
+}
+
+// SnapshotFileMtime returns the live namespace mtime captured when a snapshot
+// was created, including metadata-only updates made after the file version.
+func (d *DB) SnapshotFileMtime(ctx context.Context, snapshotID uint64, path string) (int64, error) {
+	var mtime int64
+	err := d.db.QueryRowContext(ctx, "SELECT mtime FROM snapshot_file WHERE snapshot_id = ? AND path = ?", snapshotID, path).Scan(&mtime)
+	return mtime, err
 }
 
 func (d *DB) UnlinkFile(ctx context.Context, path string) error {
