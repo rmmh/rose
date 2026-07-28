@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/rmmh/rose/meta"
+	pb "github.com/rmmh/rose/proto"
 )
 
 // newControlPlaneServer builds a recovered server with diskCount independent
@@ -69,6 +70,23 @@ func TestCommitThreshold(t *testing.T) {
 		}
 		if got := s.readThreshold(info); got != c.wantReadGate {
 			t.Errorf("%s readThreshold = %d, want %d", c.scheme, got, c.wantReadGate)
+		}
+	}
+}
+
+func TestMakeVlogRejectsInvalidShardGeometryWithoutPanicking(t *testing.T) {
+	s := newControlPlaneServer(t, 4)
+	ctx := context.Background()
+	tests := []pb.MakeVlogRequest{
+		{ProtectionScheme: "EC", DataShards: -1, ParityShards: 1},
+		{ProtectionScheme: "EC", DataShards: 1, ParityShards: -1},
+		{ProtectionScheme: "EC", DataShards: 0, ParityShards: 1},
+		{ProtectionScheme: "EC", DataShards: 1, ParityShards: 0},
+		{ProtectionScheme: "bogus", DataShards: 1, ParityShards: 1},
+	}
+	for _, req := range tests {
+		if _, err := s.MakeVlog(ctx, &req); err == nil {
+			t.Errorf("MakeVlog(%+v) succeeded", req)
 		}
 	}
 }

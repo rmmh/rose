@@ -569,6 +569,18 @@ func (s *Server) clearActiveVlogLocked(vlogID uint32) {
 // disks, and the in-memory clients, registering everything. The caller must
 // hold vlogMu.
 func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataShards, parityShards int) (uint32, *storage.Vlog, error) {
+	switch scheme {
+	case "NONE", "DUPLICATE":
+		if dataShards != 1 || parityShards != 0 {
+			return 0, nil, fmt.Errorf("invalid %s geometry %d+%d: want 1+0", scheme, dataShards, parityShards)
+		}
+	case "EC":
+		if dataShards <= 0 || parityShards <= 0 {
+			return 0, nil, fmt.Errorf("invalid EC geometry %d+%d: both shard counts must be positive", dataShards, parityShards)
+		}
+	default:
+		return 0, nil, fmt.Errorf("unknown protection scheme %q", scheme)
+	}
 	// One shard/copy per disk. A single node with multiple disks can host an EC
 	// or replicated vlog; node-loss protection is a stronger future policy.
 	diskIDs := s.placementDisksLocked(0)
