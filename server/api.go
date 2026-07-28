@@ -1351,6 +1351,9 @@ func (s *Server) MakePlog(ctx context.Context, req *pb.MakePlogRequest) (*pb.Mak
 	if _, ok := s.diskRoots[req.GetDiskId()]; !ok {
 		return nil, fmt.Errorf("disk %d is not configured", req.GetDiskId())
 	}
+	if !s.diskLiveLocked(req.GetDiskId()) {
+		return nil, fmt.Errorf("disk %d is not active", req.GetDiskId())
+	}
 	plogUID := uid.New()
 	id, err := s.db.MakePlog(ctx, plogUID, req.GetDiskId())
 	if err != nil {

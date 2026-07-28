@@ -280,6 +280,9 @@ func TestPlacementSkipsNonActiveDisks(t *testing.T) {
 	if len(active) != 2 || active[0] != 1 || active[1] != 3 {
 		t.Fatalf("activeDiskIDs = %v, want [1 3]", active)
 	}
+	if _, err := s.MakePlog(ctx, &pb.MakePlogRequest{DiskId: 2}); err == nil {
+		t.Fatal("MakePlog placed a new shard on a draining disk")
+	}
 
 	// A new DUPLICATE vlog lands only on the two active disks.
 	vlogID := provision(t, s, "DUPLICATE", 1, 0)
