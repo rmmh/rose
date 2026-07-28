@@ -335,6 +335,23 @@ func TestRenameMissingPathToItselfFails(t *testing.T) {
 	}
 }
 
+func TestRenameRejectsNamespaceRoot(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	commitEmptyFile(t, db, "source")
+	if err := db.RenameFile(ctx, "source", "/"); err == nil {
+		t.Fatal("rename to namespace root succeeded")
+	}
+	entry, ok, err := db.StatPath(ctx, "source")
+	if err != nil || !ok || entry.IsDir {
+		t.Fatalf("source changed after rejected root rename: entry=%+v ok=%v err=%v", entry, ok, err)
+	}
+}
+
 func TestRenameFileSetsParent(t *testing.T) {
 	db, err := OpenEphemeral()
 	if err != nil {

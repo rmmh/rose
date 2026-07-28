@@ -782,6 +782,9 @@ func (d *DB) UnlinkFile(ctx context.Context, path string) error {
 // the explicit dir-inode model deferred in this cut).
 func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 	oldPath, newPath = cleanPath(oldPath), cleanPath(newPath)
+	if oldPath == "" || newPath == "" {
+		return fmt.Errorf("cannot rename the namespace root")
+	}
 	if oldPath == newPath {
 		if _, ok, err := d.StatPath(ctx, oldPath); err != nil {
 			return err
