@@ -770,6 +770,9 @@ func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 	if oldPath == newPath {
 		return nil
 	}
+	if strings.HasPrefix(newPath, oldPath+"/") {
+		return fmt.Errorf("cannot rename %q into its own subtree %q", oldPath, newPath)
+	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

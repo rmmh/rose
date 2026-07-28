@@ -184,6 +184,26 @@ func TestRenameDirectorySubtree(t *testing.T) {
 	}
 }
 
+func TestRenameDirectoryRejectsMoveIntoOwnSubtree(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	commitEmptyFile(t, db, "tree/child/file")
+
+	if err := db.RenameFile(ctx, "tree", "tree/child/moved"); err == nil {
+		t.Fatal("rename directory into its own subtree succeeded")
+	}
+	if _, ok, err := db.StatPath(ctx, "tree/child/file"); err != nil || !ok {
+		t.Fatalf("source tree changed after rejected rename: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := db.StatPath(ctx, "tree/child/moved"); err != nil || ok {
+		t.Fatalf("destination exists after rejected rename: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestRenameFileSetsParent(t *testing.T) {
 	db, err := OpenEphemeral()
 	if err != nil {
