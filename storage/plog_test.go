@@ -76,6 +76,17 @@ func TestPlogRoundTripAcrossBlocks(t *testing.T) {
 	if _, err := p.Read(math.MaxInt64, 1); err == nil {
 		t.Fatal("overflowing read range succeeded")
 	}
+
+	failed, _ := tempPlog(t, "failed-write")
+	if err := failed.file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failed.Write(0, make([]byte, SectorSize)); err == nil {
+		t.Fatal("write through closed backing file succeeded")
+	}
+	if got := failed.LogicalLength(); got != 0 {
+		t.Fatalf("logical length after failed physical write = %d, want 0", got)
+	}
 }
 
 func TestPlogDetectsBitrotOnRead(t *testing.T) {

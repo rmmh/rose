@@ -482,6 +482,9 @@ func (p *Plog) writeLocked(data []byte) (int64, error) {
 	}
 
 	// We are going to seal at least one sector.
+	oldLogicalLength := p.logicalLength
+	oldBuf := append([]byte(nil), p.buf...)
+	oldHashes := append([]byte(nil), p.hashes...)
 	firstSectorLogicalStart := p.logicalLength - int64(len(p.buf))
 	firstSectorPhysicalStart := CalcPhysical(firstSectorLogicalStart)
 
@@ -549,6 +552,10 @@ func (p *Plog) writeLocked(data []byte) (int64, error) {
 	// Perform the batched write
 	if len(writeBuf) > 0 {
 		if _, err := p.file.WriteAt(writeBuf, firstSectorPhysicalStart); err != nil {
+			p.logicalLength = oldLogicalLength
+			p.buf = append(p.buf[:0], oldBuf...)
+			p.hashes = append(p.hashes[:0], oldHashes...)
+			p.writeBuf = writeBuf[:0]
 			return 0, fmt.Errorf("write plog %d: %w", p.id, err)
 		}
 	}
