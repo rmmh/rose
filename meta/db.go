@@ -89,7 +89,10 @@ func (d *DB) GetDB() *sql.DB {
 func initSchema(db *sql.DB, durable bool) error {
 	pragmas := "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;"
 	if !durable {
-		pragmas = "PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY;"
+		// MEMORY keeps the rollback journal process-local and fast while still
+		// preserving transaction rollback. journal_mode=OFF makes rollback
+		// ineffective after writes, invalidating simulation atomicity.
+		pragmas = "PRAGMA journal_mode = MEMORY; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY;"
 	}
 	_, err := db.Exec(pragmas + `
 

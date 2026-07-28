@@ -66,6 +66,28 @@ func TestClusterIdentitySingleton(t *testing.T) {
 	}
 }
 
+func TestOpenEphemeralRollsBackTransactions(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO dir (path, parent, name, mtime) VALUES ('rolled-back', '', 'rolled-back', 1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := db.StatPath(ctx, "rolled-back"); err != nil || ok {
+		t.Fatalf("rolled-back row remains visible: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestMakeVlogPlogPersistUID(t *testing.T) {
 	ctx := context.Background()
 	db, err := OpenEphemeral()
