@@ -90,3 +90,18 @@ func TestOpenRejectsDirectoryPath(t *testing.T) {
 		t.Fatal("Open returned a regular-file handle for a directory")
 	}
 }
+
+func TestUnlinkRejectsDirectoryPath(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	if _, err := s.Mkdir(ctx, &pb.MkdirRequest{Path: "/directory"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Unlink(ctx, &pb.UnlinkRequest{Path: "/directory"}); err == nil {
+		t.Fatal("Unlink reported success for a directory")
+	}
+	entry, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/directory"})
+	if err != nil || !entry.GetIsDir() {
+		t.Fatalf("directory changed after rejected unlink: entry=%+v err=%v", entry, err)
+	}
+}

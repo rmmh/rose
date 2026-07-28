@@ -162,7 +162,13 @@ func (s *Server) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.UnlinkR
 	if req.GetPath() == "" {
 		return nil, fmt.Errorf("path cannot be empty")
 	}
-	if err := s.db.UnlinkFile(ctx, cleanPath(req.GetPath())); err != nil {
+	path := cleanPath(req.GetPath())
+	if entry, exists, err := s.db.StatPath(ctx, path); err != nil {
+		return nil, err
+	} else if exists && entry.IsDir {
+		return nil, fmt.Errorf("path is a directory: %q", path)
+	}
+	if err := s.db.UnlinkFile(ctx, path); err != nil {
 		return nil, err
 	}
 	return &pb.UnlinkResponse{}, nil
