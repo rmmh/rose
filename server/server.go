@@ -839,6 +839,10 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 			if h.GetProtectionScheme() != info.ProtectionScheme {
 				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock scheme %q does not match %q", info.ID, index, mapping.PlogID, h.GetProtectionScheme(), info.ProtectionScheme)
 			}
+			if h.GetDataShards() != uint32(info.DataShards) || h.GetParityShards() != uint32(info.ParityShards) {
+				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock geometry %d+%d does not match %d+%d",
+					info.ID, index, mapping.PlogID, h.GetDataShards(), h.GetParityShards(), info.DataShards, info.ParityShards)
+			}
 		}
 		client, err := s.plogClientLocked(mapping.PlogID)
 		if err != nil {

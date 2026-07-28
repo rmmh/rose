@@ -250,4 +250,22 @@ func TestPlogSuperblockMembership(t *testing.T) {
 		recovered.CloseStorage()
 		t.Fatal("recovery adopted a plog with the wrong protection scheme")
 	}
+
+	if err := os.Remove(victimPath); err != nil {
+		t.Fatal(err)
+	}
+	wrongGeometryHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
+	wrongGeometryHeader.DataShards++
+	wrongGeometry, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(wrongGeometryHeader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wrongGeometry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered = NewServerWithDiskRoots(db, roots)
+	if err := recovered.Recover(ctx); err == nil {
+		recovered.CloseStorage()
+		t.Fatal("recovery adopted a plog with the wrong protection geometry")
+	}
 }
