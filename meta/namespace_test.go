@@ -178,6 +178,26 @@ func TestCommitFileRejectsFileAncestor(t *testing.T) {
 	}
 }
 
+func TestCommitFileRejectsNamespaceRoot(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, path := range []string{"", "/"} {
+		if _, err := db.CommitFile(context.Background(), path, 1, nil); err == nil {
+			t.Errorf("CommitFile(%q) succeeded", path)
+		}
+	}
+	var count int
+	if err := db.db.QueryRow("SELECT COUNT(*) FROM file_head").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("rejected root commits left %d file heads", count)
+	}
+}
+
 func TestRenameDirectorySubtree(t *testing.T) {
 	db, err := OpenEphemeral()
 	if err != nil {

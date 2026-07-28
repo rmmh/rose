@@ -352,6 +352,10 @@ func fileChunks(ctx context.Context, tx *sql.Tx, fileID int64) ([]byte, error) {
 // version bump. It is the shared body of CommitFile, CommitWriteOp, and
 // CommitWriteOpVersion.
 func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int64, placements []ChunkPlacement) (int64, error) {
+	path = cleanPath(path)
+	if path == "" {
+		return 0, fmt.Errorf("cannot publish a file at the namespace root")
+	}
 	var isDir int
 	if err := tx.QueryRowContext(ctx, "SELECT 1 FROM dir WHERE path = ?", path).Scan(&isDir); err == nil {
 		return 0, fmt.Errorf("cannot publish file over directory %q", path)
