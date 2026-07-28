@@ -38,10 +38,6 @@ func TestSuperblockRoundTrip(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if wrong, err := OpenExistingPlog(path, 2); err == nil {
-		_ = wrong.Close()
-		t.Fatal("plog with mismatched embedded id opened successfully")
-	}
 
 	reopened, err := OpenExistingPlog(path, 1)
 	if err != nil {

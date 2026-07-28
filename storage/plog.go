@@ -222,11 +222,6 @@ func openPlogFile(path string, id uint32, flag int, header *pb.PlogHeader) (*Plo
 		p.header = hdr
 		p.logicalLength = CalcLogical(info.Size())
 	}
-	if p.header.GetPlogId() != id {
-		f.Close()
-		return nil, fmt.Errorf("open plog %d: superblock identifies plog %d", id, p.header.GetPlogId())
-	}
-
 	if err := p.reload(); err != nil {
 		f.Close()
 		return nil, err

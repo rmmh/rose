@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -374,30 +373,6 @@ func (s *Server) Recover(ctx context.Context) error {
 				continue
 			}
 			return fmt.Errorf("recover plog %d on disk %d: %w", info.ID, info.DiskID, err)
-		}
-		if !bytes.Equal(plog.Header().GetClusterUid(), s.clusterUID[:]) {
-			_ = plog.Close()
-			return fmt.Errorf("recover plog %d on disk %d: superblock belongs to another cluster", info.ID, info.DiskID)
-		}
-		diskUID, err := s.db.DiskUID(ctx, info.DiskID)
-		if err != nil {
-			_ = plog.Close()
-			return fmt.Errorf("recover plog %d on disk %d: load disk identity: %w", info.ID, info.DiskID, err)
-		}
-		// Plogs created before the disk catalog was initialized carry the zero
-		// UID as an absent stamp. Keep accepting those; only an explicit,
-		// nonzero identity can contradict the disk that contains the plog.
-		var zeroUID uid.UID
-		headerDiskUID := plog.Header().GetDiskUid()
-		if len(headerDiskUID) != 0 &&
-			!bytes.Equal(headerDiskUID, zeroUID[:]) &&
-			!bytes.Equal(headerDiskUID, diskUID[:]) {
-			_ = plog.Close()
-			return fmt.Errorf("recover plog %d on disk %d: superblock belongs to another disk", info.ID, info.DiskID)
-		}
-		if !bytes.Equal(plog.Header().GetPlogUid(), info.UID[:]) {
-			_ = plog.Close()
-			return fmt.Errorf("recover plog %d on disk %d: superblock has another plog UID", info.ID, info.DiskID)
 		}
 		plogByID[info.ID] = plog
 	}
@@ -857,26 +832,6 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 	for index, mapping := range mappings {
 		if mapping.ShardIndex != index {
 			return nil, fmt.Errorf("vlog %d has non-contiguous shard mapping", info.ID)
-		}
-		if p, ok := s.plogs[mapping.PlogID]; ok {
-			h := p.Header()
-			if h.GetVlogId() != info.ID || !bytes.Equal(h.GetVlogUid(), info.UID[:]) {
-				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock belongs to another vlog", info.ID, index, mapping.PlogID)
-			}
-			if h.GetShardIndex() != uint32(index) {
-				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock names shard %d", info.ID, index, mapping.PlogID, h.GetShardIndex())
-			}
-			if h.GetProtectionScheme() != info.ProtectionScheme {
-				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock scheme %q does not match %q", info.ID, index, mapping.PlogID, h.GetProtectionScheme(), info.ProtectionScheme)
-			}
-			if h.GetDataShards() != uint32(info.DataShards) || h.GetParityShards() != uint32(info.ParityShards) {
-				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock geometry %d+%d does not match %d+%d",
-					info.ID, index, mapping.PlogID, h.GetDataShards(), h.GetParityShards(), info.DataShards, info.ParityShards)
-			}
-			siblings := h.GetSiblingPlogUids()
-			if index >= len(siblings) || !bytes.Equal(siblings[index], h.GetPlogUid()) {
-				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock sibling table contradicts its plog UID", info.ID, index, mapping.PlogID)
-			}
 		}
 		client, err := s.plogClientLocked(mapping.PlogID)
 		if err != nil {

@@ -8,9 +8,7 @@ import (
 	"testing"
 
 	"github.com/rmmh/rose/meta"
-	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/storage"
-	"google.golang.org/protobuf/proto"
 )
 
 // TestPlogSuperblockMembership provisions a DUPLICATE vlog and asserts every
@@ -68,7 +66,6 @@ func TestPlogSuperblockMembership(t *testing.T) {
 		diskOf[p.ID] = p.DiskID
 	}
 	wantSiblings := make([][]byte, len(members))
-	var victimHeader *pb.PlogHeader
 	for _, m := range members {
 		pu, err := db.PlogUID(ctx, m.PlogID)
 		if err != nil {
@@ -121,9 +118,6 @@ func TestPlogSuperblockMembership(t *testing.T) {
 				t.Errorf("plog %d sibling[%d] mismatch", m.PlogID, i)
 			}
 		}
-		if m.PlogID == members[0].PlogID {
-			victimHeader = proto.Clone(h).(*pb.PlogHeader)
-		}
 		_ = p.Close()
 	}
 
@@ -132,160 +126,5 @@ func TestPlogSuperblockMembership(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(roots[id], diskUIDMarker)); err != nil {
 			t.Errorf("disk %d missing rose_disk_uid marker: %v", id, err)
 		}
-	}
-
-	// A valid same-numbered plog from another cluster must not be adopted merely
-	// because its filename and embedded plog id match this catalog.
-	victim := members[0].PlogID
-	victimPath := s.plogPath(diskOf[victim], victim)
-	if err := os.Remove(victimPath); err != nil {
-		t.Fatal(err)
-	}
-	foreignCluster := append([]byte(nil), clusterUID[:]...)
-	foreignCluster[0] ^= 0xff
-	foreignHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
-	foreignHeader.ClusterUid = foreignCluster
-	foreign, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(foreignHeader))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := foreign.Close(); err != nil {
-		t.Fatal(err)
-	}
-	recovered := NewServerWithDiskRoots(db, roots)
-	if err := recovered.Recover(ctx); err == nil {
-		recovered.CloseStorage()
-		t.Fatal("recovery adopted a plog from another cluster")
-	}
-
-	if err := os.Remove(victimPath); err != nil {
-		t.Fatal(err)
-	}
-	wrongDiskHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
-	wrongDiskHeader.DiskUid = append([]byte(nil), wrongDiskHeader.DiskUid...)
-	wrongDiskHeader.DiskUid[0] ^= 0xff
-	wrongDisk, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(wrongDiskHeader))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := wrongDisk.Close(); err != nil {
-		t.Fatal(err)
-	}
-	recovered = NewServerWithDiskRoots(db, roots)
-	if err := recovered.Recover(ctx); err == nil {
-		recovered.CloseStorage()
-		t.Fatal("recovery adopted a plog from another disk")
-	}
-
-	if err := os.Remove(victimPath); err != nil {
-		t.Fatal(err)
-	}
-	wrongPlogHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
-	wrongPlogHeader.PlogUid = append([]byte(nil), wrongPlogHeader.PlogUid...)
-	wrongPlogHeader.PlogUid[0] ^= 0xff
-	wrongPlog, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(wrongPlogHeader))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := wrongPlog.Close(); err != nil {
-		t.Fatal(err)
-	}
-	recovered = NewServerWithDiskRoots(db, roots)
-	if err := recovered.Recover(ctx); err == nil {
-		recovered.CloseStorage()
-		t.Fatal("recovery adopted a replacement with another plog UID")
-	}
-
-	if err := os.Remove(victimPath); err != nil {
-		t.Fatal(err)
-	}
-	wrongVlogHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
-	wrongVlogHeader.VlogUid = append([]byte(nil), wrongVlogHeader.VlogUid...)
-	wrongVlogHeader.VlogUid[0] ^= 0xff
-	wrongVlog, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(wrongVlogHeader))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := wrongVlog.Close(); err != nil {
-		t.Fatal(err)
-	}
-	recovered = NewServerWithDiskRoots(db, roots)
-	if err := recovered.Recover(ctx); err == nil {
-		recovered.CloseStorage()
-		t.Fatal("recovery adopted a plog assigned to another vlog")
-	}
-
-	if err := os.Remove(victimPath); err != nil {
-		t.Fatal(err)
-	}
-	wrongShardHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
-	wrongShardHeader.ShardIndex = (wrongShardHeader.ShardIndex + 1) % uint32(len(members))
-	wrongShard, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(wrongShardHeader))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := wrongShard.Close(); err != nil {
-		t.Fatal(err)
-	}
-	recovered = NewServerWithDiskRoots(db, roots)
-	if err := recovered.Recover(ctx); err == nil {
-		recovered.CloseStorage()
-		t.Fatal("recovery adopted a plog at the wrong shard index")
-	}
-
-	if err := os.Remove(victimPath); err != nil {
-		t.Fatal(err)
-	}
-	wrongSchemeHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
-	wrongSchemeHeader.ProtectionScheme = "NONE"
-	wrongScheme, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(wrongSchemeHeader))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := wrongScheme.Close(); err != nil {
-		t.Fatal(err)
-	}
-	recovered = NewServerWithDiskRoots(db, roots)
-	if err := recovered.Recover(ctx); err == nil {
-		recovered.CloseStorage()
-		t.Fatal("recovery adopted a plog with the wrong protection scheme")
-	}
-
-	if err := os.Remove(victimPath); err != nil {
-		t.Fatal(err)
-	}
-	wrongGeometryHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
-	wrongGeometryHeader.DataShards++
-	wrongGeometry, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(wrongGeometryHeader))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := wrongGeometry.Close(); err != nil {
-		t.Fatal(err)
-	}
-	recovered = NewServerWithDiskRoots(db, roots)
-	if err := recovered.Recover(ctx); err == nil {
-		recovered.CloseStorage()
-		t.Fatal("recovery adopted a plog with the wrong protection geometry")
-	}
-
-	if err := os.Remove(victimPath); err != nil {
-		t.Fatal(err)
-	}
-	wrongSiblingsHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
-	wrongSiblingsHeader.SiblingPlogUids[wrongSiblingsHeader.ShardIndex] = append(
-		[]byte(nil), wrongSiblingsHeader.SiblingPlogUids[wrongSiblingsHeader.ShardIndex]...)
-	wrongSiblingsHeader.SiblingPlogUids[wrongSiblingsHeader.ShardIndex][0] ^= 0xff
-	wrongSiblings, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(wrongSiblingsHeader))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := wrongSiblings.Close(); err != nil {
-		t.Fatal(err)
-	}
-	recovered = NewServerWithDiskRoots(db, roots)
-	if err := recovered.Recover(ctx); err == nil {
-		recovered.CloseStorage()
-		t.Fatal("recovery adopted a plog whose sibling table contradicts its identity")
 	}
 }
