@@ -3,6 +3,7 @@ package meta
 import (
 	"bytes"
 	"context"
+	"math"
 	"testing"
 )
 
@@ -70,6 +71,11 @@ func TestCommitFileTransfersChunkRefs(t *testing.T) {
 	zeroCompressed.CompressedLen = 0
 	if _, err := db.CommitFile(ctx, "bucket/zero-compressed", 1, []ChunkPlacement{zeroCompressed}); err == nil {
 		t.Fatal("commit with a zero compressed chunk length succeeded")
+	}
+	overflowingRange := a
+	overflowingRange.VaddrOffset = math.MaxInt64
+	if _, err := db.CommitFile(ctx, "bucket/overflowing-range", 1, []ChunkPlacement{overflowingRange}); err == nil {
+		t.Fatal("commit with an overflowing virtual-log range succeeded")
 	}
 
 	if _, err := db.CommitFile(ctx, "bucket/file", 1, []ChunkPlacement{a, b}); err != nil {

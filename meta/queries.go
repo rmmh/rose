@@ -376,6 +376,10 @@ func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int6
 		if p.VaddrOffset < 0 {
 			return 0, fmt.Errorf("chunk placement %d has negative virtual-log offset %d", i, p.VaddrOffset)
 		}
+		recordLen := int64(chunkRecordHeaderSize) + int64(p.LogicalLen)
+		if p.VaddrOffset > math.MaxInt64-recordLen {
+			return 0, fmt.Errorf("chunk placement %d virtual-log range overflows int64", i)
+		}
 		if p.VlogID == 0 {
 			return 0, fmt.Errorf("chunk placement %d has zero virtual-log id", i)
 		}
