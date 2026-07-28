@@ -89,6 +89,9 @@ func (c *writeCache) WriteAt(off int64, data []byte) {
 }
 
 func (c *writeCache) writeLocked(off int64, data []byte) {
+	if len(data) == 0 {
+		return
+	}
 	newStart := off
 	newEnd := off + int64(len(data))
 

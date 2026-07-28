@@ -434,6 +434,33 @@ func TestReadRejectsInvalidRangesWithoutPanicking(t *testing.T) {
 	}
 }
 
+func TestZeroLengthWriteDoesNotExtendFile(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	writeAt(t, s, "/zero-write", -1, [][2]any{{0, []byte("base")}})
+
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/zero-write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Offset: 1 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	attr, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/zero-write", Handle: open.GetHandle()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attr.GetSize() != 4 {
+		t.Fatalf("size after zero-length write = %d, want 4", attr.GetSize())
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(t, s, "/zero-write"); !bytes.Equal(got, []byte("base")) {
+		t.Fatalf("content after zero-length write = %q, want base", got)
+	}
+}
+
 // statPath reports whether a path resolves, via Getattr.
 func statPath(t *testing.T, s *server.Server, path string) (int64, bool, error) {
 	t.Helper()
