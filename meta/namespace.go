@@ -78,6 +78,13 @@ func ensureDirs(ctx context.Context, tx *sql.Tx, path string, mtime int64) error
 // the subtree.  dir "" is the namespace root.
 func (d *DB) ListDir(ctx context.Context, dir string) ([]DirEntry, error) {
 	dir = cleanPath(dir)
+	if dir != "" {
+		if _, exists, err := d.StatPath(ctx, dir); err != nil {
+			return nil, err
+		} else if !exists {
+			return nil, fmt.Errorf("list directory %q: path not found", dir)
+		}
+	}
 	var out []DirEntry
 
 	dirRows, err := d.db.QueryContext(ctx, `SELECT name, mtime FROM dir WHERE parent = ? ORDER BY name`, dir)

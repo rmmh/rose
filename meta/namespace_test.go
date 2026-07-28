@@ -62,6 +62,9 @@ func TestListDirReturnsImmediateChildrenOnly(t *testing.T) {
 	if len(rootDirs) != 2 || rootDirs[0] != "bucket" || rootDirs[1] != "other" {
 		t.Fatalf("root dirs = %v, want [bucket other]", rootDirs)
 	}
+	if _, err := db.ListDir(ctx, "missing"); err == nil {
+		t.Fatal("ListDir of a missing path succeeded")
+	}
 }
 
 func TestCommitFileCreatesAncestorDirs(t *testing.T) {
