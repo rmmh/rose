@@ -140,6 +140,36 @@ func TestRawPlogRPCsSynchronizeRegistryAccess(t *testing.T) {
 	}
 }
 
+func TestRawVlogRPCsSynchronizeRegistryAccess(t *testing.T) {
+	s := newControlPlaneServer(t, 2)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 16; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, err := s.MakeVlog(ctx, &pb.MakeVlogRequest{
+				ProtectionScheme: "DUPLICATE",
+				DataShards:       1,
+			})
+			errs <- err
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestDuplicateCommitGateDegradesToReadOnly(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 3)

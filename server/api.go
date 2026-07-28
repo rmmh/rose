@@ -1387,6 +1387,8 @@ func (s *Server) CommitPlog(ctx context.Context, req *pb.CommitPlogRequest) (*pb
 }
 
 func (s *Server) ReadVlog(ctx context.Context, req *pb.ReadVlogRequest) (*pb.ReadVlogResponse, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
 	v, ok := s.vlogs[req.GetVlogId()]
 	if !ok {
 		return nil, fmt.Errorf("vlog not found")
@@ -1400,6 +1402,8 @@ func (s *Server) ReadVlog(ctx context.Context, req *pb.ReadVlogRequest) (*pb.Rea
 }
 
 func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.WriteVlogResponse, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
 	v, ok := s.vlogs[req.GetVlogId()]
 	if !ok {
 		return nil, fmt.Errorf("vlog not found")
@@ -1419,6 +1423,8 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 }
 
 func (s *Server) CommitVlog(ctx context.Context, req *pb.CommitVlogRequest) (*pb.CommitVlogResponse, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
 	for _, vlog := range s.vlogs {
 		if err := vlog.Commit(ctx, req.GetTxnId()); err != nil {
 			return nil, err
