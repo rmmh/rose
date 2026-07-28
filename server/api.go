@@ -39,7 +39,8 @@ type FileHandle struct {
 	writeKey   string
 	// mtimeNs is an optional mtime override for an open write handle. FUSE can
 	// receive futimens before a newly-created file has a published namespace row.
-	mtimeNs atomic.Int64
+	mtimeNs  atomic.Int64
+	mtimeSet atomic.Bool
 	// cache holds pending modifications for a writable handle: it coalesces
 	// out-of-order/overlapping writes, serves read-your-writes, and produces the
 	// spliced placement list at Close. Nil for read-only and snapshot handles.
@@ -61,8 +62,8 @@ func (h *FileHandle) path() string {
 func (h *FileHandle) setPath(path string) { h.pathPtr.Store(&path) }
 
 func (h *FileHandle) mtimeOrNow() int64 {
-	if mtime := h.mtimeNs.Load(); mtime != 0 {
-		return mtime
+	if h.mtimeSet.Load() {
+		return h.mtimeNs.Load()
 	}
 	return time.Now().UnixNano()
 }
@@ -428,6 +429,7 @@ func (s *Server) SetHandleMtime(ctx context.Context, handle int64, mtime int64) 
 	}
 	if h.writeOpID != 0 {
 		h.mtimeNs.Store(mtime)
+		h.mtimeSet.Store(true)
 		return nil
 	}
 	ok, err := s.db.SetMtime(ctx, h.path(), mtime)
@@ -755,6 +757,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		h.writeKey = ""
 		h.fileID64 = 0
 		h.mtimeNs.Store(0)
+		h.mtimeSet.Store(false)
 	}
 	return nil
 }

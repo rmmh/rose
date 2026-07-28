@@ -1160,3 +1160,18 @@ func TestHugeTruncateAndClose(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, make([]byte, 16), res.GetBuffer())
 }
+
+func TestOpenHandlePreservesEpochMtime(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/epoch-mtime", OperationKey: "epoch-mtime"})
+	require.NoError(t, err)
+	require.NoError(t, s.SetHandleMtime(ctx, open.GetHandle(), 0))
+	_, err = s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte("x")})
+	require.NoError(t, err)
+	_, err = s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()})
+	require.NoError(t, err)
+	attr, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/epoch-mtime"})
+	require.NoError(t, err)
+	assert.Zero(t, attr.GetMtime())
+}
