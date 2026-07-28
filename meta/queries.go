@@ -13,6 +13,7 @@ import (
 )
 
 const chunkRecordHeaderSize = 64
+const fileChunkHashSize = 15
 
 // MakeVlog creates a new vlog with the specified protection scheme. u is the
 // vlog's persistent UID, also stamped into the superblocks of its member plogs.
@@ -364,7 +365,10 @@ func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int6
 	}
 	chunks := make([]byte, 0, len(placements)*19)
 	lenBytes := make([]byte, 4)
-	for _, p := range placements {
+	for i, p := range placements {
+		if len(p.Hash) != fileChunkHashSize {
+			return 0, fmt.Errorf("chunk placement %d has hash length %d, want %d", i, len(p.Hash), fileChunkHashSize)
+		}
 		chunks = append(chunks, p.Hash...)
 		binary.LittleEndian.PutUint32(lenBytes, uint32(p.LogicalLen))
 		chunks = append(chunks, lenBytes...)

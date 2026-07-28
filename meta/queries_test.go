@@ -36,6 +36,11 @@ func TestCommitFileTransfersChunkRefs(t *testing.T) {
 	a := testChunkPlacement('A', 10, 1, 100, 10)
 	b := testChunkPlacement('B', 11, 1, 200, 11)
 	c := testChunkPlacement('C', 12, 2, 300, 12)
+	badHash := a
+	badHash.Hash = badHash.Hash[:len(badHash.Hash)-1]
+	if _, err := db.CommitFile(ctx, "bucket/bad-hash", 1, []ChunkPlacement{badHash}); err == nil {
+		t.Fatal("commit with a short chunk hash succeeded")
+	}
 
 	if _, err := db.CommitFile(ctx, "bucket/file", 1, []ChunkPlacement{a, b}); err != nil {
 		t.Fatal(err)
