@@ -324,6 +324,17 @@ func TestRenameDirectoryReplacesEmptyDirectory(t *testing.T) {
 	}
 }
 
+func TestRenameMissingPathToItselfFails(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.RenameFile(context.Background(), "missing", "missing"); err == nil {
+		t.Fatal("self-rename of missing path reported success")
+	}
+}
+
 func TestRenameFileSetsParent(t *testing.T) {
 	db, err := OpenEphemeral()
 	if err != nil {

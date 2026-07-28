@@ -783,6 +783,11 @@ func (d *DB) UnlinkFile(ctx context.Context, path string) error {
 func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 	oldPath, newPath = cleanPath(oldPath), cleanPath(newPath)
 	if oldPath == newPath {
+		if _, ok, err := d.StatPath(ctx, oldPath); err != nil {
+			return err
+		} else if !ok {
+			return sql.ErrNoRows
+		}
 		return nil
 	}
 	if strings.HasPrefix(newPath, oldPath+"/") {
