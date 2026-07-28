@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/rmmh/rose/meta"
@@ -108,6 +109,33 @@ func TestSetBucketPolicyRejectsInvalidGeometry(t *testing.T) {
 		}
 		if _, ok, err := s.GetDB().GetBucketPolicy(ctx, policy.Name); err != nil || ok {
 			t.Errorf("invalid policy %q persisted: ok=%v err=%v", policy.Name, ok, err)
+		}
+	}
+}
+
+func TestRawPlogRPCsSynchronizeRegistryAccess(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for i := 0; i < 32; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, err := s.MakePlog(ctx, &pb.MakePlogRequest{DiskId: 1})
+			errs <- err
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := s.CommitPlog(ctx, &pb.CommitPlogRequest{})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 }

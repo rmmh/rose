@@ -1326,6 +1326,8 @@ func (s *Server) MakeVlog(ctx context.Context, req *pb.MakeVlogRequest) (*pb.Mak
 
 // Plog Operations
 func (s *Server) MakePlog(ctx context.Context, req *pb.MakePlogRequest) (*pb.MakePlogResponse, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
 	plogUID := uid.New()
 	id, err := s.db.MakePlog(ctx, plogUID, req.GetDiskId())
 	if err != nil {
@@ -1346,6 +1348,8 @@ func (s *Server) MakePlog(ctx context.Context, req *pb.MakePlogRequest) (*pb.Mak
 }
 
 func (s *Server) WritePlog(ctx context.Context, req *pb.WritePlogRequest) (*pb.WritePlogResponse, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
 	plog, ok := s.plogs[req.GetPlogId()]
 	if !ok {
 		return nil, fmt.Errorf("plog not found")
@@ -1358,6 +1362,8 @@ func (s *Server) WritePlog(ctx context.Context, req *pb.WritePlogRequest) (*pb.W
 }
 
 func (s *Server) ReadPlog(ctx context.Context, req *pb.ReadPlogRequest) (*pb.ReadPlogResponse, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
 	plog, ok := s.plogs[req.GetPlogId()]
 	if !ok {
 		return nil, fmt.Errorf("plog not found")
@@ -1370,6 +1376,8 @@ func (s *Server) ReadPlog(ctx context.Context, req *pb.ReadPlogRequest) (*pb.Rea
 }
 
 func (s *Server) CommitPlog(ctx context.Context, req *pb.CommitPlogRequest) (*pb.CommitPlogResponse, error) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
 	for _, plog := range s.plogs {
 		if err := plog.Commit(); err != nil {
 			return nil, err
