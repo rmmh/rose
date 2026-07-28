@@ -29,6 +29,18 @@ func DefaultBucketPolicy(name string) BucketPolicy {
 
 // SetBucketPolicy records (or replaces) the protection policy for a bucket.
 func (d *DB) SetBucketPolicy(ctx context.Context, p BucketPolicy) error {
+	switch p.ProtectionScheme {
+	case "NONE", "DUPLICATE":
+		if p.DataShards != 1 || p.ParityShards != 0 {
+			return fmt.Errorf("invalid %s bucket geometry %d+%d: want 1+0", p.ProtectionScheme, p.DataShards, p.ParityShards)
+		}
+	case "EC":
+		if p.DataShards <= 0 || p.ParityShards <= 0 {
+			return fmt.Errorf("invalid EC bucket geometry %d+%d: both shard counts must be positive", p.DataShards, p.ParityShards)
+		}
+	default:
+		return fmt.Errorf("unknown bucket protection scheme %q", p.ProtectionScheme)
+	}
 	_, err := d.db.ExecContext(ctx,
 		`INSERT INTO bucket (name, protection_scheme, data_shards, parity_shards)
 		 VALUES (?, ?, ?, ?)

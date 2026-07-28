@@ -91,6 +91,27 @@ func TestMakeVlogRejectsInvalidShardGeometryWithoutPanicking(t *testing.T) {
 	}
 }
 
+func TestSetBucketPolicyRejectsInvalidGeometry(t *testing.T) {
+	s := newControlPlaneServer(t, 4)
+	ctx := context.Background()
+	tests := []meta.BucketPolicy{
+		{Name: "bad-negative", ProtectionScheme: "EC", DataShards: -1, ParityShards: 1},
+		{Name: "bad-no-data", ProtectionScheme: "EC", DataShards: 0, ParityShards: 1},
+		{Name: "bad-no-parity", ProtectionScheme: "EC", DataShards: 1, ParityShards: 0},
+		{Name: "bad-mirror", ProtectionScheme: "DUPLICATE", DataShards: 2},
+		{Name: "bad-none", ProtectionScheme: "NONE", DataShards: 1, ParityShards: 1},
+		{Name: "bad-scheme", ProtectionScheme: "bogus", DataShards: 1},
+	}
+	for _, policy := range tests {
+		if err := s.SetBucketPolicy(ctx, policy); err == nil {
+			t.Errorf("SetBucketPolicy(%+v) succeeded", policy)
+		}
+		if _, ok, err := s.GetDB().GetBucketPolicy(ctx, policy.Name); err != nil || ok {
+			t.Errorf("invalid policy %q persisted: ok=%v err=%v", policy.Name, ok, err)
+		}
+	}
+}
+
 func TestDuplicateCommitGateDegradesToReadOnly(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 3)
