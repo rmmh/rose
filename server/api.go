@@ -510,7 +510,13 @@ func (s *Server) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.RmdirResp
 	if req.GetPath() == "" {
 		return nil, fmt.Errorf("path cannot be empty")
 	}
-	if err := s.db.Rmdir(ctx, req.GetPath()); err != nil {
+	path := cleanPath(req.GetPath())
+	if entry, exists, err := s.db.StatPath(ctx, path); err != nil {
+		return nil, err
+	} else if exists && !entry.IsDir {
+		return nil, fmt.Errorf("path is not a directory: %q", path)
+	}
+	if err := s.db.Rmdir(ctx, path); err != nil {
 		return nil, err
 	}
 	return &pb.RmdirResponse{}, nil

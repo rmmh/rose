@@ -105,3 +105,16 @@ func TestUnlinkRejectsDirectoryPath(t *testing.T) {
 		t.Fatalf("directory changed after rejected unlink: entry=%+v err=%v", entry, err)
 	}
 }
+
+func TestRmdirRejectsFilePath(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	writeAt(t, s, "/file", -1, [][2]any{{0, []byte("data")}})
+	if _, err := s.Rmdir(ctx, &pb.RmdirRequest{Path: "/file"}); err == nil {
+		t.Fatal("Rmdir reported success for a regular file")
+	}
+	entry, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/file"})
+	if err != nil || entry.GetIsDir() {
+		t.Fatalf("file changed after rejected rmdir: entry=%+v err=%v", entry, err)
+	}
+}
