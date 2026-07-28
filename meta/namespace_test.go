@@ -593,3 +593,36 @@ func TestSplitPath(t *testing.T) {
 		}
 	}
 }
+
+func TestNamespaceCanonicalizesPathComponents(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.Mkdir(ctx, "//bucket///sub/./", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CommitFile(ctx, "bucket/sub/../file", 2, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"bucket/sub", "/bucket/sub/", "bucket/./sub"} {
+		entry, ok, err := db.StatPath(ctx, path)
+		if err != nil || !ok || !entry.IsDir {
+			t.Fatalf("StatPath(%q): entry=%+v ok=%v err=%v", path, entry, ok, err)
+		}
+	}
+	entry, ok, err := db.StatPath(ctx, "bucket/file")
+	if err != nil || !ok || entry.IsDir {
+		t.Fatalf("canonical file: entry=%+v ok=%v err=%v", entry, ok, err)
+	}
+	entries, err := db.ListDir(ctx, "bucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirs, files := entryNames(entries)
+	if len(dirs) != 1 || dirs[0] != "sub" || len(files) != 1 || files[0] != "file" {
+		t.Fatalf("canonical listing dirs=%v files=%v", dirs, files)
+	}
+}

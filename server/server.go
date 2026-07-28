@@ -8,8 +8,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -475,19 +477,18 @@ func (s *Server) CloseStorage() {
 // file and so a path's stored parent column always matches the directory it
 // lists under.
 func cleanPath(path string) string {
-	for len(path) > 0 && path[0] == '/' {
-		path = path[1:]
+	cleaned := strings.TrimPrefix(pathpkg.Clean("/"+path), "/")
+	if cleaned == "." {
+		return ""
 	}
-	return path
+	return cleaned
 }
 
 // bucketOf returns the bucket a path belongs to: its top-level directory (the
 // component the README calls a bucket). A bare file at the root has no top-level
 // directory and belongs to the root bucket "", which carries the default policy.
 func bucketOf(path string) string {
-	for len(path) > 0 && path[0] == '/' {
-		path = path[1:]
-	}
+	path = cleanPath(path)
 	for i := 0; i < len(path); i++ {
 		if path[i] == '/' {
 			return path[:i]

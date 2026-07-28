@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	pathpkg "path"
 	"strings"
 )
 
@@ -29,7 +30,11 @@ func splitPath(path string) (parent, name string) {
 // cleanPath returns the canonical (leading-slash-stripped) form stored in the
 // namespace, so callers can pass either form.
 func cleanPath(path string) string {
-	return strings.TrimLeft(path, "/")
+	cleaned := strings.TrimPrefix(pathpkg.Clean("/"+path), "/")
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
 }
 
 // ancestorsOf lists every ancestor directory of path, deepest first.  For
