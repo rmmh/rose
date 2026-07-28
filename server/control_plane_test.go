@@ -283,6 +283,27 @@ func TestPlacementSkipsNonActiveDisks(t *testing.T) {
 	if _, err := s.MakePlog(ctx, &pb.MakePlogRequest{DiskId: 2}); err == nil {
 		t.Fatal("MakePlog placed a new shard on a draining disk")
 	}
+	before, err := s.db.ListPlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRoot := s.diskRoots[1]
+	blockedRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedRoot, []byte("block mkdir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.diskRoots[1] = blockedRoot
+	if _, err := s.MakePlog(ctx, &pb.MakePlogRequest{DiskId: 1}); err == nil {
+		t.Fatal("MakePlog with an unusable disk root succeeded")
+	}
+	s.diskRoots[1] = originalRoot
+	after, err := s.db.ListPlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("failed MakePlog left %d catalog rows, had %d", len(after), len(before))
+	}
 
 	// A new DUPLICATE vlog lands only on the two active disks.
 	vlogID := provision(t, s, "DUPLICATE", 1, 0)

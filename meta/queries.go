@@ -45,6 +45,24 @@ func (d *DB) MakePlog(ctx context.Context, u uid.UID, diskID uint32) (uint32, er
 	return uint32(id), err
 }
 
+// DiscardUnassignedPlog removes a plog whose provisioning failed before it was
+// attached to a vlog. It refuses to remove an assigned shard.
+func (d *DB) DiscardUnassignedPlog(ctx context.Context, plogID uint32) error {
+	res, err := d.db.ExecContext(ctx, `DELETE FROM plog
+		WHERE id = ? AND NOT EXISTS (SELECT 1 FROM vlog_plog WHERE plog_id = ?)`, plogID, plogID)
+	if err != nil {
+		return fmt.Errorf("discard plog %d: %w", plogID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("discard plog %d: plog is missing or assigned", plogID)
+	}
+	return nil
+}
+
 type PlogInfo struct {
 	ID     uint32
 	UID    uid.UID

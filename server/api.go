@@ -1359,15 +1359,21 @@ func (s *Server) MakePlog(ctx context.Context, req *pb.MakePlogRequest) (*pb.Mak
 	if err != nil {
 		return nil, err
 	}
+	discard := func(cause error) error {
+		if cleanupErr := s.db.DiscardUnassignedPlog(ctx, id); cleanupErr != nil {
+			return errors.Join(cause, cleanupErr)
+		}
+		return cause
+	}
 	// A bare plog created via the RPC has no vlog membership yet, so its
 	// superblock carries only the cluster/plog/disk identity.
 	header, err := s.basePlogHeader(ctx, id, req.GetDiskId(), plogUID)
 	if err != nil {
-		return nil, err
+		return nil, discard(err)
 	}
 	plog, err := storage.OpenPlog(s.plogPath(req.GetDiskId(), id), id, storage.WithHeader(header))
 	if err != nil {
-		return nil, err
+		return nil, discard(err)
 	}
 	s.plogs[id] = plog
 	return &pb.MakePlogResponse{PlogId: id}, nil
