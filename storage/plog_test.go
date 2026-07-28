@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -71,6 +72,9 @@ func TestPlogRoundTripAcrossBlocks(t *testing.T) {
 	}
 	if !bytes.Equal(full, data) {
 		t.Fatalf("full read mismatch")
+	}
+	if _, err := p.Read(math.MaxInt64, 1); err == nil {
+		t.Fatal("overflowing read range succeeded")
 	}
 }
 

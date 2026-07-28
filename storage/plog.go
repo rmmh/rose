@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -631,6 +632,9 @@ func (p *Plog) readLocked(offset int64, length int) ([]byte, error) {
 
 	if offset < 0 || length < 0 {
 		return nil, fmt.Errorf("read plog %d: invalid offset %d length %d", p.id, offset, length)
+	}
+	if int64(length) > math.MaxInt64-offset {
+		return nil, fmt.Errorf("read plog %d: range overflows int64", p.id)
 	}
 	end := offset + int64(length)
 	if end > p.logicalLength {
