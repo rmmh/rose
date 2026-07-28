@@ -789,12 +789,24 @@ func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 		} else if derr != nil {
 			return derr
 		}
+		var destinationFile int64
+		if derr := tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", newPath).Scan(&destinationFile); derr == nil {
+			return fmt.Errorf("cannot replace file %q with a directory", newPath)
+		} else if derr != sql.ErrNoRows {
+			return derr
+		}
 		if err := renameDirSubtree(ctx, tx, oldPath, newPath); err != nil {
 			return err
 		}
 		return tx.Commit()
 	}
 	if err != nil {
+		return err
+	}
+	var destinationDir int
+	if err := tx.QueryRowContext(ctx, "SELECT 1 FROM dir WHERE path = ?", newPath).Scan(&destinationDir); err == nil {
+		return fmt.Errorf("cannot replace directory %q with a file", newPath)
+	} else if err != sql.ErrNoRows {
 		return err
 	}
 

@@ -204,6 +204,63 @@ func TestRenameDirectoryRejectsMoveIntoOwnSubtree(t *testing.T) {
 	}
 }
 
+func TestRenameRejectsFileDirectoryTypeCollisions(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(*testing.T, *DB)
+		oldPath   string
+		newPath   string
+		source    string
+		sourceDir bool
+		dest      string
+		destDir   bool
+	}{
+		{
+			name: "file over directory",
+			setup: func(t *testing.T, db *DB) {
+				commitEmptyFile(t, db, "source-file")
+				if err := db.Mkdir(context.Background(), "dest-dir", 1); err != nil {
+					t.Fatal(err)
+				}
+			},
+			oldPath: "source-file", newPath: "dest-dir",
+			source: "source-file", dest: "dest-dir", destDir: true,
+		},
+		{
+			name: "directory over file",
+			setup: func(t *testing.T, db *DB) {
+				if err := db.Mkdir(context.Background(), "source-dir", 1); err != nil {
+					t.Fatal(err)
+				}
+				commitEmptyFile(t, db, "dest-file")
+			},
+			oldPath: "source-dir", newPath: "dest-file",
+			source: "source-dir", sourceDir: true, dest: "dest-file",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := OpenEphemeral()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			tt.setup(t, db)
+			if err := db.RenameFile(context.Background(), tt.oldPath, tt.newPath); err == nil {
+				t.Fatal("cross-type rename succeeded")
+			}
+			source, ok, err := db.StatPath(context.Background(), tt.source)
+			if err != nil || !ok || source.IsDir != tt.sourceDir {
+				t.Fatalf("source changed: entry=%+v ok=%v err=%v", source, ok, err)
+			}
+			dest, ok, err := db.StatPath(context.Background(), tt.dest)
+			if err != nil || !ok || dest.IsDir != tt.destDir {
+				t.Fatalf("destination changed: entry=%+v ok=%v err=%v", dest, ok, err)
+			}
+		})
+	}
+}
+
 func TestRenameFileSetsParent(t *testing.T) {
 	db, err := OpenEphemeral()
 	if err != nil {
