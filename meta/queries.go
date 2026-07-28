@@ -602,6 +602,14 @@ func (d *DB) FileVersionChunks(ctx context.Context, fileID int64) ([]ChunkPlacem
 	return out, nil
 }
 
+// FileVersionMtime returns the immutable timestamp stored on a specific file
+// version. Unlike file_head.mtime, this remains frozen for snapshots.
+func (d *DB) FileVersionMtime(ctx context.Context, fileID int64) (int64, error) {
+	var mtime int64
+	err := d.db.QueryRowContext(ctx, "SELECT mtime FROM file WHERE id = ?", fileID).Scan(&mtime)
+	return mtime, err
+}
+
 // ChunkByHash looks up the placement of an already-stored chunk by its content
 // hash. It backs dedup during the splice: a freshly recomputed chunk whose hash
 // is already present reuses that placement instead of writing its bytes again.

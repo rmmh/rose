@@ -406,6 +406,17 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 		if ok && h.cache != nil {
 			return &pb.GetattrResponse{Size: h.cache.Length(), Mtime: h.mtimeOrNow()}, nil
 		}
+		if ok && h.snapshotID != 0 {
+			mtime, err := s.db.FileVersionMtime(ctx, h.id)
+			if err != nil {
+				return nil, err
+			}
+			var size int64
+			for _, chunk := range h.chunks {
+				size += int64(chunk.LogicalLen)
+			}
+			return &pb.GetattrResponse{Size: size, Mtime: mtime}, nil
+		}
 	}
 	entry, ok, err := s.db.StatPath(ctx, req.GetPath())
 	if err != nil {

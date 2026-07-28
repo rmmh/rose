@@ -1199,3 +1199,27 @@ func TestSnapshotHandleRejectsMtimeMutation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(20), live.GetMtime())
 }
+
+func TestSnapshotHandleGetattrUsesFrozenVersion(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	writeAt(t, s, "/snapshot-stat", -1, [][2]any{{0, []byte("old")}})
+	before, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/snapshot-stat"})
+	require.NoError(t, err)
+	snapshot, err := s.CreateSnapshot(ctx, &pb.CreateSnapshotRequest{Name: "stat-snapshot"})
+	require.NoError(t, err)
+	open, err := s.OpenSnapshot(ctx, &pb.OpenSnapshotRequest{
+		SnapshotId: snapshot.GetSnapshotId(),
+		Path:       "/snapshot-stat",
+	})
+	require.NoError(t, err)
+	writeAt(t, s, "/snapshot-stat", 0, [][2]any{{0, []byte("new-and-longer")}})
+
+	attr, err := s.Getattr(ctx, &pb.GetattrRequest{
+		Path:   "/snapshot-stat",
+		Handle: open.GetHandle(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), attr.GetSize())
+	assert.Equal(t, before.GetMtime(), attr.GetMtime())
+}
