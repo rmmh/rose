@@ -833,6 +833,9 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 			if h.GetVlogId() != info.ID || !bytes.Equal(h.GetVlogUid(), info.UID[:]) {
 				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock belongs to another vlog", info.ID, index, mapping.PlogID)
 			}
+			if h.GetShardIndex() != uint32(index) {
+				return nil, fmt.Errorf("vlog %d shard %d plog %d superblock names shard %d", info.ID, index, mapping.PlogID, h.GetShardIndex())
+			}
 		}
 		client, err := s.plogClientLocked(mapping.PlogID)
 		if err != nil {

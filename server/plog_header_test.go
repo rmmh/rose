@@ -214,4 +214,22 @@ func TestPlogSuperblockMembership(t *testing.T) {
 		recovered.CloseStorage()
 		t.Fatal("recovery adopted a plog assigned to another vlog")
 	}
+
+	if err := os.Remove(victimPath); err != nil {
+		t.Fatal(err)
+	}
+	wrongShardHeader := proto.Clone(victimHeader).(*pb.PlogHeader)
+	wrongShardHeader.ShardIndex = (wrongShardHeader.ShardIndex + 1) % uint32(len(members))
+	wrongShard, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(wrongShardHeader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wrongShard.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered = NewServerWithDiskRoots(db, roots)
+	if err := recovered.Recover(ctx); err == nil {
+		recovered.CloseStorage()
+		t.Fatal("recovery adopted a plog at the wrong shard index")
+	}
 }
