@@ -51,6 +51,11 @@ func TestCommitFileTransfersChunkRefs(t *testing.T) {
 	if _, err := db.CommitFile(ctx, "bucket/bad-offset", 1, []ChunkPlacement{badOffset}); err == nil {
 		t.Fatal("commit with a negative virtual-log offset succeeded")
 	}
+	badVlog := a
+	badVlog.VlogID = 0
+	if _, err := db.CommitFile(ctx, "bucket/bad-vlog", 1, []ChunkPlacement{badVlog}); err == nil {
+		t.Fatal("commit with the zero virtual-log id succeeded")
+	}
 
 	if _, err := db.CommitFile(ctx, "bucket/file", 1, []ChunkPlacement{a, b}); err != nil {
 		t.Fatal(err)
