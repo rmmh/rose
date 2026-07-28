@@ -55,6 +55,9 @@ func TestVlog_DeterministicSimulation_Duplicate(t *testing.T) {
 			t.Fatalf("%s vlog with no physical clients succeeded", scheme)
 		}
 	}
+	if _, err := NewVlog(1, "UNKNOWN", 0, 0, []PlogClient{&simulatedPlogClient{}}, 0); err == nil {
+		t.Fatal("vlog with unknown protection scheme succeeded")
+	}
 
 	seed := int64(1337)
 

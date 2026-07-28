@@ -94,6 +94,11 @@ func SetECColumnBytesForTest(n int64) func() {
 // For DUPLICATE, it's just a variable list of mirrors.
 // For EC, length must be dataShards + parityShards.
 func NewVlog(id uint32, scheme string, data, parity int, clients []PlogClient, initialLength int64) (*Vlog, error) {
+	switch scheme {
+	case "NONE", "DUPLICATE", "EC":
+	default:
+		return nil, fmt.Errorf("unsupported protection scheme %q", scheme)
+	}
 	if (scheme == "NONE" || scheme == "DUPLICATE") && len(clients) == 0 {
 		return nil, fmt.Errorf("%s vlog requires at least one client", scheme)
 	}
