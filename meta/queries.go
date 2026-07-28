@@ -22,6 +22,33 @@ func (d *DB) MakeVlog(ctx context.Context, u uid.UID, protectionScheme string, d
 	return d.MakeStagingVlog(ctx, u, protectionScheme, dataShards, parityShards, 0, 0)
 }
 
+// DiscardEmptyVlog removes a newly provisioned vlog that failed before any
+// chunks were attached. Its shard mappings cascade away, after which callers
+// can discard the now-unassigned plogs.
+func (d *DB) DiscardEmptyVlog(ctx context.Context, vlogID uint32) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM vlog_plog WHERE vlog_id = ?", vlogID); err != nil {
+		return fmt.Errorf("discard vlog %d mappings: %w", vlogID, err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM vlog
+		WHERE id = ? AND NOT EXISTS (SELECT 1 FROM chunk WHERE vlog_id = ?)`, vlogID, vlogID)
+	if err != nil {
+		return fmt.Errorf("discard vlog %d: %w", vlogID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("discard vlog %d: vlog is missing or contains chunks", vlogID)
+	}
+	return tx.Commit()
+}
+
 // MakeStagingVlog records a vlog and, when targetParityShards is nonzero, marks
 // it as a replicated staging vlog whose chunks will later be promoted into an EC
 // vlog with the given target shard counts.

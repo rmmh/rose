@@ -321,6 +321,37 @@ func TestPlacementSkipsNonActiveDisks(t *testing.T) {
 	}
 }
 
+func TestVlogProvisioningRollsBackPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 3)
+	blockedRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedRoot, []byte("block mkdir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.diskRoots[2] = blockedRoot
+
+	if _, err := s.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "DUPLICATE",
+		DataShards:       1,
+	}); err == nil {
+		t.Fatal("MakeVlog with a failed shard creation succeeded")
+	}
+	vlogs, err := s.db.ListVlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plogs, err := s.db.ListPlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vlogs) != 0 || len(plogs) != 0 {
+		t.Fatalf("failed MakeVlog left catalog state: %d vlogs, %d plogs", len(vlogs), len(plogs))
+	}
+	if len(s.vlogs) != 0 || len(s.plogs) != 0 {
+		t.Fatalf("failed MakeVlog left memory state: %d vlogs, %d plogs", len(s.vlogs), len(s.plogs))
+	}
+}
+
 func TestDiskStatePersistsAcrossRecover(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

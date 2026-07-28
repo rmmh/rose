@@ -639,7 +639,7 @@ func (s *Server) provisionStagingVlogLocked(ctx context.Context, targetData, tar
 // provisionVlogCoreLocked records a vlog, lays its clientCount shards across the
 // given disks, mounts it, and registers it. The caller must hold
 // vlogMu.
-func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dataShards, parityShards, targetData, targetParity, clientCount int, diskIDs []uint32) (uint32, *storage.Vlog, error) {
+func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dataShards, parityShards, targetData, targetParity, clientCount int, diskIDs []uint32) (outID uint32, outVlog *storage.Vlog, retErr error) {
 	if err := s.ensureClusterKeys(ctx); err != nil {
 		return 0, nil, err
 	}
@@ -660,6 +660,28 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 		diskUID uid.UID
 	}
 	shards := make([]shardPlog, 0, clientCount)
+	cleanup := true
+	defer func() {
+		if !cleanup {
+			return
+		}
+		for _, sp := range shards {
+			if p, ok := s.plogs[sp.plogID]; ok {
+				_ = p.Close()
+				delete(s.plogs, sp.plogID)
+			}
+		}
+		if cleanupErr := s.db.DiscardEmptyVlog(ctx, id); cleanupErr != nil {
+			retErr = errors.Join(retErr, cleanupErr)
+		}
+		for _, sp := range shards {
+			if cleanupErr := s.db.DiscardUnassignedPlog(ctx, sp.plogID); cleanupErr != nil {
+				retErr = errors.Join(retErr, cleanupErr)
+			}
+		}
+		outID = 0
+		outVlog = nil
+	}()
 	siblingUIDs := make([][]byte, clientCount)
 	for shard := 0; shard < clientCount; shard++ {
 		diskID := diskIDs[shard]
@@ -672,10 +694,10 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 		if err != nil {
 			return 0, nil, err
 		}
+		shards = append(shards, shardPlog{plogID, diskID, plogUID, diskUID})
 		if err := s.db.AssignPlogToVlog(ctx, id, shard, plogID); err != nil {
 			return 0, nil, err
 		}
-		shards = append(shards, shardPlog{plogID, diskID, plogUID, diskUID})
 		sib := plogUID
 		siblingUIDs[shard] = sib[:]
 	}
@@ -714,6 +736,7 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 	}
 	s.vlogs[id] = vlog
 	s.setVlogKey(id, storage.DeriveVlogKey(s.clusterKey, vlogUID))
+	cleanup = false
 	return id, vlog, nil
 }
 
