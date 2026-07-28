@@ -210,4 +210,10 @@ func TestWebDAVFileModes(t *testing.T) {
 	if _, err := fs.OpenFile(ctx, "/missing", os.O_WRONLY, 0o644); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("write open without O_CREATE error = %v, want not exist", err)
 	}
+	if file, err := fs.OpenFile(ctx, "/file", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644); !errors.Is(err, os.ErrExist) {
+		if err == nil {
+			_ = file.Close()
+		}
+		t.Fatalf("exclusive create of existing file error = %v, want exists", err)
+	}
 }

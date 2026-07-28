@@ -99,7 +99,11 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 	path := clean(name)
 	writing := flag&(os.O_WRONLY|os.O_RDWR) != 0
 	if writing {
-		if flag&os.O_CREATE == 0 {
+		if flag&os.O_CREATE != 0 && flag&os.O_EXCL != 0 {
+			if _, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path}); err == nil {
+				return nil, os.ErrExist
+			}
+		} else if flag&os.O_CREATE == 0 {
 			if _, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path}); err != nil {
 				return nil, os.ErrNotExist
 			}
