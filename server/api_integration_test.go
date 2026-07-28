@@ -109,6 +109,13 @@ func TestWriteOperationRetriesOpenWriteAndClose(t *testing.T) {
 	if _, err := client.Close(ctx, &pb.CloseRequest{Handle: first.GetHandle(), IdempotencyKey: "op-retry"}); err != nil {
 		t.Fatal(err)
 	}
+	retriedOpen, err := client.Open(ctx, &pb.OpenRequest{Path: "/retry", OperationKey: "op-retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retriedOpen.GetAcknowledgedOffset() != int64(len(data)) {
+		t.Fatalf("committed retry acknowledged offset = %d, want %d", retriedOpen.GetAcknowledgedOffset(), len(data))
+	}
 	read, err := client.Open(ctx, &pb.OpenRequest{Path: "/retry"})
 	if err != nil {
 		t.Fatal(err)

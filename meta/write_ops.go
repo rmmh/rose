@@ -157,7 +157,12 @@ func (d *DB) CommitWriteOpVersion(ctx context.Context, opID int64, path string, 
 	if err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE write_op SET state = ?, file_id = ?, tail = X'' WHERE id = ?", WriteOpCommitted, fileID, opID); err != nil {
+	var acknowledgedOffset int64
+	for _, placement := range placements {
+		acknowledgedOffset += int64(placement.LogicalLen)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE write_op SET state = ?, file_id = ?, acknowledged_offset = ?, tail = X'' WHERE id = ?",
+		WriteOpCommitted, fileID, acknowledgedOffset, opID); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM vlog_lease WHERE write_op_id = ?", opID); err != nil {
