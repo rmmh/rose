@@ -1280,3 +1280,19 @@ func TestSnapshotHandleGetattrUsesFrozenVersion(t *testing.T) {
 	assert.Equal(t, int64(3), attr.GetSize())
 	assert.Equal(t, before.GetMtime(), attr.GetMtime())
 }
+
+func TestReadHandleGetattrUsesOpenedVersion(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	writeAt(t, s, "/opened-stat", -1, [][2]any{{0, []byte("old")}})
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/opened-stat"})
+	require.NoError(t, err)
+	writeAt(t, s, "/opened-stat", 0, [][2]any{{0, []byte("new-and-longer")}})
+
+	read, err := s.Read(ctx, &pb.ReadRequest{Handle: open.GetHandle(), Length: 100})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("old"), read.GetBuffer())
+	attr, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/opened-stat", Handle: open.GetHandle()})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), attr.GetSize())
+}

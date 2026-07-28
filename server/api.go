@@ -51,6 +51,7 @@ type FileHandle struct {
 	chunks       []meta.ChunkPlacement
 	fileID64     uint64
 	writeSeq     int64
+	openedMtime  int64
 }
 
 func (h *FileHandle) path() string {
@@ -75,10 +76,13 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	if path == "" {
 		return nil, fmt.Errorf("path cannot be empty")
 	}
+	var openedMtime int64
 	if entry, exists, err := s.db.StatPath(ctx, path); err != nil {
 		return nil, err
 	} else if exists && entry.IsDir {
 		return nil, fmt.Errorf("path is a directory: %q", path)
+	} else if exists {
+		openedMtime = entry.Mtime
 	}
 
 	id, err := s.db.OpenFile(ctx, path)
@@ -99,7 +103,7 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	hid := s.handleCounter
 	s.handleCounter++
 
-	h := &FileHandle{id: id, chunks: chunks}
+	h := &FileHandle{id: id, chunks: chunks, openedMtime: openedMtime}
 	h.setPath(path)
 	if req.GetOperationKey() != "" {
 		op, err := s.db.CreateWriteOp(ctx, req.GetOperationKey(), path)
@@ -152,7 +156,11 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 	defer s.handlesMu.Unlock()
 	hid := s.handleCounter
 	s.handleCounter++
-	hs := &FileHandle{id: id, snapshotID: req.GetSnapshotId(), chunks: chunks}
+	mtime, err := s.db.SnapshotFileMtime(ctx, req.GetSnapshotId(), path)
+	if err != nil {
+		return nil, err
+	}
+	hs := &FileHandle{id: id, snapshotID: req.GetSnapshotId(), chunks: chunks, openedMtime: mtime}
 	hs.setPath(path)
 	s.handles[hid] = hs
 	return &pb.OpenResponse{Handle: hid}, nil
@@ -436,16 +444,12 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 		if ok && h.cache != nil {
 			return &pb.GetattrResponse{Size: h.cache.Length(), Mtime: h.mtimeOrNow()}, nil
 		}
-		if ok && h.snapshotID != 0 {
-			mtime, err := s.db.SnapshotFileMtime(ctx, h.snapshotID, h.path())
-			if err != nil {
-				return nil, err
-			}
+		if ok && h.id != 0 {
 			var size int64
 			for _, chunk := range h.chunks {
 				size += int64(chunk.LogicalLen)
 			}
-			return &pb.GetattrResponse{Size: size, Mtime: mtime}, nil
+			return &pb.GetattrResponse{Size: size, Mtime: h.openedMtime}, nil
 		}
 	}
 	entry, ok, err := s.db.StatPath(ctx, req.GetPath())
@@ -482,6 +486,9 @@ func (s *Server) refreshCommittedHandle(ctx context.Context, h *FileHandle) erro
 	}
 	h.id = op.FileID
 	h.chunks = chunks
+	if h.openedMtime, err = s.db.FileVersionMtime(ctx, op.FileID); err != nil {
+		return err
+	}
 	h.cache = nil
 	return nil
 }
@@ -792,6 +799,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 	}
 	var placements []meta.ChunkPlacement
 	var fileID int64
+	committedMtime := h.openedMtime
 	if op.State != meta.WriteOpCommitted {
 		if h.cache == nil {
 			if err := s.buildCache(ctx, h); err != nil {
@@ -826,7 +834,8 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 				return err
 			}
 		}
-		fileID, err = s.db.CommitWriteOpVersion(ctx, op.ID, h.path(), h.mtimeOrNow(), placements)
+		committedMtime = h.mtimeOrNow()
+		fileID, err = s.db.CommitWriteOpVersion(ctx, op.ID, h.path(), committedMtime, placements)
 		if err != nil {
 			return fmt.Errorf("publish write operation: %w", err)
 		}
@@ -845,6 +854,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 	} else {
 		h.id = fileID
 		h.chunks = placements
+		h.openedMtime = committedMtime
 		h.cache = nil
 		h.writeOpID = 0
 		h.writeKey = ""
