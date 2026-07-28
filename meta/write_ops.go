@@ -27,6 +27,7 @@ type WriteOp struct {
 // written.  A duplicate key returns the original operation, allowing callers to
 // retry after an unknown RPC outcome without creating another append.
 func (d *DB) CreateWriteOp(ctx context.Context, key, path string) (WriteOp, error) {
+	path = cleanPath(path)
 	if key == "" || path == "" {
 		return WriteOp{}, fmt.Errorf("write operation key and path are required")
 	}
