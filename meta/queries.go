@@ -305,8 +305,22 @@ func (d *DB) AssignPlogToVlog(ctx context.Context, vlogID uint32, shardIdx int, 
 	if shardIdx < 0 {
 		return fmt.Errorf("assign plog %d to vlog %d: negative shard index %d", plogID, vlogID, shardIdx)
 	}
-	_, err := d.db.ExecContext(ctx, "INSERT INTO vlog_plog (vlog_id, shard_idx, plog_id) VALUES (?, ?, ?)", vlogID, shardIdx, plogID)
-	return err
+	res, err := d.db.ExecContext(ctx, `INSERT INTO vlog_plog (vlog_id, shard_idx, plog_id)
+		SELECT ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM vlog WHERE id = ?)
+		  AND EXISTS (SELECT 1 FROM plog WHERE id = ?)`,
+		vlogID, shardIdx, plogID, vlogID, plogID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("assign plog %d to vlog %d shard %d: vlog or plog does not exist", plogID, vlogID, shardIdx)
+	}
+	return nil
 }
 
 // ReplaceShardPlog atomically repoints a vlog shard from a lost plog to a freshly

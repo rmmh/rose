@@ -158,4 +158,10 @@ func TestCatalogLengthValidation(t *testing.T) {
 	if err := db.AssignPlogToVlog(ctx, vlogID, -1, plogID); err == nil {
 		t.Fatal("negative shard index persisted")
 	}
+	if err := db.AssignPlogToVlog(ctx, ^uint32(0), 0, plogID); err == nil {
+		t.Fatal("mapping to a missing virtual log persisted")
+	}
+	if err := db.AssignPlogToVlog(ctx, vlogID, 0, ^uint32(0)); err == nil {
+		t.Fatal("mapping to a missing physical log persisted")
+	}
 }
