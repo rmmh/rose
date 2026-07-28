@@ -446,6 +446,73 @@ func TestVlogCommitOverGRPC(t *testing.T) {
 	}
 }
 
+func TestVlogCommitControlsRecoveredLength(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	disk := filepath.Join(dir, "disk")
+
+	first := server.NewServerWithDataDir(db, disk)
+	if err := first.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	made, err := first.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "DUPLICATE",
+		DataShards:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: made.GetVlogId(),
+		TxnId:  1,
+		Buffer: []byte("uncommitted"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first.CloseStorage()
+
+	restarted := server.NewServerWithDataDir(db, disk)
+	if err := restarted.Recover(ctx); err != nil {
+		t.Fatalf("recover after uncommitted WriteVlog: %v", err)
+	}
+	data := []byte("committed")
+	written, err := restarted.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: made.GetVlogId(),
+		TxnId:  2,
+		Buffer: data,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written.GetOffset() != 0 {
+		t.Fatalf("write after discarded transaction started at %d, want 0", written.GetOffset())
+	}
+	if _, err := restarted.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 2}); err != nil {
+		t.Fatal(err)
+	}
+	restarted.CloseStorage()
+
+	recovered := server.NewServerWithDataDir(db, disk)
+	if err := recovered.Recover(ctx); err != nil {
+		t.Fatalf("recover after CommitVlog: %v", err)
+	}
+	read, err := recovered.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: made.GetVlogId(),
+		Length: uint32(len(data)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), data) {
+		t.Fatalf("recovered vlog read = %q, want %q", read.GetBuffer(), data)
+	}
+}
+
 func TestRecoverReopensPersistedVlogs(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))

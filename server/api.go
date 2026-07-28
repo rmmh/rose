@@ -1461,9 +1461,6 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 	if err != nil {
 		return nil, err
 	}
-	if err := s.db.SetVlogLength(ctx, req.GetVlogId(), v.Length()); err != nil {
-		return nil, err
-	}
 	return &pb.WriteVlogResponse{Offset: uint32(offset)}, nil
 }
 
@@ -1472,6 +1469,14 @@ func (s *Server) CommitVlog(ctx context.Context, req *pb.CommitVlogRequest) (*pb
 	defer s.vlogMu.Unlock()
 	for _, vlog := range s.vlogs {
 		if err := vlog.Commit(ctx, req.GetTxnId()); err != nil {
+			return nil, err
+		}
+	}
+	// Publish lengths only after every vlog's bytes are durable. If a commit
+	// fails, recovery may safely trim physical tails back to the older catalog
+	// lengths; the catalog must never get ahead of disk.
+	for id, vlog := range s.vlogs {
+		if err := s.db.SetVlogLength(ctx, id, vlog.Length()); err != nil {
 			return nil, err
 		}
 	}
