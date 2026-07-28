@@ -372,6 +372,33 @@ func TestRenameOpenUncommittedHandle(t *testing.T) {
 	}
 }
 
+func TestRenameDirectoryRetargetsOpenDescendantHandle(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	if _, err := s.Mkdir(ctx, &pb.MkdirRequest{Path: "/old"}); err != nil {
+		t.Fatal(err)
+	}
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/old/file", OperationKey: "rename-dir-open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte("pending")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Rename(ctx, &pb.RenameRequest{OldPath: "/old", NewPath: "/new"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(t, s, "/new/file"); !bytes.Equal(got, []byte("pending")) {
+		t.Fatalf("renamed descendant got %q, want %q", got, "pending")
+	}
+	if _, ok, _ := statPath(t, s, "/old/file"); ok {
+		t.Fatal("close resurrected open descendant under old directory")
+	}
+}
+
 // statPath reports whether a path resolves, via Getattr.
 func statPath(t *testing.T, s *server.Server, path string) (int64, bool, error) {
 	t.Helper()

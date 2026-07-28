@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -184,16 +185,23 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 	return &pb.RenameResponse{}, nil
 }
 
-// retargetOpenHandles repoints every open handle for oldPath at newPath so that
-// pending writes commit under the new name. It reports whether any handle
-// matched. The caller must hold no handle lock.
+// retargetOpenHandles repoints every open handle for oldPath, or below oldPath
+// when it is a directory, so pending writes follow the namespace rename rather
+// than recreating an entry below the old name on Close. It reports whether any
+// handle matched. The caller must hold no handle lock.
 func (s *Server) retargetOpenHandles(oldPath, newPath string) bool {
 	s.handlesMu.Lock()
 	defer s.handlesMu.Unlock()
 	found := false
 	for _, h := range s.handles {
-		if h.path() == oldPath {
+		path := h.path()
+		if path == oldPath {
 			h.setPath(newPath)
+			found = true
+			continue
+		}
+		if strings.HasPrefix(path, oldPath+"/") {
+			h.setPath(newPath + strings.TrimPrefix(path, oldPath))
 			found = true
 		}
 	}
