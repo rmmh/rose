@@ -46,6 +46,11 @@ func TestCommitFileTransfersChunkRefs(t *testing.T) {
 	if _, err := db.CommitFile(ctx, "bucket/bad-length", 1, []ChunkPlacement{badLength}); err == nil {
 		t.Fatal("commit with a negative logical chunk length succeeded")
 	}
+	badOffset := a
+	badOffset.VaddrOffset = -1
+	if _, err := db.CommitFile(ctx, "bucket/bad-offset", 1, []ChunkPlacement{badOffset}); err == nil {
+		t.Fatal("commit with a negative virtual-log offset succeeded")
+	}
 
 	if _, err := db.CommitFile(ctx, "bucket/file", 1, []ChunkPlacement{a, b}); err != nil {
 		t.Fatal(err)

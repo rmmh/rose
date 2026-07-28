@@ -373,6 +373,9 @@ func publishFileVersion(ctx context.Context, tx *sql.Tx, path string, mtime int6
 		if p.LogicalLen < 0 || uint64(p.LogicalLen) > math.MaxUint32 {
 			return 0, fmt.Errorf("chunk placement %d has logical length %d outside uint32 range", i, p.LogicalLen)
 		}
+		if p.VaddrOffset < 0 {
+			return 0, fmt.Errorf("chunk placement %d has negative virtual-log offset %d", i, p.VaddrOffset)
+		}
 		chunks = append(chunks, p.Hash...)
 		binary.LittleEndian.PutUint32(lenBytes, uint32(p.LogicalLen))
 		chunks = append(chunks, lenBytes...)
