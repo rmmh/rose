@@ -52,6 +52,12 @@ func ancestorsOf(path string) []string {
 // not already have one, within the given transaction.
 func ensureDirs(ctx context.Context, tx *sql.Tx, path string, mtime int64) error {
 	for _, dir := range ancestorsOf(path) {
+		var fileID int64
+		if err := tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", dir).Scan(&fileID); err == nil {
+			return fmt.Errorf("file %q cannot be used as a parent directory", dir)
+		} else if err != sql.ErrNoRows {
+			return fmt.Errorf("check parent %q: %w", dir, err)
+		}
 		parent, name := splitPath(dir)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO dir (path, parent, name, mtime)
 			VALUES (?, ?, ?, ?) ON CONFLICT(path) DO NOTHING`, dir, parent, name, mtime); err != nil {

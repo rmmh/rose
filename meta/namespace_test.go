@@ -157,6 +157,27 @@ func TestCommitFileRejectsDirectoryPath(t *testing.T) {
 	}
 }
 
+func TestCommitFileRejectsFileAncestor(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	commitEmptyFile(t, db, "ancestor")
+
+	if _, err := db.CommitFile(ctx, "ancestor/child", 2, nil); err == nil {
+		t.Fatal("nested file commit below file ancestor succeeded")
+	}
+	entry, ok, err := db.StatPath(ctx, "ancestor")
+	if err != nil || !ok || entry.IsDir {
+		t.Fatalf("file ancestor changed after rejected commit: entry=%+v ok=%v err=%v", entry, ok, err)
+	}
+	if child, ok, err := db.StatPath(ctx, "ancestor/child"); err != nil || ok {
+		t.Fatalf("child exists after rejected commit: entry=%+v ok=%v err=%v", child, ok, err)
+	}
+}
+
 func TestRenameDirectorySubtree(t *testing.T) {
 	db, err := OpenEphemeral()
 	if err != nil {
