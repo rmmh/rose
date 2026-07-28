@@ -294,4 +294,19 @@ func TestWebDAVFileModes(t *testing.T) {
 	if string(got) != "newXinal!" {
 		t.Fatalf("seeked write produced %q, want %q", got, "newXinal!")
 	}
+
+	statWrite, err := fs.OpenFile(ctx, "/file", os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := statWrite.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != int64(len("newXinal!")) {
+		t.Fatalf("writable handle size = %d, want %d", info.Size(), len("newXinal!"))
+	}
+	if err := statWrite.Close(); err != nil {
+		t.Fatal(err)
+	}
 }

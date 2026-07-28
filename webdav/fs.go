@@ -286,7 +286,7 @@ func (f *roseFile) Readdir(count int) ([]os.FileInfo, error) {
 
 func (f *roseFile) Stat() (os.FileInfo, error) {
 	if f.writing {
-		return fileInfo{name: base(f.path), size: f.writeOff, mtime: time.Now().UnixNano()}, nil
+		return fileInfo{name: base(f.path), size: f.size, mtime: time.Now().UnixNano()}, nil
 	}
 	return fileInfo{name: base(f.path), size: f.size, mtime: f.mtime, isDir: f.isDir}, nil
 }
