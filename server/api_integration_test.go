@@ -129,6 +129,23 @@ func TestWriteOperationRetriesOpenWriteAndClose(t *testing.T) {
 	}
 }
 
+func TestCommittedWriteRetryFollowsRename(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/temporary", OperationKey: "rename-retry"})
+	require.NoError(t, err)
+	_, err = s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte("content")})
+	require.NoError(t, err)
+	_, err = s.Rename(ctx, &pb.RenameRequest{OldPath: "/temporary", NewPath: "/final"})
+	require.NoError(t, err)
+	_, err = s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle(), IdempotencyKey: "rename-retry"})
+	require.NoError(t, err)
+
+	retry, err := s.Open(ctx, &pb.OpenRequest{Path: "/final", OperationKey: "rename-retry"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(len("content")), retry.GetAcknowledgedOffset())
+}
+
 func TestFileSnapshotNamespaceLifecycleOverGRPC(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()

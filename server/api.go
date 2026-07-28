@@ -106,7 +106,7 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 		if err != nil {
 			return nil, err
 		}
-		if op.Path != path {
+		if op.Path != path && !(op.State == meta.WriteOpCommitted && op.FileID == id) {
 			return nil, fmt.Errorf("write operation key is already bound to %q", op.Path)
 		}
 		h.writeOpID, h.writeKey = op.ID, op.IdempotencyKey
