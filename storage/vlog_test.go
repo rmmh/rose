@@ -50,6 +50,12 @@ func (s *simulatedPlogClient) Read(ctx context.Context, offset int64, length int
 
 // TestVlog_DeterministicSimulation_Duplicate tests DUPLICATE replication
 func TestVlog_DeterministicSimulation_Duplicate(t *testing.T) {
+	for _, scheme := range []string{"NONE", "DUPLICATE"} {
+		if _, err := NewVlog(1, scheme, 0, 0, nil, 0); err == nil {
+			t.Fatalf("%s vlog with no physical clients succeeded", scheme)
+		}
+	}
+
 	seed := int64(1337)
 
 	var clients []PlogClient
