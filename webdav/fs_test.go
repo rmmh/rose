@@ -216,4 +216,29 @@ func TestWebDAVFileModes(t *testing.T) {
 		}
 		t.Fatalf("exclusive create of existing file error = %v, want exists", err)
 	}
+
+	overwrite, err := fs.OpenFile(ctx, "/file", os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := overwrite.Write([]byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if err := overwrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+	check, err := fs.OpenFile(ctx, "/file", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(check)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := check.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "newginal" {
+		t.Fatalf("write open without O_TRUNC produced %q, want %q", got, "newginal")
+	}
 }
