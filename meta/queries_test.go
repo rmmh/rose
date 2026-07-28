@@ -5,6 +5,8 @@ import (
 	"context"
 	"math"
 	"testing"
+
+	"github.com/rmmh/rose/uid"
 )
 
 func testChunkPlacement(fill byte, logicalLen int, vlogID uint32, vaddrOffset int64, compressedLen int) ChunkPlacement {
@@ -123,5 +125,21 @@ func TestCommitFileCountsRepeatedChunkRefs(t *testing.T) {
 		t.Fatal("ChunkByHash did not find committed chunk")
 	} else if got.VlogID != a.VlogID || got.VaddrOffset != a.VaddrOffset || got.LogicalLen != a.LogicalLen || got.CompressedLen != a.CompressedLen {
 		t.Fatalf("ChunkByHash() = %+v, want %+v", got, a)
+	}
+}
+
+func TestCatalogLengthValidation(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	vlogID, err := db.MakeVlog(ctx, uid.New(), "NONE", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetVlogLength(ctx, vlogID, -1); err == nil {
+		t.Fatal("negative virtual-log length persisted")
 	}
 }

@@ -262,6 +262,9 @@ func (d *DB) VlogUsages(ctx context.Context) ([]VlogUsage, error) {
 }
 
 func (d *DB) SetVlogLength(ctx context.Context, vlogID uint32, length int64) error {
+	if length < 0 {
+		return fmt.Errorf("set vlog %d length: negative length %d", vlogID, length)
+	}
 	_, err := d.db.ExecContext(ctx, "UPDATE vlog SET length = ? WHERE id = ?", length, vlogID)
 	return err
 }
