@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"testing"
 
@@ -396,6 +397,40 @@ func TestRenameDirectoryRetargetsOpenDescendantHandle(t *testing.T) {
 	}
 	if _, ok, _ := statPath(t, s, "/old/file"); ok {
 		t.Fatal("close resurrected open descendant under old directory")
+	}
+}
+
+func TestWriteRejectsInvalidRangesWithoutPanicking(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/ranges"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, off := range []int64{-1, math.MaxInt64} {
+		if _, err := s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Offset: off, Buffer: []byte("xx")}); err == nil {
+			t.Fatalf("write offset %d succeeded", off)
+		}
+	}
+}
+
+func TestReadRejectsInvalidRangesWithoutPanicking(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	writeAt(t, s, "/ranges-read", -1, [][2]any{{0, []byte("contents")}})
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/ranges-read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []pb.ReadRequest{
+		{Handle: open.GetHandle(), Offset: -1, Length: 1},
+		{Handle: open.GetHandle(), Offset: 0, Length: -1},
+		{Handle: open.GetHandle(), Offset: math.MaxInt64, Length: 2},
+	}
+	for _, req := range tests {
+		if _, err := s.Read(ctx, &req); err == nil {
+			t.Fatalf("read offset=%d length=%d succeeded", req.GetOffset(), req.GetLength())
+		}
 	}
 }
 
