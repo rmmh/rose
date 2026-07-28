@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -373,6 +374,10 @@ func (s *Server) Recover(ctx context.Context) error {
 				continue
 			}
 			return fmt.Errorf("recover plog %d on disk %d: %w", info.ID, info.DiskID, err)
+		}
+		if !bytes.Equal(plog.Header().GetClusterUid(), s.clusterUID[:]) {
+			_ = plog.Close()
+			return fmt.Errorf("recover plog %d on disk %d: superblock belongs to another cluster", info.ID, info.DiskID)
 		}
 		plogByID[info.ID] = plog
 	}

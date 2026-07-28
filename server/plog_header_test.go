@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/rmmh/rose/meta"
+	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/storage"
 )
 
@@ -126,5 +127,30 @@ func TestPlogSuperblockMembership(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(roots[id], diskUIDMarker)); err != nil {
 			t.Errorf("disk %d missing rose_disk_uid marker: %v", id, err)
 		}
+	}
+
+	// A valid same-numbered plog from another cluster must not be adopted merely
+	// because its filename and embedded plog id match this catalog.
+	victim := members[0].PlogID
+	victimPath := s.plogPath(diskOf[victim], victim)
+	if err := os.Remove(victimPath); err != nil {
+		t.Fatal(err)
+	}
+	foreignCluster := append([]byte(nil), clusterUID[:]...)
+	foreignCluster[0] ^= 0xff
+	foreign, err := storage.OpenPlog(victimPath, victim, storage.WithHeader(&pb.PlogHeader{
+		ClusterUid: foreignCluster,
+		PlogId:     victim,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := foreign.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered := NewServerWithDiskRoots(db, roots)
+	if err := recovered.Recover(ctx); err == nil {
+		recovered.CloseStorage()
+		t.Fatal("recovery adopted a plog from another cluster")
 	}
 }
