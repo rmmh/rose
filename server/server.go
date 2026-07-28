@@ -384,7 +384,14 @@ func (s *Server) Recover(ctx context.Context) error {
 			_ = plog.Close()
 			return fmt.Errorf("recover plog %d on disk %d: load disk identity: %w", info.ID, info.DiskID, err)
 		}
-		if !bytes.Equal(plog.Header().GetDiskUid(), diskUID[:]) {
+		// Plogs created before the disk catalog was initialized carry the zero
+		// UID as an absent stamp. Keep accepting those; only an explicit,
+		// nonzero identity can contradict the disk that contains the plog.
+		var zeroUID uid.UID
+		headerDiskUID := plog.Header().GetDiskUid()
+		if len(headerDiskUID) != 0 &&
+			!bytes.Equal(headerDiskUID, zeroUID[:]) &&
+			!bytes.Equal(headerDiskUID, diskUID[:]) {
 			_ = plog.Close()
 			return fmt.Errorf("recover plog %d on disk %d: superblock belongs to another disk", info.ID, info.DiskID)
 		}
