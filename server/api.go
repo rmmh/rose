@@ -357,7 +357,11 @@ func (s *Server) readChunksAt(ctx context.Context, chunks []meta.ChunkPlacement,
 	if length <= 0 {
 		return nil, nil
 	}
-	out := make([]byte, 0, length)
+	// The requested length may be much larger than the bytes available before
+	// EOF. Never use the untrusted request directly as an allocation capacity.
+	const readPreallocLimit = int64(1 << 20)
+	capacity := min(length, readPreallocLimit)
+	out := make([]byte, 0, int(capacity))
 	var cur int64
 	for _, chunk := range chunks {
 		end := cur + int64(chunk.LogicalLen)

@@ -465,6 +465,26 @@ func TestReadRejectsInvalidRangesWithoutPanicking(t *testing.T) {
 	}
 }
 
+func TestHugeReadLengthStopsAtCommittedEOF(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	writeAt(t, s, "/huge-read", -1, [][2]any{{0, []byte("contents")}})
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/huge-read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Read(ctx, &pb.ReadRequest{
+		Handle: open.GetHandle(),
+		Length: math.MaxInt64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.GetBuffer(), []byte("contents")) {
+		t.Fatalf("huge read returned %q, want contents", got.GetBuffer())
+	}
+}
+
 func TestZeroLengthWriteDoesNotExtendFile(t *testing.T) {
 	ctx := context.Background()
 	s := newServer(t)
