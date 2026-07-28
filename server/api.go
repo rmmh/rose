@@ -279,6 +279,15 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 }
 
 func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
+	if req.GetOffset() < 0 {
+		return nil, fmt.Errorf("negative read offset")
+	}
+	if req.GetLength() < 0 {
+		return nil, fmt.Errorf("negative read length")
+	}
+	if req.GetLength() > math.MaxInt64-req.GetOffset() {
+		return nil, fmt.Errorf("read range overflows int64")
+	}
 	s.handlesMu.Lock()
 	h, ok := s.handles[req.GetHandle()]
 	s.handlesMu.Unlock()
