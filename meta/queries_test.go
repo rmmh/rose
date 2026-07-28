@@ -155,4 +155,7 @@ func TestCatalogLengthValidation(t *testing.T) {
 	if err := db.SetPlogLength(ctx, ^uint32(0), 1); err == nil {
 		t.Fatal("physical-log length update for a missing row succeeded")
 	}
+	if err := db.AssignPlogToVlog(ctx, vlogID, -1, plogID); err == nil {
+		t.Fatal("negative shard index persisted")
+	}
 }

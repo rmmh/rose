@@ -302,6 +302,9 @@ func (d *DB) SetPlogLength(ctx context.Context, plogID uint32, length int64) err
 
 // AssignPlogToVlog maps a plog to a shard of a vlog.
 func (d *DB) AssignPlogToVlog(ctx context.Context, vlogID uint32, shardIdx int, plogID uint32) error {
+	if shardIdx < 0 {
+		return fmt.Errorf("assign plog %d to vlog %d: negative shard index %d", plogID, vlogID, shardIdx)
+	}
 	_, err := d.db.ExecContext(ctx, "INSERT INTO vlog_plog (vlog_id, shard_idx, plog_id) VALUES (?, ?, ?)", vlogID, shardIdx, plogID)
 	return err
 }
