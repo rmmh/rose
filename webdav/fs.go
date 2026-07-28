@@ -99,6 +99,7 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 	path := clean(name)
 	writing := flag&(os.O_WRONLY|os.O_RDWR) != 0
 	if writing {
+		var writeOff int64
 		if flag&os.O_CREATE != 0 && flag&os.O_EXCL != 0 {
 			if _, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path}); err == nil {
 				return nil, os.ErrExist
@@ -106,6 +107,11 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 		} else if flag&os.O_CREATE == 0 {
 			if _, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path}); err != nil {
 				return nil, os.ErrNotExist
+			}
+		}
+		if flag&os.O_APPEND != 0 {
+			if attr, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path}); err == nil {
+				writeOff = attr.GetSize()
 			}
 		}
 		// Bind a fresh write operation so even a zero-byte PUT publishes a file
@@ -127,6 +133,7 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 			handle:   resp.GetHandle(),
 			writing:  true,
 			readable: flag&os.O_WRONLY == 0,
+			writeOff: writeOff,
 		}, nil
 	}
 
