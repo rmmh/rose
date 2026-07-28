@@ -149,4 +149,10 @@ func TestCatalogLengthValidation(t *testing.T) {
 	if err := db.SetPlogLength(ctx, plogID, -1); err == nil {
 		t.Fatal("negative physical-log length persisted")
 	}
+	if err := db.SetVlogLength(ctx, ^uint32(0), 1); err == nil {
+		t.Fatal("virtual-log length update for a missing row succeeded")
+	}
+	if err := db.SetPlogLength(ctx, ^uint32(0), 1); err == nil {
+		t.Fatal("physical-log length update for a missing row succeeded")
+	}
 }

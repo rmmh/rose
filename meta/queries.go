@@ -265,8 +265,18 @@ func (d *DB) SetVlogLength(ctx context.Context, vlogID uint32, length int64) err
 	if length < 0 {
 		return fmt.Errorf("set vlog %d length: negative length %d", vlogID, length)
 	}
-	_, err := d.db.ExecContext(ctx, "UPDATE vlog SET length = ? WHERE id = ?", length, vlogID)
-	return err
+	res, err := d.db.ExecContext(ctx, "UPDATE vlog SET length = ? WHERE id = ?", length, vlogID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("set vlog %d length: no such vlog", vlogID)
+	}
+	return nil
 }
 
 // SetPlogLength records a logical plog length. Normal byte-backed writes derive
@@ -276,8 +286,18 @@ func (d *DB) SetPlogLength(ctx context.Context, plogID uint32, length int64) err
 	if length < 0 {
 		return fmt.Errorf("set plog %d length: negative length %d", plogID, length)
 	}
-	_, err := d.db.ExecContext(ctx, "UPDATE plog SET length = ? WHERE id = ?", length, plogID)
-	return err
+	res, err := d.db.ExecContext(ctx, "UPDATE plog SET length = ? WHERE id = ?", length, plogID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("set plog %d length: no such plog", plogID)
+	}
+	return nil
 }
 
 // AssignPlogToVlog maps a plog to a shard of a vlog.
