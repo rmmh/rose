@@ -388,6 +388,10 @@ func (s *Server) Recover(ctx context.Context) error {
 			_ = plog.Close()
 			return fmt.Errorf("recover plog %d on disk %d: superblock belongs to another disk", info.ID, info.DiskID)
 		}
+		if !bytes.Equal(plog.Header().GetPlogUid(), info.UID[:]) {
+			_ = plog.Close()
+			return fmt.Errorf("recover plog %d on disk %d: superblock has another plog UID", info.ID, info.DiskID)
+		}
 		plogByID[info.ID] = plog
 	}
 	s.plogs = plogByID
