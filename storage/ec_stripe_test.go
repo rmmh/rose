@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"path/filepath"
 	"testing"
@@ -80,6 +81,9 @@ func TestECStripeRoundTrip(t *testing.T) {
 		if !bytes.Equal(got, src[c.off:c.off+c.n]) {
 			t.Fatalf("read [%d,+%d) mismatch", c.off, c.n)
 		}
+	}
+	if _, err := v.Read(ctx, math.MaxInt64, 1); err == nil {
+		t.Fatal("overflowing EC read range succeeded")
 	}
 }
 

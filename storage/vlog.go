@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -318,6 +319,16 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) er
 
 // Read reads logical 'length' bytes starting from logical 'offset' in the Virtual Log.
 func (v *Vlog) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
+	if offset < 0 || length < 0 {
+		return nil, fmt.Errorf("vlog %d read: invalid offset %d length %d", v.id, offset, length)
+	}
+	if int64(length) > math.MaxInt64-offset {
+		return nil, fmt.Errorf("vlog %d read: range overflows int64", v.id)
+	}
+	end := offset + int64(length)
+	if end > v.Length() {
+		return nil, fmt.Errorf("vlog %d read past end: %d > %d", v.id, end, v.Length())
+	}
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
 		// Try reading from the first available client
 		var lastErr error
@@ -332,15 +343,11 @@ func (v *Vlog) Read(ctx context.Context, offset int64, length int) ([]byte, erro
 	}
 
 	if v.scheme == "EC" {
-		if offset < 0 || length < 0 {
-			return nil, fmt.Errorf("EC vlog %d read: invalid offset %d length %d", v.id, offset, length)
-		}
 		// Walk the request one stripe row at a time. Within a row the logical bytes
 		// map to contiguous slices of the data columns, so the healthy path reads
 		// only the data plogs the range actually touches -- not every shard.
 		sw := v.stripeWidth()
 		out := make([]byte, 0, length)
-		end := offset + int64(length)
 		for cur := offset; cur < end; {
 			row := cur / sw
 			rowEnd := (row + 1) * sw
