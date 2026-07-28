@@ -84,6 +84,11 @@ func TestCommitFileTransfersChunkRefs(t *testing.T) {
 	if _, err := db.CommitFile(ctx, "bucket/file", 2, []ChunkPlacement{a, c}); err != nil {
 		t.Fatal(err)
 	}
+	conflictingA := a
+	conflictingA.LogicalLen++
+	if _, err := db.CommitFile(ctx, "bucket/hash-collision", 3, []ChunkPlacement{conflictingA}); err == nil {
+		t.Fatal("commit reused a hash with conflicting placement geometry")
+	}
 
 	if got := chunkRefcount(t, db, a.Hash); got != 1 {
 		t.Fatalf("refcount(A) = %d, want 1", got)

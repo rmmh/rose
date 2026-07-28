@@ -312,10 +312,22 @@ func upsertChunkRefs(ctx context.Context, tx *sql.Tx, placements []ChunkPlacemen
 			sqlText.WriteString("(?, 1, ?, ?, ?, ?)")
 			args = append(args, p.Hash, p.VlogID, p.VaddrOffset, p.LogicalLen, p.CompressedLen)
 		}
-		sqlText.WriteString(" ON CONFLICT(hash) DO UPDATE SET refcount = refcount + 1")
+		sqlText.WriteString(` ON CONFLICT(hash) DO UPDATE SET refcount = chunk.refcount + 1
+			WHERE chunk.vlog_id = excluded.vlog_id
+			  AND chunk.vaddr_offset = excluded.vaddr_offset
+			  AND chunk.logical_len = excluded.logical_len
+			  AND chunk.compressed_len = excluded.compressed_len`)
 
-		if _, err := tx.ExecContext(ctx, sqlText.String(), args...); err != nil {
+		res, err := tx.ExecContext(ctx, sqlText.String(), args...)
+		if err != nil {
 			return fmt.Errorf("upsert chunk refs batch %d-%d: %w", start, end, err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count upserted chunk refs batch %d-%d: %w", start, end, err)
+		}
+		if affected != int64(len(batch)) {
+			return fmt.Errorf("chunk hash reused with conflicting placement geometry in batch %d-%d", start, end)
 		}
 	}
 	return nil
