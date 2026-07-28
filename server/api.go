@@ -317,6 +317,9 @@ func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRespons
 		slog.Error("Read failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
 	}
+	if err := s.refreshCommittedHandle(ctx, h); err != nil {
+		return nil, err
+	}
 
 	// A writable handle reads through its cache, so it sees its own uncommitted
 	// writes (read-your-writes) overlaid on the opened version.
@@ -425,6 +428,11 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 		s.handlesMu.Lock()
 		h, ok := s.handles[req.GetHandle()]
 		s.handlesMu.Unlock()
+		if ok {
+			if err := s.refreshCommittedHandle(ctx, h); err != nil {
+				return nil, err
+			}
+		}
 		if ok && h.cache != nil {
 			return &pb.GetattrResponse{Size: h.cache.Length(), Mtime: h.mtimeOrNow()}, nil
 		}
@@ -449,6 +457,33 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 		return nil, fmt.Errorf("path not found: %q", req.GetPath())
 	}
 	return &pb.GetattrResponse{Size: entry.Size, IsDir: entry.IsDir, Mtime: entry.Mtime}, nil
+}
+
+// refreshCommittedHandle makes a duplicate retry handle converge after another
+// handle for the same operation publishes. Until commit, each retry may carry a
+// private replay cache; afterward the immutable committed version is canonical.
+func (s *Server) refreshCommittedHandle(ctx context.Context, h *FileHandle) error {
+	if h.writeOpID == 0 || h.cache == nil {
+		return nil
+	}
+	mu := s.writeOperationLock(h.writeOpID)
+	mu.Lock()
+	defer mu.Unlock()
+	op, err := s.db.WriteOpByKey(ctx, h.writeKey)
+	if err != nil {
+		return err
+	}
+	if op.State != meta.WriteOpCommitted {
+		return nil
+	}
+	chunks, err := s.db.FileVersionChunks(ctx, op.FileID)
+	if err != nil {
+		return err
+	}
+	h.id = op.FileID
+	h.chunks = chunks
+	h.cache = nil
+	return nil
 }
 
 // Setattr applies metadata-only changes to an existing path. Today the only

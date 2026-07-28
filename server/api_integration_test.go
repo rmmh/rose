@@ -109,6 +109,20 @@ func TestWriteOperationRetriesOpenWriteAndClose(t *testing.T) {
 	if _, err := client.Close(ctx, &pb.CloseRequest{Handle: first.GetHandle(), IdempotencyKey: "op-retry"}); err != nil {
 		t.Fatal(err)
 	}
+	peerRead, err := client.Read(ctx, &pb.ReadRequest{Handle: second.GetHandle(), Length: int64(len(data))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(peerRead.GetBuffer(), data) {
+		t.Fatalf("retry handle stayed stale after peer commit: got %d bytes", len(peerRead.GetBuffer()))
+	}
+	peerAttr, err := client.Getattr(ctx, &pb.GetattrRequest{Path: "/retry", Handle: second.GetHandle()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if peerAttr.GetSize() != int64(len(data)) {
+		t.Fatalf("retry handle size after peer commit = %d, want %d", peerAttr.GetSize(), len(data))
+	}
 	retriedOpen, err := client.Open(ctx, &pb.OpenRequest{Path: "/retry", OperationKey: "op-retry"})
 	if err != nil {
 		t.Fatal(err)
