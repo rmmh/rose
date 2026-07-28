@@ -266,4 +266,32 @@ func TestWebDAVFileModes(t *testing.T) {
 	if string(got) != "newginal!" {
 		t.Fatalf("append produced %q, want %q", got, "newginal!")
 	}
+
+	seekWrite, err := fs.OpenFile(ctx, "/file", os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seekWrite.Seek(3, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seekWrite.Write([]byte("X")); err != nil {
+		t.Fatal(err)
+	}
+	if err := seekWrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+	check, err = fs.OpenFile(ctx, "/file", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = io.ReadAll(check)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := check.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "newXinal!" {
+		t.Fatalf("seeked write produced %q, want %q", got, "newXinal!")
+	}
 }

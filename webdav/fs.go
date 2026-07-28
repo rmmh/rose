@@ -99,20 +99,21 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 	path := clean(name)
 	writing := flag&(os.O_WRONLY|os.O_RDWR) != 0
 	if writing {
-		var writeOff int64
-		if flag&os.O_CREATE != 0 && flag&os.O_EXCL != 0 {
-			if _, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path}); err == nil {
-				return nil, os.ErrExist
-			}
-		} else if flag&os.O_CREATE == 0 {
-			if _, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path}); err != nil {
-				return nil, os.ErrNotExist
-			}
+		attr, statErr := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path})
+		exists := statErr == nil
+		if flag&os.O_CREATE != 0 && flag&os.O_EXCL != 0 && exists {
+			return nil, os.ErrExist
 		}
+		if flag&os.O_CREATE == 0 && !exists {
+			return nil, os.ErrNotExist
+		}
+		var size int64
+		if exists {
+			size = attr.GetSize()
+		}
+		var writeOff int64
 		if flag&os.O_APPEND != 0 {
-			if attr, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path}); err == nil {
-				writeOff = attr.GetSize()
-			}
+			writeOff = size
 		}
 		// Bind a fresh write operation so even a zero-byte PUT publishes a file
 		// head on Close.
@@ -125,6 +126,7 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 			if _, err := f.srv.Truncate(ctx, &pb.TruncateRequest{Handle: resp.GetHandle(), Size: 0}); err != nil {
 				return nil, err
 			}
+			size = 0
 		}
 		return &roseFile{
 			ctx:      ctx,
@@ -133,6 +135,7 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 			handle:   resp.GetHandle(),
 			writing:  true,
 			readable: flag&os.O_WRONLY == 0,
+			size:     size,
 			writeOff: writeOff,
 		}, nil
 	}
@@ -199,6 +202,9 @@ func (f *roseFile) Read(p []byte) (int, error) {
 	}
 	n := copy(p, resp.GetBuffer())
 	f.offset += int64(n)
+	if f.writing {
+		f.writeOff = f.offset
+	}
 	return n, nil
 }
 
@@ -210,16 +216,26 @@ func (f *roseFile) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	f.writeOff += int64(len(p))
+	if f.writeOff > f.size {
+		f.size = f.writeOff
+	}
+	if f.readable {
+		f.offset = f.writeOff
+	}
 	return len(p), nil
 }
 
 func (f *roseFile) Seek(offset int64, whence int) (int64, error) {
+	current := f.offset
+	if f.writing {
+		current = f.writeOff
+	}
 	var abs int64
 	switch whence {
 	case io.SeekStart:
 		abs = offset
 	case io.SeekCurrent:
-		abs = f.offset + offset
+		abs = current + offset
 	case io.SeekEnd:
 		abs = f.size + offset
 	default:
@@ -229,6 +245,9 @@ func (f *roseFile) Seek(offset int64, whence int) (int64, error) {
 		return 0, fmt.Errorf("negative seek position")
 	}
 	f.offset = abs
+	if f.writing {
+		f.writeOff = abs
+	}
 	return abs, nil
 }
 
