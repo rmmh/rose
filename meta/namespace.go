@@ -79,10 +79,12 @@ func ensureDirs(ctx context.Context, tx *sql.Tx, path string, mtime int64) error
 func (d *DB) ListDir(ctx context.Context, dir string) ([]DirEntry, error) {
 	dir = cleanPath(dir)
 	if dir != "" {
-		if _, exists, err := d.StatPath(ctx, dir); err != nil {
+		if entry, exists, err := d.StatPath(ctx, dir); err != nil {
 			return nil, err
 		} else if !exists {
 			return nil, fmt.Errorf("list directory %q: path not found", dir)
+		} else if !entry.IsDir {
+			return nil, fmt.Errorf("list directory %q: path is a regular file", dir)
 		}
 	}
 	var out []DirEntry

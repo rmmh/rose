@@ -65,6 +65,9 @@ func TestListDirReturnsImmediateChildrenOnly(t *testing.T) {
 	if _, err := db.ListDir(ctx, "missing"); err == nil {
 		t.Fatal("ListDir of a missing path succeeded")
 	}
+	if _, err := db.ListDir(ctx, "bucket/a.txt"); err == nil {
+		t.Fatal("ListDir of a regular file succeeded")
+	}
 }
 
 func TestCommitFileCreatesAncestorDirs(t *testing.T) {
