@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
+	"math"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -231,6 +232,12 @@ func (s *Server) DeleteSnapshot(ctx context.Context, req *pb.DeleteSnapshotReque
 }
 
 func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
+	if req.GetOffset() < 0 {
+		return nil, fmt.Errorf("negative write offset")
+	}
+	if int64(len(req.GetBuffer())) > math.MaxInt64-req.GetOffset() {
+		return nil, fmt.Errorf("write range overflows int64")
+	}
 	s.handlesMu.Lock()
 	h, ok := s.handles[req.GetHandle()]
 	s.handlesMu.Unlock()
