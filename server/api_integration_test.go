@@ -203,6 +203,48 @@ func TestPreparedWriteRetryFollowsRename(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestUnlinkCancelsPreparedWriteAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta.db")
+	dataDir := filepath.Join(dir, "plogs")
+	db, err := meta.Open(metaPath)
+	require.NoError(t, err)
+	ctx := context.Background()
+	before := server.NewServerWithDataDir(db, dataDir)
+	before.SetMaintenanceInterval(0)
+	require.NoError(t, before.Recover(ctx))
+
+	open, err := before.Open(ctx, &pb.OpenRequest{Path: "/unlinked-retry"})
+	require.NoError(t, err)
+	_, err = before.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte("committed")})
+	require.NoError(t, err)
+	_, err = before.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()})
+	require.NoError(t, err)
+	_, err = before.Open(ctx, &pb.OpenRequest{
+		Path: "/unlinked-retry", OperationKey: "unlinked-prepared-op",
+	})
+	require.NoError(t, err)
+	before.CloseStorage()
+	require.NoError(t, db.Close())
+
+	reopened, err := meta.Open(metaPath)
+	require.NoError(t, err)
+	defer reopened.Close()
+	after := server.NewServerWithDataDir(reopened, dataDir)
+	after.SetMaintenanceInterval(0)
+	require.NoError(t, after.Recover(ctx))
+	defer after.StopMaintenanceDriver()
+	_, err = after.Unlink(ctx, &pb.UnlinkRequest{Path: "/unlinked-retry"})
+	require.NoError(t, err)
+
+	_, err = after.Open(ctx, &pb.OpenRequest{
+		Path: "/unlinked-retry", OperationKey: "unlinked-prepared-op",
+	})
+	if err == nil {
+		t.Fatal("prepared write retry reopened a name removed while its client was disconnected")
+	}
+}
+
 func TestMkdirCannotOverlapPendingFile(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()

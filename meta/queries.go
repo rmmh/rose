@@ -814,15 +814,25 @@ func (d *DB) SnapshotFileMtime(ctx context.Context, snapshotID uint64, path stri
 }
 
 func (d *DB) UnlinkFile(ctx context.Context, path string) error {
+	path = cleanPath(path)
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vlog_lease WHERE write_op_id IN (
+		SELECT id FROM write_op WHERE path = ? AND state = ?
+	)`, path, WriteOpPrepared); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE write_op SET state = ? WHERE path = ? AND state = ?",
+		WriteOpCancelled, path, WriteOpPrepared); err != nil {
+		return err
+	}
 	var fileID int64
 	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", path).Scan(&fileID)
 	if err == sql.ErrNoRows {
-		return nil
+		return tx.Commit()
 	}
 	if err != nil {
 		return err
