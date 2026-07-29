@@ -740,6 +740,49 @@ func TestReplaceDiskUsesPreAttachedEmptyDestination(t *testing.T) {
 	}
 }
 
+func TestReplaceDiskRetryFinishesDetachedRunningJob(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	srv := server.NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
+	srv.SetMaintenanceInterval(0)
+	if err := srv.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.StopMaintenanceDriver()
+	if _, err := srv.AddDisk(ctx, &pb.AddDiskRequest{DiskId: 2, NodeId: 2}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetOrCreateReplaceJob(ctx, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.SetDiskState(ctx, 1, meta.DiskDetached); err != nil {
+		t.Fatal(err)
+	}
+
+	retry, err := srv.ReplaceDisk(ctx, &pb.ReplaceDiskRequest{
+		OldDiskId: 1, NewDiskId: 2, NodeId: 2,
+	})
+	if err != nil {
+		t.Fatalf("retry did not finish an already-detached replacement: %v", err)
+	}
+	if retry.GetJobId() != uint64(job.ID) {
+		t.Fatalf("ReplaceDisk retry job = %d, want %d", retry.GetJobId(), job.ID)
+	}
+	status, err := srv.GetMaintenanceJob(ctx, &pb.GetMaintenanceJobRequest{JobId: retry.GetJobId()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.GetState() != pb.MaintenanceJobState_MAINTENANCE_JOB_STATE_COMPLETED {
+		t.Fatalf("recovered replacement job state = %s", status.GetState())
+	}
+}
+
 func TestRemoveDiskRetryReturnsCompletedJob(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))

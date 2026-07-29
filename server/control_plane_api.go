@@ -86,8 +86,22 @@ func (s *Server) ReplaceDisk(ctx context.Context, req *pb.ReplaceDiskRequest) (*
 		if err != nil {
 			return nil, err
 		}
-		if exists && job.State == meta.JobDone && job.DestDisk == req.GetNewDiskId() {
-			return &pb.MaintenanceJobResponse{JobId: uint64(job.ID)}, nil
+		if exists && job.DestDisk == req.GetNewDiskId() {
+			if job.State == meta.JobDone {
+				return &pb.MaintenanceJobResponse{JobId: uint64(job.ID)}, nil
+			}
+			if job.State == meta.JobRunning {
+				plogs, err := s.db.PlogsOnDisk(ctx, req.GetOldDiskId())
+				if err != nil {
+					return nil, err
+				}
+				if len(plogs) == 0 {
+					if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
+						return nil, err
+					}
+					return &pb.MaintenanceJobResponse{JobId: uint64(job.ID)}, nil
+				}
+			}
 		}
 	}
 	if state != meta.DiskActive && state != meta.DiskDraining {
