@@ -82,6 +82,9 @@ func TestReapAbandonedWriteOps(t *testing.T) {
 	if len(ops) != 0 {
 		t.Fatalf("expected 0 prepared write ops, got %d", len(ops))
 	}
+	if _, err := s.Open(ctx, &pb.OpenRequest{Path: "/f1", OperationKey: "op-1"}); err == nil {
+		t.Fatal("Open accepted an abandoned write operation key")
+	}
 }
 
 func TestReapStartupGracePeriod(t *testing.T) {

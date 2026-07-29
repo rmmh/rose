@@ -149,8 +149,8 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 		if op.Path != path && !(op.State == meta.WriteOpCommitted && op.FileID == id) {
 			return nil, fmt.Errorf("write operation key is already bound to %q", op.Path)
 		}
-		if op.State == meta.WriteOpCancelled {
-			return nil, fmt.Errorf("write operation key was cancelled")
+		if op.State == meta.WriteOpCancelled || op.State == meta.WriteOpAbandoned {
+			return nil, fmt.Errorf("write operation key is %s", op.State)
 		}
 		h.writeOpID, h.writeKey = op.ID, op.IdempotencyKey
 		if err := s.ensureRecoveryFileID(ctx, h, op); err != nil {
