@@ -714,6 +714,15 @@ func (d *DB) CreateSnapshot(ctx context.Context, name string, createdAt int64) (
 	}
 	defer tx.Rollback()
 
+	var existing uint64
+	err = tx.QueryRowContext(ctx, "SELECT id FROM snapshot WHERE name = ?", name).Scan(&existing)
+	if err == nil {
+		return existing, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+
 	res, err := tx.ExecContext(ctx, "INSERT INTO snapshot (name, created_at) VALUES (?, ?)", name, createdAt)
 	if err != nil {
 		return 0, fmt.Errorf("create snapshot: %w", err)

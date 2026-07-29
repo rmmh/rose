@@ -389,6 +389,22 @@ func TestFileSnapshotNamespaceLifecycleOverGRPC(t *testing.T) {
 	}
 }
 
+func TestCreateSnapshotRetryReturnsOriginalSnapshot(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+	first, err := client.CreateSnapshot(ctx, &pb.CreateSnapshotRequest{Name: "retry-snapshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := client.CreateSnapshot(ctx, &pb.CreateSnapshotRequest{Name: "retry-snapshot"})
+	if err != nil {
+		t.Fatalf("identical CreateSnapshot retry failed: %v", err)
+	}
+	if retry.GetSnapshotId() != first.GetSnapshotId() {
+		t.Fatalf("CreateSnapshot retry id = %d, want %d", retry.GetSnapshotId(), first.GetSnapshotId())
+	}
+}
+
 // TestBucketECFileRoundTrip writes a file into a bucket configured for 3+1
 // erasure coding and reads it back, exercising the file API end to end over EC
 // rather than the default mirror. EC is deferred: the write lands in a replicated
