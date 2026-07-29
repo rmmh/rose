@@ -307,6 +307,7 @@ func (s *Server) Recover(ctx context.Context) error {
 	s.resetDiskStates()
 	for _, d := range disks {
 		if _, ok := s.diskRoots[d.ID]; ok {
+			s.diskNodes[d.ID] = d.NodeID
 			s.diskState[d.ID] = d.State
 		}
 	}

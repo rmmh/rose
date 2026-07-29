@@ -801,6 +801,51 @@ func TestStartReprotectRetryReturnsCompletedJob(t *testing.T) {
 	}
 }
 
+func TestAddedDiskRemainsConfiguredAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta.db")
+	dataDir := filepath.Join(dir, "plogs")
+	db, err := meta.Open(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	before := server.NewServerWithDataDir(db, dataDir)
+	before.SetMaintenanceInterval(0)
+	if err := before.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	req := &pb.AddDiskRequest{DiskId: 2, NodeId: 7, TotalBytes: 1 << 30}
+	if _, err := before.AddDisk(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	before.CloseStorage()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := meta.Open(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	after := server.NewServerWithDataDir(reopened, dataDir)
+	after.SetMaintenanceInterval(0)
+	if err := after.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer after.StopMaintenanceDriver()
+	if state := after.DiskStates()[2]; state != meta.DiskActive {
+		t.Fatalf("added disk state after restart = %q, want active", state)
+	}
+	if state := after.NodeStates()[7]; state != meta.NodeWorking {
+		t.Fatalf("added disk node state after restart = %q, want working", state)
+	}
+	if _, err := after.AddDisk(ctx, req); err != nil {
+		t.Fatalf("AddDisk retry after restart failed: %v", err)
+	}
+}
+
 func TestVlogCommitControlsRecoveredLength(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))

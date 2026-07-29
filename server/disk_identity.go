@@ -76,6 +76,29 @@ func (s *Server) reconcileDiskRoots(ctx context.Context) error {
 			idByUID[d.UID] = d.ID
 		}
 	}
+	// AddDisk uses deterministic dataDir-relative roots. Re-adopt one after a
+	// restart only when its on-disk marker matches the catalog UID, so an
+	// unrelated directory can never impersonate a dynamically added disk.
+	for _, d := range disks {
+		if _, configured := s.diskRoots[d.ID]; configured {
+			continue
+		}
+		root := filepath.Join(s.dataDir, fmt.Sprintf("disk-%d", d.ID))
+		raw, err := os.ReadFile(filepath.Join(root, diskUIDMarker))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read dynamic disk uid marker %q: %w", root, err)
+		}
+		markerUID, err := uid.Parse(strings.TrimSpace(string(raw)))
+		if err != nil {
+			return fmt.Errorf("parse dynamic disk uid marker %q: %w", root, err)
+		}
+		if markerUID == d.UID {
+			s.diskRoots[d.ID] = root
+		}
+	}
 
 	reconciled := make(map[uint32]string, len(s.diskRoots))
 	register := func(id uint32, u uid.UID) error {
