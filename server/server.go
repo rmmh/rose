@@ -390,6 +390,23 @@ func (s *Server) Recover(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	completeVlogs := vlogInfos[:0]
+	for _, info := range vlogInfos {
+		mappings, err := s.db.ListVlogPlogs(ctx, info.ID)
+		if err != nil {
+			return err
+		}
+		if len(mappings) == 0 && info.Length == 0 {
+			// Provisioning records the vlog before its first shard. A process
+			// crash in that window leaves no bytes or mappings to recover.
+			if err := s.db.DiscardEmptyVlog(ctx, info.ID); err != nil {
+				return fmt.Errorf("discard incomplete vlog %d during recovery: %w", info.ID, err)
+			}
+			continue
+		}
+		completeVlogs = append(completeVlogs, info)
+	}
+	vlogInfos = completeVlogs
 	// A present file can still be unusable after a torn catch-up or media
 	// truncation. Treat a shard shorter than the committed vlog length exactly
 	// like a missing shard so recover can mount surviving redundancy degraded.

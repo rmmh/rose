@@ -12,6 +12,7 @@ import (
 
 	"github.com/rmmh/rose/meta"
 	"github.com/rmmh/rose/storage"
+	"github.com/rmmh/rose/uid"
 )
 
 // TestRecoverStubsSingleMissingPlogFile covers an individual shard file removed
@@ -243,6 +244,37 @@ func TestRecoverStubsCorruptDuplicateShard(t *testing.T) {
 	}
 	if got := readServerFileInternal(t, s2, "/mirror/corrupt"); !bytes.Equal(got, payload) {
 		t.Fatal("payload changed after recovering around a corrupt shard")
+	}
+}
+
+func TestRecoverDiscardsVlogLeftBeforeFirstShard(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	roots := map[uint32]string{1: filepath.Join(dir, "disk1")}
+	s1 := NewServerWithDiskRoots(db, roots)
+	s1.SetMaintenanceInterval(0)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	orphanID, err := db.MakeVlog(ctx, uid.New(), "NONE", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1.CloseStorage()
+
+	s2 := NewServerWithDiskRoots(db, roots)
+	s2.SetMaintenanceInterval(0)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatalf("recover after crash before first shard mapping: %v", err)
+	}
+	defer s2.CloseStorage()
+	if _, err := db.GetVlog(ctx, orphanID); err == nil {
+		t.Fatalf("incomplete vlog %d survived recovery", orphanID)
 	}
 }
 
