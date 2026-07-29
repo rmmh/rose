@@ -1,6 +1,7 @@
 package fuse_test
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -17,6 +18,13 @@ import (
 	"github.com/rmmh/rose/server"
 	"golang.org/x/sys/unix"
 )
+
+func TestFuseRenameRejectsUnsupportedFlagsBeforeMutation(t *testing.T) {
+	root := rosefuse.NewRoseRoot(nil)
+	if errno := root.Rename(context.Background(), "source", root, "dest", 1); errno != syscall.EINVAL {
+		t.Fatalf("Rename with unsupported flags = %v, want EINVAL", errno)
+	}
+}
 
 // retryNoSys retries an op a few times while macFUSE returns ENOSYS. macFUSE
 // intermittently emits a macFUSE-private opcode go-fuse does not implement during

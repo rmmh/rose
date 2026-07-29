@@ -150,6 +150,12 @@ func (d *RoseDir) Unlink(ctx context.Context, name string) syscall.Errno {
 }
 
 func (d *RoseDir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	if flags != 0 {
+		// The Rose RPC implements ordinary replacement rename only. Silently
+		// accepting RENAME_NOREPLACE or RENAME_EXCHANGE would perform a different,
+		// potentially destructive operation than the client requested.
+		return syscall.EINVAL
+	}
 	dst, ok := newParent.(*RoseDir)
 	if !ok {
 		return syscall.EXDEV
