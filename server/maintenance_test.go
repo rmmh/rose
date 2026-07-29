@@ -254,6 +254,52 @@ func TestReplaceDiskDefersLeasedVlog(t *testing.T) {
 	}
 }
 
+func TestReplaceDiskPreservesRawVlogTailBeforeCommit(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+	made, err := s.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "NONE", DataShards: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("raw vlog tail awaiting commit")
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: made.GetVlogId(), TxnId: 41, Buffer: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	newRoot := filepath.Join(t.TempDir(), "replacement")
+	if err := os.MkdirAll(newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AttachDiskOnNode(ctx, 2, 1, newRoot, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceDiskWith(ctx, 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DiskStates()[1]; got != meta.DiskDraining {
+		t.Fatalf("source disk state before raw commit = %q, want draining", got)
+	}
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 41}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceDiskWith(ctx, 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: made.GetVlogId(), Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.GetBuffer(), payload) {
+		t.Fatalf("raw vlog after replace = %q, want %q", got.GetBuffer(), payload)
+	}
+}
+
 func TestCancelledPlacementFlipKeepsDrainSourceReadable(t *testing.T) {
 	s := newControlPlaneServer(t, 2)
 	vlogID := provision(t, s, "NONE", 1, 0)

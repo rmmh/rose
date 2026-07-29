@@ -175,11 +175,11 @@ func (s *Server) DrainDisk(ctx context.Context, diskID uint32) error {
 	}
 	deferred := false
 	for _, p := range plogs {
-		leased, err := s.db.VlogLeased(ctx, p.VlogID)
+		busy, err := s.vlogRelocationDeferredLocked(ctx, p.VlogID)
 		if err != nil {
 			return err
 		}
-		if leased {
+		if busy {
 			deferred = true
 			continue
 		}
@@ -236,11 +236,11 @@ func (s *Server) ReprotectDisk(ctx context.Context, diskID uint32) error {
 	}
 	deferred := false
 	for _, p := range plogs {
-		leased, err := s.db.VlogLeased(ctx, p.VlogID)
+		busy, err := s.vlogRelocationDeferredLocked(ctx, p.VlogID)
 		if err != nil {
 			return err
 		}
-		if leased {
+		if busy {
 			deferred = true
 			continue
 		}
@@ -858,11 +858,11 @@ func (s *Server) ReplaceDiskWith(ctx context.Context, oldDisk, newDisk uint32) e
 	}
 	deferred := false
 	for _, p := range plogs {
-		leased, err := s.db.VlogLeased(ctx, p.VlogID)
+		busy, err := s.vlogRelocationDeferredLocked(ctx, p.VlogID)
 		if err != nil {
 			return err
 		}
-		if leased {
+		if busy {
 			deferred = true
 			continue
 		}
@@ -1023,11 +1023,11 @@ func (s *Server) rebalanceOneLocked(ctx context.Context, src uint32, minSkewByte
 	})
 
 	for _, p := range candidates {
-		leased, err := s.db.VlogLeased(ctx, p.VlogID)
+		busy, err := s.vlogRelocationDeferredLocked(ctx, p.VlogID)
 		if err != nil {
 			return false, err
 		}
-		if leased {
+		if busy {
 			continue
 		}
 		sz := sizeByPlog[p.PlogID]
@@ -1074,6 +1074,26 @@ func removePlog(plogs []meta.PlogOnDisk, plogID uint32) []meta.PlogOnDisk {
 		}
 	}
 	return plogs
+}
+
+// vlogRelocationDeferredLocked reports whether a vlog has unpublished client
+// writes. File RPCs retain a durable lease until Close; raw vlog RPCs instead
+// leave the mounted cursor ahead of the catalog until CommitVlog. Moving either
+// vlog would remount it against an incomplete catalog length.
+func (s *Server) vlogRelocationDeferredLocked(ctx context.Context, vlogID uint32) (bool, error) {
+	leased, err := s.db.VlogLeased(ctx, vlogID)
+	if err != nil || leased {
+		return leased, err
+	}
+	vlog := s.vlogs[vlogID]
+	if vlog == nil {
+		return false, nil
+	}
+	info, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		return false, err
+	}
+	return vlog.Length() > info.Length, nil
 }
 
 // setDiskStateLocked persists a disk transition and updates the cache. The
@@ -1153,18 +1173,13 @@ func (s *Server) remountVlogLocked(ctx context.Context, vlogID uint32) error {
 	if err != nil {
 		return err
 	}
-	// A leased writer may already have sealed an uncommitted tail beyond the
-	// catalog length. Topology changes replace the vlog's client set in memory,
-	// but must preserve that append cursor or reconciliation will truncate bytes
-	// the live handle still references.
+	// A writer may already have appended an uncommitted tail beyond the catalog
+	// length. File writes advertise that ownership with a durable lease, while
+	// the raw WriteVlog/CommitVlog RPC pair does not. Either way, a topology
+	// remount must preserve the mounted append cursor or reconciliation will
+	// truncate bytes the client has already written.
 	if current := s.vlogs[vlogID]; current != nil && current.Length() > info.Length {
-		leased, err := s.db.VlogLeased(ctx, vlogID)
-		if err != nil {
-			return err
-		}
-		if leased {
-			info.Length = current.Length()
-		}
+		info.Length = current.Length()
 	}
 	vlog, err := s.mountVlogLocked(ctx, info)
 	if err != nil {

@@ -51,11 +51,11 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
 
-	leased, err := s.db.VlogLeased(ctx, stagingID)
+	busy, err := s.vlogRelocationDeferredLocked(ctx, stagingID)
 	if err != nil {
 		return false, fmt.Errorf("promote: check lease for vlog %d: %w", stagingID, err)
 	}
-	if leased {
+	if busy {
 		// A write operation owns the append cursor and may have planned chunks not
 		// yet published; promoting underneath it would race that durable intent.
 		return false, nil
