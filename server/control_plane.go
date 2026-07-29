@@ -267,6 +267,16 @@ func (s *Server) reopenPlogsLocked(
 			affected[vlogID] = true
 		}
 	}
+	// As on the failure path, an RPC may already hold the old offline-mounted
+	// vlog after this return transition acquired vlogMu. Stabilize only the
+	// affected cursors before choosing catch-up lengths and remounting; otherwise
+	// that RPC can succeed on the discarded object and leave returned disks
+	// permanently short of the catalog.
+	for vlogID := range affected {
+		if vlog := s.vlogs[vlogID]; vlog != nil {
+			vlog.WaitForWrites()
+		}
+	}
 	// Stage every handle from the returning fault domain together. Agreement for
 	// a mirrored vlog may require two disks on this same node; checking one
 	// candidate at a time would see its returned sibling as offline and reject a
@@ -341,16 +351,10 @@ func (s *Server) catchUpReturnedDuplicatesLocked(ctx context.Context, reopened m
 			if source == nil {
 				return fmt.Errorf("catch up returned plog %d: vlog %d is not mounted", plogID, vlogID)
 			}
-			targetLength := info.Length
-			if source.Length() > targetLength {
-				leased, err := s.db.VlogLeased(ctx, vlogID)
-				if err != nil {
-					return err
-				}
-				if leased {
-					targetLength = source.Length()
-				}
-			}
+			// Vlog length advances only after a write quorum succeeds. It may be
+			// ahead of the catalog either under a file-operation lease or through
+			// the raw WriteVlog/CommitVlog pair, which has no lease row.
+			targetLength := max(info.Length, source.Length())
 			if err := s.catchUpDuplicatePlogLocked(ctx, source, vlogID, plogID, plog, info.Length, targetLength); err != nil {
 				return err
 			}
