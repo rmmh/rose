@@ -67,6 +67,15 @@ func (s *Server) ReplaceDisk(ctx context.Context, req *pb.ReplaceDiskRequest) (*
 	if !ok {
 		return nil, fmt.Errorf("disk %d is not configured", req.GetOldDiskId())
 	}
+	if state == meta.DiskDetached {
+		job, exists, err := s.db.LatestDiskJob(ctx, meta.JobReplace, req.GetOldDiskId())
+		if err != nil {
+			return nil, err
+		}
+		if exists && job.State == meta.JobDone && job.DestDisk == req.GetNewDiskId() {
+			return &pb.MaintenanceJobResponse{JobId: uint64(job.ID)}, nil
+		}
+	}
 	if state != meta.DiskActive && state != meta.DiskDraining {
 		return nil, fmt.Errorf("disk %d is %s, cannot replace", req.GetOldDiskId(), state)
 	}

@@ -729,6 +729,15 @@ func TestReplaceDiskUsesPreAttachedEmptyDestination(t *testing.T) {
 	if state := srv.DiskStates()[1]; state != meta.DiskDetached {
 		t.Fatalf("source disk state = %q, want detached", state)
 	}
+	retry, err := srv.ReplaceDisk(ctx, &pb.ReplaceDiskRequest{
+		OldDiskId: 1, NewDiskId: 2, NodeId: 2, TotalBytes: 1 << 30,
+	})
+	if err != nil {
+		t.Fatalf("identical completed ReplaceDisk retry failed: %v", err)
+	}
+	if retry.GetJobId() != job.GetJobId() {
+		t.Fatalf("ReplaceDisk retry job = %d, want %d", retry.GetJobId(), job.GetJobId())
+	}
 }
 
 func TestRemoveDiskRetryReturnsCompletedJob(t *testing.T) {
