@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/rmmh/rose/meta"
@@ -50,5 +52,55 @@ func TestVlogUsageArithmetic(t *testing.T) {
 	neg := meta.VlogUsage{TotalBytes: 100, LiveBytes: 140}
 	if neg.DeadBytes() != 0 || neg.WasteRatio() != 0 {
 		t.Fatalf("clamp failed: dead=%d waste=%v", neg.DeadBytes(), neg.WasteRatio())
+	}
+}
+
+func TestRecoverFinishesCompactionWhoseSourceWasRetired(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta.db")
+	diskRoot := filepath.Join(dir, "disk")
+	db, err := meta.Open(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	before := NewServerWithDataDir(db, diskRoot)
+	before.SetMaintenanceInterval(0)
+	if err := before.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	vlogID := provision(t, before, "NONE", 1, 0)
+	job, err := db.GetOrCreateCompactionJob(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.vlogMu.Lock()
+	err = before.retireVlogLocked(ctx, vlogID)
+	before.vlogMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.CloseStorage()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := meta.Open(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	after := NewServerWithDataDir(reopened, diskRoot)
+	after.SetMaintenanceInterval(0)
+	if err := after.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer after.StopMaintenanceDriver()
+	recovered, err := reopened.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != meta.JobDone {
+		t.Fatalf("post-retirement compaction job state = %q, want done", recovered.State)
 	}
 }

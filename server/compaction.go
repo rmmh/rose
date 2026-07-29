@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -100,12 +102,21 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 	}
 
 	source, ok := s.vlogs[sourceID]
-	if !ok {
-		return fmt.Errorf("compact: source vlog %d not mounted", sourceID)
-	}
 	info, err := s.db.GetVlog(ctx, sourceID)
+	if errors.Is(err, sql.ErrNoRows) && !ok {
+		finished, finishErr := s.db.FinishRunningCompactionJob(ctx, sourceID)
+		if finishErr != nil {
+			return finishErr
+		}
+		if finished {
+			return nil
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("compact: load vlog %d: %w", sourceID, err)
+	}
+	if !ok {
+		return fmt.Errorf("compact: source vlog %d not mounted", sourceID)
 	}
 	if info.ProtectionScheme == "EC" {
 		// EC vlogs accept whole stripe rows only, so their live chunks cannot be

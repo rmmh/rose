@@ -213,6 +213,22 @@ func (d *DB) FinishRunningPromoteJob(ctx context.Context, stagingVlog uint32) (b
 	return n > 0, nil
 }
 
+// FinishRunningCompactionJob closes the crash window where the source vlog was
+// retired but the job's final state update had not committed yet.
+func (d *DB) FinishRunningCompactionJob(ctx context.Context, sourceVlog uint32) (bool, error) {
+	res, err := d.db.ExecContext(ctx,
+		"UPDATE job SET state = ? WHERE kind = ? AND state = ? AND target_vlog = ?",
+		JobDone, JobCompact, JobRunning, sourceVlog)
+	if err != nil {
+		return false, fmt.Errorf("finish compaction job for vlog %d: %w", sourceVlog, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (d *DB) MarkJobDone(ctx context.Context, jobID int64) error {
 	_, err := d.db.ExecContext(ctx, "UPDATE job SET state = ? WHERE id = ?", JobDone, jobID)
 	return err
