@@ -1079,6 +1079,19 @@ func (s *Server) remountVlogLocked(ctx context.Context, vlogID uint32) error {
 	if err != nil {
 		return err
 	}
+	// A leased writer may already have sealed an uncommitted tail beyond the
+	// catalog length. Topology changes replace the vlog's client set in memory,
+	// but must preserve that append cursor or reconciliation will truncate bytes
+	// the live handle still references.
+	if current := s.vlogs[vlogID]; current != nil && current.Length() > info.Length {
+		leased, err := s.db.VlogLeased(ctx, vlogID)
+		if err != nil {
+			return err
+		}
+		if leased {
+			info.Length = current.Length()
+		}
+	}
 	vlog, err := s.mountVlogLocked(ctx, info)
 	if err != nil {
 		return fmt.Errorf("remount vlog %d: %w", vlogID, err)

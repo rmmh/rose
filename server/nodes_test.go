@@ -654,6 +654,48 @@ func TestConcurrentWriteVlogCannotCrossAddressBoundary(t *testing.T) {
 	}
 }
 
+func TestDiskRoundTripPreservesLeasedWriteTail(t *testing.T) {
+	s := newControlPlaneServer(t, 2)
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{
+		Path: "/disk-round-trip-write", OperationKey: "disk-round-trip-write",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("leased-tail"), (5<<20)/len("leased-tail")+1)
+	payload = payload[:5<<20]
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: open.GetHandle(), Buffer: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDiskState(ctx, 1, meta.DiskFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDiskState(ctx, 1, meta.DiskActive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{
+		Handle: open.GetHandle(), IdempotencyKey: "disk-round-trip-write",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.Open(ctx, &pb.OpenRequest{Path: "/disk-round-trip-write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Read(ctx, &pb.ReadRequest{
+		Handle: read.GetHandle(), Length: int64(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.GetBuffer(), payload) {
+		t.Fatalf("file after disk round trip has %d bytes, want %d", len(got.GetBuffer()), len(payload))
+	}
+}
+
 func TestSlowVlogWriteDoesNotBlockUnrelatedVlog(t *testing.T) {
 	block := make(chan struct{})
 	started := make(chan struct{}, 1)

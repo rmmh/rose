@@ -238,15 +238,28 @@ func (s *Server) catchUpReturnedDuplicatesLocked(ctx context.Context, reopened m
 			if err != nil {
 				return err
 			}
-			if info.ProtectionScheme != "DUPLICATE" || plog.LogicalLength() >= info.Length {
+			if info.ProtectionScheme != "DUPLICATE" {
 				continue
 			}
 			source := s.vlogs[vlogID]
 			if source == nil {
 				return fmt.Errorf("catch up returned plog %d: vlog %d is not mounted", plogID, vlogID)
 			}
-			for offset := plog.LogicalLength(); offset < info.Length; {
-				length := min(int64(copyChunk), info.Length-offset)
+			targetLength := info.Length
+			if source.Length() > targetLength {
+				leased, err := s.db.VlogLeased(ctx, vlogID)
+				if err != nil {
+					return err
+				}
+				if leased {
+					targetLength = source.Length()
+				}
+			}
+			if plog.LogicalLength() >= targetLength {
+				continue
+			}
+			for offset := plog.LogicalLength(); offset < targetLength; {
+				length := min(int64(copyChunk), targetLength-offset)
 				data, err := source.Read(ctx, offset, int(length))
 				if err != nil {
 					return fmt.Errorf("read vlog %d to catch up returned plog %d: %w", vlogID, plogID, err)
