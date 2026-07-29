@@ -18,7 +18,15 @@ func (s *Server) AddDisk(ctx context.Context, req *pb.AddDiskRequest) (*pb.AddDi
 		return nil, fmt.Errorf("disk_id and node_id are required")
 	}
 	root := filepath.Join(s.dataDir, fmt.Sprintf("disk-%d", req.GetDiskId()))
-	if err := s.AttachDiskOnNode(ctx, req.GetDiskId(), req.GetNodeId(), root, req.GetTotalBytes()); err != nil {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	if _, configured := s.diskRoots[req.GetDiskId()]; configured {
+		if s.nodeOf(req.GetDiskId()) != req.GetNodeId() {
+			return nil, fmt.Errorf("disk %d is already attached to node %d", req.GetDiskId(), s.nodeOf(req.GetDiskId()))
+		}
+		return &pb.AddDiskResponse{}, nil
+	}
+	if err := s.attachDiskOnNodeLocked(ctx, req.GetDiskId(), req.GetNodeId(), root, req.GetTotalBytes()); err != nil {
 		return nil, err
 	}
 	return &pb.AddDiskResponse{}, nil

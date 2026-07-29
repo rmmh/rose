@@ -703,6 +703,10 @@ func (s *Server) AttachDisk(ctx context.Context, diskID uint32, root string) err
 func (s *Server) AttachDiskOnNode(ctx context.Context, diskID, nodeID uint32, root string, totalBytes uint64) error {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
+	return s.attachDiskOnNodeLocked(ctx, diskID, nodeID, root, totalBytes)
+}
+
+func (s *Server) attachDiskOnNodeLocked(ctx context.Context, diskID, nodeID uint32, root string, totalBytes uint64) error {
 	if _, ok := s.diskRoots[diskID]; ok {
 		return fmt.Errorf("attach disk: disk %d already configured", diskID)
 	}
