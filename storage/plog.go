@@ -949,6 +949,10 @@ func (p *Plog) RecoverHashes(ctx context.Context, recoverer ChunkRecoverer) erro
 
 	chunks, err := recoverer.RecoverChunks(ctx, p.id, blockStartPhys, sealedPhys)
 	if err != nil {
+		// The caller may keep mounting other replicas after a catalog failure.
+		// Do not leave this shard carrying hashes recomputed from unauthenticated
+		// disk bytes in that degraded state.
+		p.hashes = make([]byte, numSectors*HashSize)
 		return err
 	}
 	if len(chunks) == 0 {

@@ -17,6 +17,12 @@ func (noRecoveredChunks) RecoverChunks(context.Context, uint32, int64, int64) ([
 	return nil, nil
 }
 
+type failedChunkRecovery struct{}
+
+func (failedChunkRecovery) RecoverChunks(context.Context, uint32, int64, int64) ([]RecoveredChunk, error) {
+	return nil, errors.New("catalog unavailable")
+}
+
 func tempPlog(t *testing.T, name string) (*Plog, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
@@ -301,6 +307,43 @@ func TestPlogLostTrailerWithoutCatalogProofStaysCorrupt(t *testing.T) {
 	}
 	if _, err := reopened.Read(0, SectorSize); !errors.Is(err, ErrBitrot) {
 		t.Fatalf("read after unverifiable trailer loss = %v, want ErrBitrot", err)
+	}
+}
+
+func TestPlogCatalogFailureCannotBlessLostTrailerBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plog")
+	p, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{0x5a}, 2*SectorSize)
+	if _, err := p.Write(0, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptByte(t, path, info.Size()-SectorSize)
+	corruptByte(t, path, CalcPhysical(200))
+
+	reopened, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.RecoverHashes(context.Background(), failedChunkRecovery{}); err == nil {
+		t.Fatal("RecoverHashes succeeded despite catalog failure")
+	}
+	if _, err := reopened.Read(0, SectorSize); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("read after failed hash recovery = %v, want ErrBitrot", err)
 	}
 }
 
