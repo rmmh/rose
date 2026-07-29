@@ -42,8 +42,22 @@ func (s *Server) RemoveDisk(ctx context.Context, req *pb.RemoveDiskRequest) (*pb
 		if err != nil {
 			return nil, err
 		}
-		if exists && job.State == meta.JobDone {
-			return &pb.MaintenanceJobResponse{JobId: uint64(job.ID)}, nil
+		if exists {
+			if job.State == meta.JobDone {
+				return &pb.MaintenanceJobResponse{JobId: uint64(job.ID)}, nil
+			}
+			if job.State == meta.JobRunning {
+				plogs, err := s.db.PlogsOnDisk(ctx, req.GetDiskId())
+				if err != nil {
+					return nil, err
+				}
+				if len(plogs) == 0 {
+					if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
+						return nil, err
+					}
+					return &pb.MaintenanceJobResponse{JobId: uint64(job.ID)}, nil
+				}
+			}
 		}
 	}
 	if state != meta.DiskActive && state != meta.DiskDraining {
