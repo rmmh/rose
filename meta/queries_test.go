@@ -133,3 +133,63 @@ func TestConcurrentMaintenanceRetriesShareOneRunningJob(t *testing.T) {
 		t.Fatalf("running drain jobs = %d, want 1", running)
 	}
 }
+
+func TestConcurrentRemoveAndReplaceCreateOneRunningJob(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	const callers = 64
+	start := make(chan struct{})
+	results := make(chan Job, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func(replace bool) {
+			defer wg.Done()
+			<-start
+			var job Job
+			var err error
+			if replace {
+				job, err = db.GetOrCreateReplaceJob(ctx, 7, 8)
+			} else {
+				job, err = db.GetOrCreateDrainJob(ctx, 7)
+			}
+			if err == nil {
+				results <- job
+			}
+		}(i%2 == 0)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var first Job
+	successes := 0
+	for job := range results {
+		successes++
+		if first.ID == 0 {
+			first = job
+		} else if job.ID != first.ID || job.Kind != first.Kind {
+			t.Fatalf("concurrent control calls returned jobs %+v and %+v", first, job)
+		}
+	}
+	if first.ID == 0 {
+		t.Fatal("both competing maintenance operations were rejected")
+	}
+	if successes != callers/2 {
+		t.Fatalf("successful calls = %d, want %d calls for the winning operation", successes, callers/2)
+	}
+	var running int
+	if err := db.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM job WHERE state = ? AND target_disk = ?",
+		JobRunning, 7).Scan(&running); err != nil {
+		t.Fatal(err)
+	}
+	if running != 1 {
+		t.Fatalf("running jobs for disk 7 = %d, want 1", running)
+	}
+}

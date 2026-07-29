@@ -185,10 +185,20 @@ func (d *DB) getOrCreateDiskJob(ctx context.Context, kind string, targetDisk, de
 	}
 	defer tx.Rollback()
 
-	j, err := scanJob(tx.QueryRowContext(ctx,
-		"SELECT "+jobColumns+" FROM job WHERE kind = ? AND state = ? AND target_disk = ?",
-		kind, JobRunning, targetDisk))
+	var j Job
+	if kind == JobDrain || kind == JobReplace {
+		j, err = scanJob(tx.QueryRowContext(ctx,
+			"SELECT "+jobColumns+" FROM job WHERE kind IN (?, ?) AND state = ? AND target_disk = ?",
+			JobDrain, JobReplace, JobRunning, targetDisk))
+	} else {
+		j, err = scanJob(tx.QueryRowContext(ctx,
+			"SELECT "+jobColumns+" FROM job WHERE kind = ? AND state = ? AND target_disk = ?",
+			kind, JobRunning, targetDisk))
+	}
 	if err == nil {
+		if j.Kind != kind {
+			return Job{}, fmt.Errorf("disk %d already has a running %s job", targetDisk, j.Kind)
+		}
 		if err := tx.Commit(); err != nil {
 			return Job{}, err
 		}
