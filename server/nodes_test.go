@@ -411,7 +411,7 @@ func TestNodeReturnReplacesSameLengthUncommittedTail(t *testing.T) {
 	if err := s.SetNodeState(ctx, 2, meta.NodeFailed); err != nil {
 		t.Fatal(err)
 	}
-	stale := []byte("stale-unpublished-bytes")
+	stale := bytes.Repeat([]byte{0x51}, storage.SectorSize)
 	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
 		VlogId: vlogID, TxnId: 51, Buffer: stale,
 	}); err == nil {
@@ -434,10 +434,7 @@ func TestNodeReturnReplacesSameLengthUncommittedTail(t *testing.T) {
 	if err := s.SetNodeState(ctx, 2, meta.NodeWorking); err != nil {
 		t.Fatal(err)
 	}
-	committed := []byte("fresh-published-content")
-	if len(committed) != len(stale) {
-		t.Fatal("test payloads must have equal lengths")
-	}
+	committed := bytes.Repeat([]byte{0x52}, storage.SectorSize)
 	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
 		VlogId: vlogID, TxnId: 52, Buffer: committed,
 	}); err != nil {
@@ -456,6 +453,111 @@ func TestNodeReturnReplacesSameLengthUncommittedTail(t *testing.T) {
 	}
 	if !bytes.Equal(got, committed) {
 		t.Fatalf("returned replica retained stale bytes %q, want %q", got, committed)
+	}
+}
+
+func TestNodeReturnRepairsReplicaBeforePublishingWorkingState(t *testing.T) {
+	ctx := context.Background()
+	before := newControlPlaneServer(t, 3)
+	before.SetMaintenanceInterval(0)
+	vlogID := provision(t, before, "DUPLICATE", 1, 0)
+	mappings, err := before.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stalePlog uint32
+	for _, mapping := range mappings {
+		if mapping.DiskID == 3 {
+			stalePlog = mapping.PlogID
+		}
+	}
+	if stalePlog == 0 {
+		t.Fatal("vlog has no replica on disk 3")
+	}
+	if err := before.SetNodeState(ctx, 1, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.SetNodeState(ctx, 2, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	stale := bytes.Repeat([]byte{0x61}, storage.SectorSize)
+	if _, err := before.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: vlogID, TxnId: 61, Buffer: stale,
+	}); err == nil {
+		t.Fatal("single replica unexpectedly met write quorum")
+	}
+	deadline := time.Now().Add(time.Second)
+	for before.plogs[stalePlog].LogicalLength() != int64(len(stale)) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := before.plogs[stalePlog].LogicalLength(); got != int64(len(stale)) {
+		t.Fatalf("failed write left stale replica length %d, want %d", got, len(stale))
+	}
+	if err := before.SetNodeState(ctx, 3, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.SetNodeState(ctx, 1, meta.NodeWorking); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.SetNodeState(ctx, 2, meta.NodeWorking); err != nil {
+		t.Fatal(err)
+	}
+	committed := bytes.Repeat([]byte{0x62}, storage.SectorSize)
+	if _, err := before.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: vlogID, TxnId: 62, Buffer: committed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 62}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A catalog write failure models a dead or unwritable metadata disk at the
+	// publication boundary. Returned bytes must already be caught up before the
+	// working state is attempted, so a process crash cannot expose this stale
+	// replica on the next recovery.
+	if _, err := before.db.GetDB().ExecContext(ctx, `
+		CREATE TRIGGER fail_node_return
+		BEFORE UPDATE OF state ON node
+		WHEN OLD.id = 3 AND NEW.state = 'working'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected node-state write failure');
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.SetNodeState(ctx, 3, meta.NodeWorking); err == nil {
+		t.Fatal("node return unexpectedly survived injected catalog write failure")
+	}
+	nodes, err := before.db.ListNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range nodes {
+		if node.ID == 3 && node.State != meta.NodeFailed {
+			t.Fatalf("durable node 3 state = %q, want failed", node.State)
+		}
+	}
+	repaired, err := storage.OpenExistingPlog(before.plogPath(3, stalePlog), stalePlog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := repaired.Read(0, len(committed))
+	closeErr := repaired.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if !bytes.Equal(got, committed) {
+		t.Fatal("node-state failure happened before returned replica was repaired")
+	}
+	if _, err := before.db.GetDB().ExecContext(ctx, `DROP TRIGGER fail_node_return`); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.SetNodeState(ctx, 3, meta.NodeWorking); err != nil {
+		t.Fatal(err)
 	}
 }
 

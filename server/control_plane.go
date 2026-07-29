@@ -32,20 +32,18 @@ func (s *Server) SetDiskState(ctx context.Context, diskID uint32, state string) 
 			return err
 		}
 	}
+	durableCtx := context.WithoutCancel(ctx)
+	if state == meta.DiskActive && previous == meta.DiskFailed &&
+		s.nodeState[s.nodeOf(diskID)] != meta.NodeFailed {
+		return s.reopenDiskPlogsLocked(durableCtx, diskID, func() error {
+			return s.setDiskStateLocked(durableCtx, diskID, state)
+		})
+	}
 	if err := s.setDiskStateLocked(ctx, diskID, state); err != nil {
 		return err
 	}
-	durableCtx := context.WithoutCancel(ctx)
 	if state == meta.DiskFailed {
 		return s.offlineDiskPlogsLocked(durableCtx, diskID)
-	}
-	if state == meta.DiskActive && previous == meta.DiskFailed &&
-		s.nodeState[s.nodeOf(diskID)] != meta.NodeFailed {
-		if err := s.reopenDiskPlogsLocked(durableCtx, diskID); err != nil {
-			_ = s.db.SetDiskState(durableCtx, diskID, meta.DiskFailed)
-			s.diskState[diskID] = meta.DiskFailed
-			return err
-		}
 	}
 	return nil
 }
@@ -89,25 +87,25 @@ func (s *Server) SetNodeState(ctx context.Context, nodeID uint32, state string) 
 			}
 		}
 	}
-	if err := s.db.SetNodeState(ctx, nodeID, state); err != nil {
-		return err
-	}
 	durableCtx := context.WithoutCancel(ctx)
 	if state == meta.NodeWorking {
-		delete(s.nodeState, nodeID)
 		// A recovered server intentionally leaves a failed node's plogs closed.
-		// Before cancelling its reprotect, reopen those original files and remount
-		// the affected vlogs.  Otherwise a cold restart followed by node return
-		// would mark the disk active while its vlog still contains offline clients.
-		if err := s.reopenNodePlogsLocked(durableCtx, nodeID); err != nil {
-			// Do not leave the disk live if its promised return did not make the
-			// original bytes reachable. Keep the durable and cached liveness gates
-			// conservative so commits remain read-only until repair can proceed.
-			_ = s.db.SetNodeState(durableCtx, nodeID, meta.NodeFailed)
-			s.nodeState[nodeID] = meta.NodeFailed
+		// Reopen and catch up those files before publishing "working". A crash or
+		// metadata write failure can therefore leave only the conservative failed
+		// state, never a live catalog entry for a stale returned mirror.
+		if err := s.reopenNodePlogsLocked(durableCtx, nodeID, func() error {
+			if err := s.db.SetNodeState(durableCtx, nodeID, state); err != nil {
+				return err
+			}
+			delete(s.nodeState, nodeID)
+			return nil
+		}); err != nil {
 			return err
 		}
 		return s.cancelNodeReprotectsLocked(durableCtx, nodeID)
+	}
+	if err := s.db.SetNodeState(ctx, nodeID, state); err != nil {
+		return err
 	}
 	s.nodeState[nodeID] = state
 	return s.offlineNodePlogsLocked(durableCtx, nodeID)
@@ -202,19 +200,24 @@ func (s *Server) offlinePlogsLocked(ctx context.Context, matches func(meta.PlogI
 // node was unavailable. It deliberately fails before cancelling reprotect if a
 // supposedly returned disk still lacks a file: treating a genuinely lost file as
 // healthy would violate the durability gate. The caller must hold vlogMu.
-func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error {
+func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32, activate func() error) error {
 	return s.reopenPlogsLocked(ctx, fmt.Sprintf("node %d", nodeID), func(info meta.PlogInfo) bool {
 		return s.nodeOf(info.DiskID) == nodeID
-	})
+	}, activate)
 }
 
-func (s *Server) reopenDiskPlogsLocked(ctx context.Context, diskID uint32) error {
+func (s *Server) reopenDiskPlogsLocked(ctx context.Context, diskID uint32, activate func() error) error {
 	return s.reopenPlogsLocked(ctx, fmt.Sprintf("disk %d", diskID), func(info meta.PlogInfo) bool {
 		return info.DiskID == diskID
-	})
+	}, activate)
 }
 
-func (s *Server) reopenPlogsLocked(ctx context.Context, owner string, matches func(meta.PlogInfo) bool) error {
+func (s *Server) reopenPlogsLocked(
+	ctx context.Context,
+	owner string,
+	matches func(meta.PlogInfo) bool,
+	activate func() error,
+) error {
 	infos, err := s.db.ListPlogs(ctx)
 	if err != nil {
 		return err
@@ -276,6 +279,22 @@ func (s *Server) reopenPlogsLocked(ctx context.Context, owner string, matches fu
 				slog.Warn("failed to recover hashes for reopened plog, continuing", "plogID", id, "error", err)
 			}
 		}
+	}
+	if err := activate(); err != nil {
+		// The durable liveness transition failed. Restore offline clients before
+		// releasing vlogMu so no RPC can observe returned media as live while the
+		// catalog still says failed.
+		for id, p := range reopened {
+			delete(s.plogs, id)
+			s.offlinePlogs[id] = true
+			_ = p.Close()
+		}
+		for vlogID := range affected {
+			if remountErr := s.remountVlogLocked(ctx, vlogID); remountErr != nil {
+				return fmt.Errorf("%w (restore offline vlog %d: %v)", err, vlogID, remountErr)
+			}
+		}
+		return err
 	}
 	return nil
 }
