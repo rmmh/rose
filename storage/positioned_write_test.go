@@ -96,6 +96,39 @@ func TestVlogEnsureWriteRetriesPartialReplicaFanout(t *testing.T) {
 	assert.Equal(t, data, got)
 }
 
+func TestDuplicateCommitUsesTheWriteQuorum(t *testing.T) {
+	dir := t.TempDir()
+	a, err := OpenPlog(filepath.Join(dir, "a"), 1)
+	require.NoError(t, err)
+	defer a.Close()
+	b, err := OpenPlog(filepath.Join(dir, "b"), 2)
+	require.NoError(t, err)
+	defer b.Close()
+	c, err := OpenPlog(filepath.Join(dir, "c"), 3)
+	require.NoError(t, err)
+	defer c.Close()
+
+	aCommit := &commitFailingPlogClient{PlogClient: plogClientAdapter{a}, fail: true}
+	cWrite := &writeFailingPlogClient{PlogClient: plogClientAdapter{c}, fail: true}
+	v, err := NewVlog(1, "DUPLICATE", 1, 0, []PlogClient{
+		aCommit, plogClientAdapter{b}, cWrite,
+	}, 0)
+	require.NoError(t, err)
+	require.NoError(t, v.SetWriteQuorum(2))
+
+	data := bytes.Repeat([]byte("same-replicas-must-write-and-commit"), 300)
+	_, err = v.Write(context.Background(), 41, data)
+	require.NoError(t, err)
+	assert.Zero(t, c.LogicalLength(), "third replica did not accept the write")
+
+	// A died after writing. B plus C can answer Commit, but C has none of the
+	// bytes, so that pair is not a durability quorum for this transaction.
+	require.Error(t, v.Commit(context.Background(), 41))
+
+	aCommit.fail = false
+	require.NoError(t, v.Commit(context.Background(), 41))
+}
+
 func TestDuplicateVlogWritePartialFanoutRetryDoesNotAdvanceLength(t *testing.T) {
 	dir := t.TempDir()
 	a, err := OpenPlog(filepath.Join(dir, "a"), 1)

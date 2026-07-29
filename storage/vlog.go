@@ -62,6 +62,12 @@ type Vlog struct {
 	parityShards int
 	clients      []PlogClient // Index corresponds to shard index (0 for duplicate)
 	writeQuorum  int
+	// pendingReplicas is the set of mirrored clients that accepted every write
+	// since the last successful commit. A commit quorum must come from this same
+	// set; independently choosing write and commit quorums can otherwise
+	// acknowledge durability with fewer than writeQuorum complete copies.
+	// Guarded by writeMu. EC always writes every shard and does not use it.
+	pendingReplicas []bool
 
 	encoder reedsolomon.Encoder // Only initialized if scheme == "EC"
 }
@@ -172,7 +178,7 @@ func (v *Vlog) writeWithin(ctx context.Context, txnID int64, data []byte, max in
 		// Keep an immutable owned payload alive for those loser goroutines rather
 		// than letting them retain the caller's RPC buffer after Write returns.
 		payload := append([]byte(nil), data...)
-		if err := v.fanoutQuorum(ctx, v.writeQuorum, func(opCtx context.Context, _ int, client PlogClient) error {
+		if err := v.writeMirrors(ctx, func(opCtx context.Context, _ int, client PlogClient) error {
 			if positioned, ok := client.(positionedPlogClient); ok {
 				return positioned.EnsureAppend(opCtx, offset, payload)
 			}
@@ -251,38 +257,73 @@ func (v *Vlog) fanout(ctx context.Context, op func(context.Context, int, PlogCli
 }
 
 func (v *Vlog) fanoutQuorum(ctx context.Context, quorum int, op func(context.Context, int, PlogClient) error) error {
+	_, err := v.fanoutQuorumEligible(ctx, quorum, nil, op)
+	return err
+}
+
+type fanoutResult struct {
+	index int
+	err   error
+}
+
+// fanoutQuorumEligible runs op only on eligible clients (all clients when nil)
+// and returns the exact responders that formed the successful quorum.
+func (v *Vlog) fanoutQuorumEligible(ctx context.Context, quorum int, eligible []bool, op func(context.Context, int, PlogClient) error) ([]bool, error) {
+	candidates := 0
+	for i := range v.clients {
+		if eligible == nil || eligible[i] {
+			candidates++
+		}
+	}
+	if candidates < quorum {
+		return nil, fmt.Errorf("vlog %d has %d eligible replicas, need quorum %d", v.id, candidates, quorum)
+	}
 	opCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	errs := make(chan error, len(v.clients))
+	results := make(chan fanoutResult, candidates)
 	for i, c := range v.clients {
+		if eligible != nil && !eligible[i] {
+			continue
+		}
 		go func(idx int, client PlogClient) {
-			if err := op(opCtx, idx, client); err != nil {
-				errs <- err
-				return
-			}
-			errs <- nil
+			results <- fanoutResult{index: idx, err: op(opCtx, idx, client)}
 		}(i, c)
 	}
+	successful := make([]bool, len(v.clients))
 	succeeded := 0
 	failed := 0
 	var firstErr error
-	for range v.clients {
-		if err := <-errs; err != nil {
+	for range candidates {
+		result := <-results
+		if result.err != nil {
 			failed++
 			if firstErr == nil {
-				firstErr = err
+				firstErr = result.err
 			}
-			if failed > len(v.clients)-quorum {
-				return firstErr
+			if failed > candidates-quorum {
+				return nil, firstErr
 			}
 			continue
 		}
+		successful[result.index] = true
 		succeeded++
 		if succeeded >= quorum {
-			return nil
+			return successful, nil
 		}
 	}
-	return fmt.Errorf("vlog %d write quorum %d not met", v.id, quorum)
+	return nil, fmt.Errorf("vlog %d write quorum %d not met", v.id, quorum)
+}
+
+// writeMirrors preserves one quorum membership across every append in the
+// current uncommitted tail. Once a copy misses a write it cannot count toward
+// making that tail durable.
+func (v *Vlog) writeMirrors(ctx context.Context, op func(context.Context, int, PlogClient) error) error {
+	successful, err := v.fanoutQuorumEligible(ctx, v.writeQuorum, v.pendingReplicas, op)
+	if err != nil {
+		return err
+	}
+	v.pendingReplicas = successful
+	return nil
 }
 
 func totalPartsLen(parts [][]byte) int {
@@ -358,7 +399,7 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) er
 	for i, part := range parts {
 		ownedParts[i] = append([]byte(nil), part...)
 	}
-	if err := v.fanoutQuorum(ctx, v.writeQuorum, func(opCtx context.Context, _ int, client PlogClient) error {
+	if err := v.writeMirrors(ctx, func(opCtx context.Context, _ int, client PlogClient) error {
 		positioned, ok := client.(positionedPlogClient)
 		if !ok {
 			return fmt.Errorf("vlog %d plog client does not support positioned writes", v.id)
@@ -539,13 +580,21 @@ func ReconstructECShard(dataShards, parityShards int, shards [][]byte) error {
 func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
 	v.writeMu.Lock()
 	defer v.writeMu.Unlock()
-	return v.fanoutQuorum(ctx, v.writeQuorum, func(opCtx context.Context, _ int, client PlogClient) error {
+	commit := func(opCtx context.Context, _ int, client PlogClient) error {
 		committer, ok := client.(committingPlogClient)
 		if !ok {
 			return fmt.Errorf("plog client does not support commit")
 		}
 		return committer.Commit(opCtx, txnID)
-	})
+	}
+	if (v.scheme == "NONE" || v.scheme == "DUPLICATE") && v.pendingReplicas != nil {
+		if _, err := v.fanoutQuorumEligible(ctx, v.writeQuorum, v.pendingReplicas, commit); err != nil {
+			return err
+		}
+		v.pendingReplicas = nil
+		return nil
+	}
+	return v.fanoutQuorum(ctx, v.writeQuorum, commit)
 }
 
 func (v *Vlog) Length() int64 { return atomic.LoadInt64(&v.length) }
