@@ -95,6 +95,20 @@ func TestWebDAVMkcolPutGetPropfind(t *testing.T) {
 		t.Fatalf("GET body = %q, want %q", got, want)
 	}
 
+	// The WebDAV root itself cannot be removed. A failed root DELETE must not
+	// first erase all of its children.
+	resp = do(t, "DELETE", base+"/", nil, nil)
+	resp.Body.Close()
+	if resp.StatusCode < 400 {
+		t.Fatalf("DELETE root status = %d, want an error", resp.StatusCode)
+	}
+	resp = do(t, "GET", base+"/bucket/a.txt", nil, nil)
+	got, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(got) != want {
+		t.Fatalf("file disappeared after failed root DELETE: status=%d body=%q", resp.StatusCode, got)
+	}
+
 	// PROPFIND lists the directory's immediate children.
 	resp = do(t, "PROPFIND", base+"/bucket", nil, map[string]string{"Depth": "1"})
 	bodyBytes, _ := io.ReadAll(resp.Body)

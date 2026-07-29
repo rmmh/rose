@@ -85,6 +85,9 @@ func (f *FS) Rename(ctx context.Context, oldName, newName string) error {
 // namespace only removes empty directories, so subtrees are cleared depth-first.
 func (f *FS) RemoveAll(ctx context.Context, name string) error {
 	path := clean(name)
+	if path == "" {
+		return os.ErrInvalid
+	}
 	attr, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path})
 	if err != nil {
 		// Removing something that is already gone is not an error (os.RemoveAll).
