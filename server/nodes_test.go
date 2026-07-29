@@ -656,6 +656,73 @@ func TestNodeReturnUsesAllReturnedDisksForMirrorAgreement(t *testing.T) {
 	}
 }
 
+func TestNodeReturnAuthenticatesCompleteNonQuorumMirror(t *testing.T) {
+	s := newControlPlaneServer(t, 3)
+	ctx := context.Background()
+	vlogID := provision(t, s, "DUPLICATE", 1, 0)
+	mappings, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late := mappings[2]
+	block := make(chan struct{})
+	written := make(chan struct{}, 1)
+	clients := make([]storage.PlogClient, len(mappings))
+	for i, mapping := range mappings {
+		local := &localPlogClient{plog: s.plogs[mapping.PlogID]}
+		if mapping.PlogID == late.PlogID {
+			clients[i] = &writeFaultClient{
+				blockAfter: block, afterStart: written, local: local,
+			}
+		} else {
+			clients[i] = local
+		}
+	}
+	vlog, err := storage.NewVlog(vlogID, "DUPLICATE", 1, 0, clients, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vlog.SetWriteQuorum(2); err != nil {
+		t.Fatal(err)
+	}
+	s.vlogMu.Lock()
+	s.vlogs[vlogID] = vlog
+	s.vlogMu.Unlock()
+
+	payload := bytes.Repeat([]byte{0x77}, 2*storage.SectorSize)
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: vlogID, TxnId: 79, Buffer: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-written
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 79}); err != nil {
+		t.Fatal(err)
+	}
+	close(block)
+	deadline := time.Now().Add(time.Second)
+	for s.plogs[late.PlogID].LogicalLength() != int64(len(payload)) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := s.plogs[late.PlogID].LogicalLength(); got != int64(len(payload)) {
+		t.Fatalf("late mirror length = %d, want %d", got, len(payload))
+	}
+
+	if err := s.SetNodeState(ctx, late.DiskID, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodeState(ctx, late.DiskID, meta.NodeWorking); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.plogs[late.PlogID].Read(0, len(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("returned complete non-quorum mirror changed bytes")
+	}
+}
+
 type readFaultClient struct {
 	data    []byte
 	slow    bool
@@ -814,6 +881,8 @@ type writeFaultClient struct {
 	slow        bool
 	block       <-chan struct{}
 	started     chan<- struct{}
+	blockAfter  <-chan struct{}
+	afterStart  chan<- struct{}
 	local       *localPlogClient
 	readBlock   <-chan struct{}
 	readStarted chan<- struct{}
@@ -840,6 +909,14 @@ func (c *writeFaultClient) Read(ctx context.Context, offset int64, length int) (
 }
 
 func (c *writeFaultClient) EnsureAppend(ctx context.Context, offset int64, data []byte) error {
+	if c.blockAfter != nil {
+		err := c.local.EnsureAppend(ctx, offset, data)
+		if c.afterStart != nil {
+			c.afterStart <- struct{}{}
+		}
+		<-c.blockAfter
+		return err
+	}
 	if c.block != nil {
 		if c.started != nil {
 			c.started <- struct{}{}

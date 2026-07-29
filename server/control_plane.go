@@ -427,9 +427,11 @@ func (s *Server) catchUpDuplicatePlogLocked(ctx context.Context, source *storage
 		offset += length
 		changed = true
 	}
-	if !changed {
-		return nil
-	}
+	// Commit even an unchanged candidate. Reaching here means every committed
+	// byte was compared with authoritative mirror agreement (and any leased tail
+	// with the mounted source), so a returned non-quorum copy that wrote all
+	// bytes but missed the original Commit can now persist a trusted open-block
+	// trailer. Skipping this leaves RecoverHashes to reject those valid bytes.
 	if err := plog.Commit(); err != nil {
 		return fmt.Errorf("commit caught-up plog %d: %w", plogID, err)
 	}
