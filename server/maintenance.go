@@ -273,7 +273,7 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	var shardData []byte
 	switch info.ProtectionScheme {
 	case "DUPLICATE":
-		shardData, err = s.readSurvivingCopyLocked(vlogID, lostPlogID)
+		shardData, err = s.readSurvivingCopyLocked(vlogID, lostPlogID, info.Length)
 	case "EC":
 		shardData, err = s.reconstructECShardLocked(ctx, info, shardIdx, lostPlogID)
 	default:
@@ -333,6 +333,26 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	delete(s.plogs, lostPlogID)
 	delete(s.offlinePlogs, lostPlogID)
 
+	if info.ProtectionScheme == "DUPLICATE" {
+		// Quorum writes may leave a non-quorum mirror behind. Reprotection is
+		// about to remount every reachable copy at the committed vlog length, so
+		// heal any lagging survivors from the still-mounted readable vlog first.
+		mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
+		if err != nil {
+			return err
+		}
+		source := s.vlogs[vlogID]
+		for _, mapping := range mappings {
+			plog := s.plogs[mapping.PlogID]
+			if plog == nil {
+				continue
+			}
+			if err := s.catchUpDuplicatePlogLocked(ctx, source, vlogID, mapping.PlogID, plog, info.Length); err != nil {
+				return err
+			}
+		}
+	}
+
 	s.clearActiveVlogLocked(vlogID)
 	return s.remountVlogLocked(ctx, vlogID)
 }
@@ -340,7 +360,7 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 // readSurvivingCopyLocked returns the full logical bytes of any surviving mirror
 // of a DUPLICATE vlog other than the lost copy, healing bitrot in passing (the
 // read verifies sector hashes). The caller must hold vlogMu.
-func (s *Server) readSurvivingCopyLocked(vlogID, lostPlogID uint32) ([]byte, error) {
+func (s *Server) readSurvivingCopyLocked(vlogID, lostPlogID uint32, committedLength int64) ([]byte, error) {
 	mappings, err := s.db.ListVlogPlogs(context.Background(), vlogID)
 	if err != nil {
 		return nil, err
@@ -354,7 +374,12 @@ func (s *Server) readSurvivingCopyLocked(vlogID, lostPlogID uint32) ([]byte, err
 		if !ok {
 			continue
 		}
-		data, err := p.Read(0, int(p.LogicalLength()))
+		if p.LogicalLength() < committedLength {
+			lastErr = fmt.Errorf("surviving plog %d is short: %d < committed length %d",
+				m.PlogID, p.LogicalLength(), committedLength)
+			continue
+		}
+		data, err := p.Read(0, int(committedLength))
 		if err == nil {
 			return data, nil
 		}
@@ -376,6 +401,7 @@ func (s *Server) reconstructECShardLocked(ctx context.Context, info meta.VlogInf
 	if err != nil {
 		return nil, err
 	}
+	committedShardLength := info.Length / int64(info.DataShards)
 	total := int(info.DataShards + info.ParityShards)
 	shards := make([][]byte, total)
 	present := 0
@@ -388,7 +414,12 @@ func (s *Server) reconstructECShardLocked(ctx context.Context, info meta.VlogInf
 		if !ok {
 			continue // another shard also lost: leave nil for reconstruct
 		}
-		data, err := p.Read(0, int(p.LogicalLength()))
+		if p.LogicalLength() < committedShardLength {
+			lastErr = fmt.Errorf("surviving shard %d is short: %d < committed length %d",
+				m.ShardIndex, p.LogicalLength(), committedShardLength)
+			continue
+		}
+		data, err := p.Read(0, int(committedShardLength))
 		if err != nil {
 			lastErr = fmt.Errorf("read surviving shard %d: %w", m.ShardIndex, err)
 			continue

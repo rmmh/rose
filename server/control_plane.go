@@ -130,6 +130,40 @@ func (s *Server) offlinePlogsLocked(ctx context.Context, matches func(meta.PlogI
 			affected[vlogID] = true
 		}
 	}
+	offlineSet := make(map[uint32]bool, len(offline))
+	for _, plogID := range offline {
+		offlineSet[plogID] = true
+	}
+	// A mirrored quorum write can return before every extra copy catches up.
+	// Before taking the selected copies away, bring each survivor to the mounted
+	// vlog cursor while every possible source is still open.
+	for vlogID := range affected {
+		info, err := s.db.GetVlog(ctx, vlogID)
+		if err != nil {
+			return err
+		}
+		if info.ProtectionScheme != "DUPLICATE" {
+			continue
+		}
+		source := s.vlogs[vlogID]
+		if source == nil {
+			continue
+		}
+		targetLength := max(info.Length, source.Length())
+		mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
+		if err != nil {
+			return err
+		}
+		for _, mapping := range mappings {
+			plog := s.plogs[mapping.PlogID]
+			if offlineSet[mapping.PlogID] || plog == nil {
+				continue
+			}
+			if err := s.catchUpDuplicatePlogLocked(ctx, source, vlogID, mapping.PlogID, plog, targetLength); err != nil {
+				return err
+			}
+		}
+	}
 	for _, plogID := range offline {
 		if p, ok := s.plogs[plogID]; ok {
 			_ = p.Close()
@@ -227,7 +261,6 @@ func (s *Server) reopenPlogsLocked(ctx context.Context, owner string, matches fu
 // while its node or disk was offline. The existing mounted vlog still contains
 // offline stubs for the returned plogs, so its reads come from surviving copies.
 func (s *Server) catchUpReturnedDuplicatesLocked(ctx context.Context, reopened map[uint32]*storage.Plog) error {
-	const copyChunk = 1 << 20
 	for plogID, plog := range reopened {
 		vlogIDs, err := s.db.VlogsForPlog(ctx, plogID)
 		if err != nil {
@@ -255,24 +288,32 @@ func (s *Server) catchUpReturnedDuplicatesLocked(ctx context.Context, reopened m
 					targetLength = source.Length()
 				}
 			}
-			if plog.LogicalLength() >= targetLength {
-				continue
-			}
-			for offset := plog.LogicalLength(); offset < targetLength; {
-				length := min(int64(copyChunk), targetLength-offset)
-				data, err := source.Read(ctx, offset, int(length))
-				if err != nil {
-					return fmt.Errorf("read vlog %d to catch up returned plog %d: %w", vlogID, plogID, err)
-				}
-				if err := plog.EnsureAppend(offset, data); err != nil {
-					return fmt.Errorf("catch up returned plog %d at %d: %w", plogID, offset, err)
-				}
-				offset += length
-			}
-			if err := plog.Commit(); err != nil {
-				return fmt.Errorf("commit caught-up plog %d: %w", plogID, err)
+			if err := s.catchUpDuplicatePlogLocked(ctx, source, vlogID, plogID, plog, targetLength); err != nil {
+				return err
 			}
 		}
+	}
+	return nil
+}
+
+func (s *Server) catchUpDuplicatePlogLocked(ctx context.Context, source *storage.Vlog, vlogID, plogID uint32, plog *storage.Plog, targetLength int64) error {
+	const copyChunk = int64(1 << 20)
+	if plog.LogicalLength() >= targetLength {
+		return nil
+	}
+	for offset := plog.LogicalLength(); offset < targetLength; {
+		length := min(copyChunk, targetLength-offset)
+		data, err := source.Read(ctx, offset, int(length))
+		if err != nil {
+			return fmt.Errorf("read vlog %d to catch up plog %d: %w", vlogID, plogID, err)
+		}
+		if err := plog.EnsureAppend(offset, data); err != nil {
+			return fmt.Errorf("catch up plog %d at %d: %w", plogID, offset, err)
+		}
+		offset += length
+	}
+	if err := plog.Commit(); err != nil {
+		return fmt.Errorf("commit caught-up plog %d: %w", plogID, err)
 	}
 	return nil
 }

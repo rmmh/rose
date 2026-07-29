@@ -391,7 +391,18 @@ func TestReprotectDuplicateRegeneratesCopy(t *testing.T) {
 	payload := bytes.Repeat([]byte("dup-copy"), 700)
 	offset := writeVlog(t, s, vlogID, payload)
 
-	victim := diskOf(t, s, vlogID, 0)
+	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A quorum write may legitimately leave a non-quorum mirror behind. Make
+	// the first surviving candidate stale and verify reprotection selects a
+	// complete committed source instead of rebuilding a truncated replacement.
+	if err := s.plogs[shards[1].PlogID].TruncateTo(int64(len(payload) / 2)); err != nil {
+		t.Fatal(err)
+	}
+
+	victim := shards[0].DiskID
 	if err := s.SetDiskState(ctx, victim, meta.DiskFailed); err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +410,7 @@ func TestReprotectDuplicateRegeneratesCopy(t *testing.T) {
 		t.Fatalf("reprotect disk %d: %v", victim, err)
 	}
 
-	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	shards, err = s.db.VlogShardDisks(ctx, vlogID)
 	if err != nil {
 		t.Fatal(err)
 	}
