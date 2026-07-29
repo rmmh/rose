@@ -556,7 +556,10 @@ func (c *writeFaultClient) Write(context.Context, int64, []byte) (int64, error) 
 func (c *writeFaultClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
 	if c.readBlock != nil {
 		if c.readStarted != nil {
-			c.readStarted <- struct{}{}
+			select {
+			case c.readStarted <- struct{}{}:
+			default:
+			}
 		}
 		<-c.readBlock
 	}

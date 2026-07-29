@@ -215,7 +215,7 @@ func TestReplaceDiskDefersLeasedVlog(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	fileID, err := s.db.OpenFile(ctx, "/write-during-drain")
+	fileID, err := s.db.OpenFile(ctx, "write-during-drain")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,6 +443,115 @@ func TestReplaceDiskDefersInFlightRawVlogRead(t *testing.T) {
 		t.Fatalf("slow raw read = %q, want %q", result.buffer, payload)
 	}
 	if err := s.ReplaceDiskWith(ctx, 1, 2); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReplaceDiskDefersInFlightFileRead(t *testing.T) {
+	s := newControlPlaneServer(t, 2)
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{
+		Path: "/slow-file-read", OperationKey: "slow-file-read",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("file read blocked on slow mirrored nodes"), (5<<20)/len("file read blocked on slow mirrored nodes")+1)
+	payload = payload[:5<<20]
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: open.GetHandle(), Buffer: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{
+		Handle: open.GetHandle(), IdempotencyKey: "slow-file-read",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fileID, err := s.db.OpenFile(ctx, "slow-file-read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks, err := s.db.FileVersionChunks(ctx, fileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("committed file has no chunk placements")
+	}
+	vlogID := chunks[0].VlogID
+	info, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := make(chan struct{})
+	started := make(chan struct{}, len(mappings))
+	clients := make([]storage.PlogClient, len(mappings))
+	s.vlogMu.Lock()
+	for i, mapping := range mappings {
+		clients[i] = &writeFaultClient{
+			readBlock: block, readStarted: started,
+			local: &localPlogClient{plog: s.plogs[mapping.PlogID]},
+		}
+	}
+	vlog, err := storage.NewVlog(vlogID, info.ProtectionScheme, int(info.DataShards), int(info.ParityShards), clients, info.Length)
+	if err == nil {
+		s.vlogs[vlogID] = vlog
+	}
+	s.vlogMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readHandle, err := s.Open(ctx, &pb.OpenRequest{Path: "/slow-file-read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type readResult struct {
+		buffer []byte
+		err    error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		got, err := s.Read(ctx, &pb.ReadRequest{
+			Handle: readHandle.GetHandle(), Length: int64(len(payload)),
+		})
+		readDone <- readResult{buffer: got.GetBuffer(), err: err}
+	}()
+	<-started
+
+	victim := shards[0].DiskID
+	newRoot := filepath.Join(t.TempDir(), "replacement")
+	if err := os.MkdirAll(newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AttachDiskOnNode(ctx, 3, s.nodeOf(victim), newRoot, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceDiskWith(ctx, victim, 3); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DiskStates()[victim]; got != meta.DiskDraining {
+		t.Fatalf("source disk state during file read = %q, want draining", got)
+	}
+
+	close(block)
+	result := <-readDone
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if !bytes.Equal(result.buffer, payload) {
+		t.Fatalf("slow file read = %q, want %q", result.buffer, payload)
+	}
+	if err := s.ReplaceDiskWith(ctx, victim, 3); err != nil {
 		t.Fatal(err)
 	}
 }

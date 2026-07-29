@@ -33,10 +33,10 @@ type Server struct {
 	// layer treats as a missing shard; reprotect regenerates them and a returning
 	// node reopens them. Guarded by vlogMu.
 	offlinePlogs map[uint32]bool
-	// rawVlogOps counts ReadVlog/WriteVlog RPCs that have resolved a mounted vlog
+	// activeVlogOps counts client reads/writes that have resolved a mounted vlog
 	// but have not returned yet. Maintenance checks it under vlogMu before moving
-	// a shard, so it cannot close the backing clients beneath an active raw RPC.
-	rawVlogOps map[uint32]int
+	// a shard, so it cannot close the backing clients beneath active I/O.
+	activeVlogOps map[uint32]int
 
 	// vlogMu guards the vlog/plog maps, the active-vlog pointer, and the disk
 	// lifecycle cache below, so placement and commit-durability decisions see a
@@ -133,7 +133,7 @@ func NewServer(db *meta.DB) *Server {
 		plogs:              make(map[uint32]*storage.Plog),
 		vlogs:              make(map[uint32]*storage.Vlog),
 		offlinePlogs:       make(map[uint32]bool),
-		rawVlogOps:         make(map[uint32]int),
+		activeVlogOps:      make(map[uint32]int),
 		activeVlogByBucket: make(map[string]uint32),
 		bucketPolicies:     make(map[string]meta.BucketPolicy),
 		vlogKeys:           make(map[uint32][16]byte),
