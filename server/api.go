@@ -197,7 +197,9 @@ func (s *Server) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.UnlinkR
 	if err := s.db.UnlinkFile(ctx, path); err != nil {
 		return nil, err
 	}
-	s.markOpenHandlesUnlinked(path, false)
+	if err := s.markOpenHandlesUnlinked(ctx, path, false); err != nil {
+		return nil, err
+	}
 	return &pb.UnlinkResponse{}, nil
 }
 
@@ -218,7 +220,9 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 			return nil, err
 		}
 		if oldPath != newPath {
-			s.markOpenHandlesUnlinked(newPath, false)
+			if err := s.markOpenHandlesUnlinked(ctx, newPath, false); err != nil {
+				return nil, err
+			}
 		}
 		if found, retargetErr := s.retargetOpenHandles(ctx, oldPath, newPath); retargetErr != nil {
 			return nil, retargetErr
@@ -234,7 +238,9 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 		// Rename has just replaced the destination name. Any writer that opened
 		// the previous destination now refers to an unlinked object and must not
 		// overwrite the renamed source when it eventually closes.
-		s.markOpenHandlesUnlinked(newPath, false)
+		if err := s.markOpenHandlesUnlinked(ctx, newPath, false); err != nil {
+			return nil, err
+		}
 	}
 	// The committed head moved; redirect any open write handle on the old path so
 	// a later Close republishes at the new path instead of resurrecting the old.
@@ -267,22 +273,32 @@ func (s *Server) hasOpenHandleAtOrBelow(path string) bool {
 // version back at a name (or removed directory subtree) that has already been
 // removed. namespaceMu keeps new opens and closes on the other side of the
 // removal's linearization point.
-func (s *Server) markOpenHandlesUnlinked(path string, descendants bool) {
+func (s *Server) markOpenHandlesUnlinked(ctx context.Context, path string, descendants bool) error {
 	s.handlesMu.Lock()
 	handles := make([]*FileHandle, 0, len(s.handles))
 	for _, h := range s.handles {
 		handles = append(handles, h)
 	}
 	s.handlesMu.Unlock()
+	opIDs := make(map[int64]struct{})
 	for _, h := range handles {
 		h.stateMu.Lock()
 		handlePath := h.path()
 		if h.snapshotID == 0 &&
 			(handlePath == path || descendants && strings.HasPrefix(handlePath, path+"/")) {
 			h.unlinked = true
+			if h.writeOpID != 0 {
+				opIDs[h.writeOpID] = struct{}{}
+			}
 		}
 		h.stateMu.Unlock()
 	}
+	for opID := range opIDs {
+		if err := s.db.CancelWriteOp(ctx, opID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // retargetOpenHandles repoints every open handle for oldPath, or below oldPath
@@ -377,6 +393,9 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 	}
 	if op.State == meta.WriteOpCommitted {
 		return &pb.WriteResponse{AcknowledgedOffset: op.AcknowledgedOffset}, nil
+	}
+	if op.State != meta.WriteOpPrepared {
+		return nil, fmt.Errorf("write operation is %s", op.State)
 	}
 	if h.cache == nil {
 		if err := s.buildCache(ctx, h); err != nil {
@@ -676,7 +695,9 @@ func (s *Server) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.RmdirResp
 	if err := s.db.Rmdir(ctx, path); err != nil {
 		return nil, err
 	}
-	s.markOpenHandlesUnlinked(path, true)
+	if err := s.markOpenHandlesUnlinked(ctx, path, true); err != nil {
+		return nil, err
+	}
 	return &pb.RmdirResponse{}, nil
 }
 

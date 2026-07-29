@@ -493,6 +493,13 @@ func TestUnlinkOpenWriterDoesNotRepublishPathOnClose(t *testing.T) {
 	if _, err := s.Unlink(ctx, &pb.UnlinkRequest{Path: path}); err != nil {
 		t.Fatal(err)
 	}
+	if retry, err := s.Open(ctx, &pb.OpenRequest{
+		Path:         path,
+		OperationKey: "unlink-open-writer",
+	}); err == nil {
+		_, _ = s.Close(ctx, &pb.CloseRequest{Handle: retry.GetHandle()})
+		t.Fatal("cancelled write operation reopened after unlink")
+	}
 	if _, err := s.Close(ctx, &pb.CloseRequest{
 		Handle:         open.GetHandle(),
 		IdempotencyKey: "unlink-open-writer",
