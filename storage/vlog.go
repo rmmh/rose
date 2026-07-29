@@ -361,14 +361,28 @@ func (v *Vlog) Read(ctx context.Context, offset int64, length int) ([]byte, erro
 		return nil, fmt.Errorf("vlog %d read past end: %d > %d", v.id, end, v.Length())
 	}
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
-		// Try reading from the first available client
+		// Read mirrors concurrently so a slow or unreachable copy cannot hide a
+		// healthy one for the full request deadline.
+		readCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		type result struct {
+			data []byte
+			err  error
+		}
+		results := make(chan result, len(v.clients))
+		for _, client := range v.clients {
+			go func(c PlogClient) {
+				data, err := c.Read(readCtx, offset, length)
+				results <- result{data: data, err: err}
+			}(client)
+		}
 		var lastErr error
-		for _, c := range v.clients {
-			data, err := c.Read(ctx, offset, length)
-			if err == nil {
-				return data, nil
+		for range v.clients {
+			got := <-results
+			if got.err == nil {
+				return got.data, nil
 			}
-			lastErr = err
+			lastErr = got.err
 		}
 		return nil, fmt.Errorf("all clients failed to read from DUPLICATE vlog %d: %w", v.id, lastErr)
 	}

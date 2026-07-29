@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sync"
 	"testing"
 )
 
 // simulatedPlogClient is an in-memory client that can be instructed to fail
 type simulatedPlogClient struct {
+	mu          sync.Mutex
 	id          int
 	data        []byte
 	failOnWrite bool
@@ -17,6 +19,8 @@ type simulatedPlogClient struct {
 }
 
 func (s *simulatedPlogClient) Write(ctx context.Context, txnID int64, data []byte) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.failOnWrite {
 		return 0, fmt.Errorf("simulated write failure on plog %d", s.id)
 	}
@@ -30,6 +34,8 @@ func (s *simulatedPlogClient) Write(ctx context.Context, txnID int64, data []byt
 }
 
 func (s *simulatedPlogClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.failOnRead {
 		return nil, fmt.Errorf("simulated read failure on plog %d", s.id)
 	}

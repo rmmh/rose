@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
+	"github.com/rmmh/rose/storage"
 )
 
 // newNodeServer builds a recovered server whose disks are grouped onto nodes per
@@ -334,6 +336,52 @@ func TestDuplicateVlogWritesWithMinimumCopiesAfterNodeFailure(t *testing.T) {
 	}
 	if !bytes.Equal(read.GetBuffer(), payload) {
 		t.Fatalf("degraded read = %q, want %q", read.GetBuffer(), payload)
+	}
+}
+
+type readFaultClient struct {
+	data []byte
+	slow bool
+}
+
+func (c *readFaultClient) Write(context.Context, int64, []byte) (int64, error) {
+	return 0, fmt.Errorf("unused")
+}
+
+func (c *readFaultClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
+	if c.slow {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+		return append([]byte(nil), c.data[offset:offset+int64(length)]...), nil
+	}
+}
+
+func TestReadVlogDoesNotWaitForSlowDuplicate(t *testing.T) {
+	payload := []byte("healthy duplicate")
+	vlog, err := storage.NewVlog(99, "DUPLICATE", 1, 0, []storage.PlogClient{
+		&readFaultClient{slow: true},
+		&readFaultClient{data: payload},
+	}, int64(len(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{vlogs: map[uint32]*storage.Vlog{99: vlog}}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: 99, Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatalf("healthy duplicate was hidden behind a slow copy: %v", err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload) {
+		t.Fatalf("read = %q, want %q", read.GetBuffer(), payload)
 	}
 }
 
