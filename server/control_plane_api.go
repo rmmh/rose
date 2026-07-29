@@ -88,6 +88,21 @@ func (s *Server) ReplaceDisk(ctx context.Context, req *pb.ReplaceDiskRequest) (*
 	if !ok {
 		return nil, fmt.Errorf("disk %d is not configured", req.GetOldDiskId())
 	}
+	if _, configured := s.DiskStates()[req.GetNewDiskId()]; configured {
+		s.vlogMu.Lock()
+		destNode := s.nodeOf(req.GetNewDiskId())
+		s.vlogMu.Unlock()
+		if destNode != req.GetNodeId() {
+			return nil, fmt.Errorf("replace: destination disk %d belongs to node %d, not node %d", req.GetNewDiskId(), destNode, req.GetNodeId())
+		}
+		totalBytes, err := s.db.DiskCapacity(ctx, req.GetNewDiskId())
+		if err != nil {
+			return nil, err
+		}
+		if totalBytes != req.GetTotalBytes() {
+			return nil, fmt.Errorf("replace: destination disk %d has capacity %d, not %d", req.GetNewDiskId(), totalBytes, req.GetTotalBytes())
+		}
+	}
 	if state == meta.DiskDetached {
 		job, exists, err := s.db.LatestDiskJob(ctx, meta.JobReplace, req.GetOldDiskId())
 		if err != nil {

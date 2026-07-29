@@ -759,6 +759,16 @@ func TestReplaceDiskUsesPreAttachedEmptyDestination(t *testing.T) {
 	if retry.GetJobId() != job.GetJobId() {
 		t.Fatalf("ReplaceDisk retry job = %d, want %d", retry.GetJobId(), job.GetJobId())
 	}
+	if _, err := srv.ReplaceDisk(ctx, &pb.ReplaceDiskRequest{
+		OldDiskId: 1, NewDiskId: 2, NodeId: 3, TotalBytes: 1 << 30,
+	}); err == nil {
+		t.Fatal("completed ReplaceDisk retry changed the destination node")
+	}
+	if _, err := srv.ReplaceDisk(ctx, &pb.ReplaceDiskRequest{
+		OldDiskId: 1, NewDiskId: 2, NodeId: 2, TotalBytes: 2 << 30,
+	}); err == nil {
+		t.Fatal("completed ReplaceDisk retry changed the destination capacity")
+	}
 }
 
 func TestReplaceDiskRetryFinishesDetachedRunningJob(t *testing.T) {
