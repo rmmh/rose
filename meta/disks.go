@@ -100,6 +100,16 @@ func (d *DB) DiskUID(ctx context.Context, diskID uint32) (uid.UID, error) {
 	return uid.FromBytes(rawUID)
 }
 
+// DiskCapacity returns the capacity declared when the disk was first attached.
+func (d *DB) DiskCapacity(ctx context.Context, diskID uint32) (uint64, error) {
+	var total uint64
+	err := d.db.QueryRowContext(ctx, "SELECT total_bytes FROM disk WHERE id = ?", diskID).Scan(&total)
+	if err == sql.ErrNoRows {
+		return 0, fmt.Errorf("disk %d is not registered", diskID)
+	}
+	return total, err
+}
+
 // VlogShardDisk maps one shard of a vlog to the disk currently backing it.
 type VlogShardDisk struct {
 	ShardIndex int

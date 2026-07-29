@@ -24,6 +24,13 @@ func (s *Server) AddDisk(ctx context.Context, req *pb.AddDiskRequest) (*pb.AddDi
 		if s.nodeOf(req.GetDiskId()) != req.GetNodeId() {
 			return nil, fmt.Errorf("disk %d is already attached to node %d", req.GetDiskId(), s.nodeOf(req.GetDiskId()))
 		}
+		totalBytes, err := s.db.DiskCapacity(ctx, req.GetDiskId())
+		if err != nil {
+			return nil, err
+		}
+		if totalBytes != req.GetTotalBytes() {
+			return nil, fmt.Errorf("disk %d is already attached with capacity %d", req.GetDiskId(), totalBytes)
+		}
 		return &pb.AddDiskResponse{}, nil
 	}
 	if err := s.attachDiskOnNodeLocked(ctx, req.GetDiskId(), req.GetNodeId(), root, req.GetTotalBytes()); err != nil {

@@ -729,6 +729,11 @@ func TestReplaceDiskUsesPreAttachedEmptyDestination(t *testing.T) {
 	}); err == nil {
 		t.Fatal("AddDisk retry changed the disk's node identity")
 	}
+	if _, err := srv.AddDisk(ctx, &pb.AddDiskRequest{
+		DiskId: 2, NodeId: 2, TotalBytes: 2 << 30,
+	}); err == nil {
+		t.Fatal("AddDisk retry changed the disk's declared capacity")
+	}
 	job, err := srv.ReplaceDisk(ctx, &pb.ReplaceDiskRequest{
 		OldDiskId: 1, NewDiskId: 2, NodeId: 2, TotalBytes: 1 << 30,
 	})
