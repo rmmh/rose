@@ -53,13 +53,37 @@ func (s *Server) ReplaceDisk(ctx context.Context, req *pb.ReplaceDiskRequest) (*
 	if state != meta.DiskActive && state != meta.DiskDraining {
 		return nil, fmt.Errorf("disk %d is %s, cannot replace", req.GetOldDiskId(), state)
 	}
-	root := filepath.Join(s.dataDir, fmt.Sprintf("disk-%d", req.GetNewDiskId()))
-	if err := s.AttachDiskOnNode(ctx, req.GetNewDiskId(), req.GetNodeId(), root, req.GetTotalBytes()); err != nil {
-		return nil, err
-	}
-	job, err := s.db.GetOrCreateReplaceJob(ctx, req.GetOldDiskId(), req.GetNewDiskId())
+
+	// A failed replacement pass has already attached its destination and left a
+	// durable running job. Retrying the RPC must resume that job rather than fail
+	// at AttachDiskOnNode because the destination now exists.
+	var job meta.Job
+	jobs, err := s.db.RunningJobs(ctx)
 	if err != nil {
 		return nil, err
+	}
+	for _, running := range jobs {
+		if running.Kind == meta.JobReplace && running.TargetDisk == req.GetOldDiskId() {
+			job = running
+			break
+		}
+	}
+	if job.ID != 0 {
+		if job.DestDisk != req.GetNewDiskId() {
+			return nil, fmt.Errorf("replace: disk %d already has running replacement onto disk %d", req.GetOldDiskId(), job.DestDisk)
+		}
+		if _, ok := s.DiskStates()[job.DestDisk]; !ok {
+			return nil, fmt.Errorf("replace: destination disk %d for running job is not configured", job.DestDisk)
+		}
+	} else {
+		root := filepath.Join(s.dataDir, fmt.Sprintf("disk-%d", req.GetNewDiskId()))
+		if err := s.AttachDiskOnNode(ctx, req.GetNewDiskId(), req.GetNodeId(), root, req.GetTotalBytes()); err != nil {
+			return nil, err
+		}
+		job, err = s.db.GetOrCreateReplaceJob(ctx, req.GetOldDiskId(), req.GetNewDiskId())
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := s.ReplaceDiskWith(ctx, req.GetOldDiskId(), req.GetNewDiskId()); err != nil {
 		return nil, err

@@ -1005,6 +1005,10 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 			return fmt.Errorf("drain: flush plog %d: %w", plogID, err)
 		}
 		_ = p.Close()
+		// Do not leave a closed handle registered if the external copy or the
+		// catalog flip fails. A later retry can reopen/copy the authoritative
+		// source once its disk is reachable again.
+		delete(s.plogs, plogID)
 	}
 	if err := copyFile(oldPath, newPath); err != nil {
 		return fmt.Errorf("drain: copy plog %d to disk %d: %w", plogID, toDisk, err)

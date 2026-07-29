@@ -446,6 +446,89 @@ func TestVlogCommitOverGRPC(t *testing.T) {
 	}
 }
 
+func TestReplaceDiskRPCRetryResumesAfterSourceReturns(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "plogs")
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	srv := server.NewServerWithDataDir(db, dataDir)
+	srv.SetMaintenanceInterval(0)
+	if err := srv.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.StopMaintenanceDriver()
+	lis := bufconn.Listen(1024 * 1024)
+	grpcServer := grpc.NewServer()
+	pb.RegisterRoseServer(grpcServer, srv)
+	go func() { _ = grpcServer.Serve(lis) }()
+	defer grpcServer.Stop()
+	conn, err := grpc.NewClient("passthrough:///rose",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return lis.Dial()
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client := pb.NewRoseClient(conn)
+
+	vlog, err := srv.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "DUPLICATE",
+		DataShards:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("replacement must survive a transient source outage")
+	write, err := srv.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: vlog.GetVlogId(),
+		TxnId:  1,
+		Buffer: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 1}); err != nil {
+		t.Fatal(err)
+	}
+	plogs, err := db.PlogsOnDisk(ctx, 1)
+	if err != nil || len(plogs) != 1 {
+		t.Fatalf("source plogs = %v, err = %v", plogs, err)
+	}
+	source := filepath.Join(dataDir, fmt.Sprintf("plog-%05d", plogs[0].PlogID))
+	offline := source + ".offline"
+	if err := os.Rename(source, offline); err != nil {
+		t.Fatal(err)
+	}
+
+	req := &pb.ReplaceDiskRequest{OldDiskId: 1, NewDiskId: 2, NodeId: 2}
+	if _, err := client.ReplaceDisk(ctx, req); err == nil {
+		t.Fatal("replacement with an unavailable source plog succeeded")
+	}
+	if err := os.Rename(offline, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ReplaceDisk(ctx, req); err != nil {
+		t.Fatalf("retry after source returned: %v", err)
+	}
+	read, err := srv.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: vlog.GetVlogId(),
+		Offset: write.GetOffset(),
+		Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload) {
+		t.Fatalf("payload after resumed replacement = %q, want %q", read.GetBuffer(), payload)
+	}
+}
+
 func TestVlogCommitControlsRecoveredLength(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
