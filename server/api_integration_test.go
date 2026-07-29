@@ -550,6 +550,36 @@ func TestRecoverReopensPersistedVlogs(t *testing.T) {
 	}
 }
 
+func TestRestartDoesNotReuseLiveRPCHandles(t *testing.T) {
+	db, err := meta.OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	before := server.NewServer(db)
+	old, err := before.Open(ctx, &pb.OpenRequest{Path: "/before-restart"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A reconnected client can still have an RPC containing a handle issued by
+	// the previous process. It must be rejected, never alias a newly opened file
+	// merely because the per-process counter restarted at the same value.
+	after := server.NewServer(db)
+	current, err := after.Open(ctx, &pb.OpenRequest{Path: "/after-restart"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.GetHandle() == current.GetHandle() {
+		t.Fatalf("restart reused live handle %d", old.GetHandle())
+	}
+	if _, err := after.Read(ctx, &pb.ReadRequest{Handle: old.GetHandle(), Length: 1}); err == nil {
+		t.Fatal("stale pre-restart handle addressed a post-restart file")
+	}
+}
+
 // TestPinnedDedupChunkSurvivesConcurrentReclaim exercises the dedup/GC race the
 // chunk-pin mechanism closes: an in-flight write deduplicates against an existing
 // chunk, that chunk's last committed reference is then deleted, and a full

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -145,12 +146,22 @@ func NewServer(db *meta.DB) *Server {
 		pinnedChunks:       make(map[int64]map[string]struct{}),
 		writeOpExpiry:      DefaultWriteOpExpiry,
 		startTime:          time.Now(),
-		// Handle ids start at 1 so 0 is reserved as the "no handle" sentinel used
-		// by OpenResponse and the FUSE layer.
-		handleCounter: 1,
+		handleCounter:      newHandleCounter(),
 	}
 	s.resetDiskStates()
 	return s
+}
+
+// newHandleCounter gives each server process a distinct positive handle
+// namespace. A delayed RPC from a reconnected client must not alias an unrelated
+// handle merely because a replacement process restarted its counter.
+func newHandleCounter() int64 {
+	u := uid.New()
+	n := int64(binary.LittleEndian.Uint64(u[:8]) >> 1)
+	if n == 0 {
+		return 1
+	}
+	return n
 }
 
 // resetDiskStates marks every configured disk active. It is the in-memory
