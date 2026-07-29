@@ -1413,6 +1413,10 @@ func TestRecoverReopensPersistedVlogs(t *testing.T) {
 	defer db.Close()
 	ctx := context.Background()
 	first := server.NewServerWithDataDir(db, filepath.Join(dir, "disk1"))
+	first.SetMaintenanceInterval(0)
+	if err := first.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
 	opened, err := first.Open(ctx, &pb.OpenRequest{Path: "/recovered"})
 	if err != nil {
 		t.Fatal(err)
@@ -1481,6 +1485,10 @@ func TestRestartDoesNotResurrectHistoricalPaths(t *testing.T) {
 	}
 	ctx := context.Background()
 	before := server.NewServerWithDataDir(db, disk)
+	before.SetMaintenanceInterval(0)
+	if err := before.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
 	writeServerFile(t, before, "/deleted", []byte("deleted data"))
 	if _, err := before.Unlink(ctx, &pb.UnlinkRequest{Path: "/deleted"}); err != nil {
 		t.Fatal(err)
@@ -1676,6 +1684,10 @@ func TestCompactionRewritesVlogAndReclaimsSpace(t *testing.T) {
 	diskRoot := filepath.Join(dir, "disk")
 	s := server.NewServerWithDataDir(db, diskRoot)
 	ctx := context.Background()
+	s.SetMaintenanceInterval(0)
+	if err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	// Distinct payloads land in one active vlog. Keep /keep, delete the rest.
 	keep := make([]byte, 64*1024)
@@ -1792,6 +1804,10 @@ func TestCompactionResumesAfterRestart(t *testing.T) {
 	diskRoot := filepath.Join(dir, "disk")
 	s := server.NewServerWithDataDir(db, diskRoot)
 	ctx := context.Background()
+	s.SetMaintenanceInterval(0)
+	if err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	keep := make([]byte, 32*1024)
 	rand.New(rand.NewSource(5)).Read(keep)
@@ -1967,6 +1983,10 @@ func TestScrubFlagsCorruptionAndReplicaServesGoodData(t *testing.T) {
 	disk2 := filepath.Join(dir, "disk2")
 	s := server.NewServerWithDiskRoots(db, map[uint32]string{1: disk1, 2: disk2})
 	ctx := context.Background()
+	s.SetMaintenanceInterval(0)
+	if err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	// A payload larger than one hash-protected block (>1MB) so its first sectors
 	// are sealed with durable on-disk hashes that scrub can validate.
@@ -2335,6 +2355,10 @@ func TestDuplicatePlacementUsesEveryConfiguredDisk(t *testing.T) {
 	disk2 := filepath.Join(dir, "disk2")
 	s := server.NewServerWithDiskRoots(db, map[uint32]string{1: disk1, 2: disk2})
 	ctx := context.Background()
+	s.SetMaintenanceInterval(0)
+	if err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
 	opened, err := s.Open(ctx, &pb.OpenRequest{Path: "/replicated"})
 	if err != nil {
 		t.Fatal(err)

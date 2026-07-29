@@ -382,10 +382,16 @@ func (s *Server) Recover(ctx context.Context) error {
 			continue
 		}
 		plog, err := storage.OpenExistingPlog(s.plogPath(info.DiskID, info.ID), info.ID)
+		if err == nil {
+			err = s.validatePlogIdentity(ctx, info, plog)
+		}
 		if err != nil {
 			// The disk root is reachable, but this individual shard is absent,
 			// corrupt, or unreadable. Stub only the shard offline: surviving
 			// redundancy can still mount, while maintenance repairs it later.
+			if plog != nil {
+				_ = plog.Close()
+			}
 			s.offlinePlogs[info.ID] = true
 			slog.Warn("taking unreadable plog offline during recovery",
 				"plogID", info.ID, "diskID", info.DiskID, "error", err)
@@ -514,6 +520,30 @@ func (s *Server) Recover(ctx context.Context) error {
 		}
 	}
 	s.startMaintenanceDriver()
+	return nil
+}
+
+func (s *Server) validatePlogIdentity(ctx context.Context, info meta.PlogInfo, plog *storage.Plog) error {
+	header := plog.Header()
+	if header.GetPlogId() != info.ID {
+		return fmt.Errorf("plog header id %d does not match catalog id %d", header.GetPlogId(), info.ID)
+	}
+	clusterUID, err := uid.FromBytes(header.GetClusterUid())
+	if err != nil || clusterUID != s.clusterUID {
+		return fmt.Errorf("plog %d cluster uid does not match catalog", info.ID)
+	}
+	plogUID, err := uid.FromBytes(header.GetPlogUid())
+	if err != nil || plogUID != info.UID {
+		return fmt.Errorf("plog %d uid does not match catalog", info.ID)
+	}
+	wantDiskUID, err := s.db.DiskUID(ctx, info.DiskID)
+	if err != nil {
+		return err
+	}
+	diskUID, err := uid.FromBytes(header.GetDiskUid())
+	if err != nil || diskUID != wantDiskUID {
+		return fmt.Errorf("plog %d disk uid does not match catalog disk %d", info.ID, info.DiskID)
+	}
 	return nil
 }
 

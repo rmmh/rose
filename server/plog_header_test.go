@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/rmmh/rose/meta"
+	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/storage"
 )
 
@@ -126,5 +127,72 @@ func TestPlogSuperblockMembership(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(roots[id], diskUIDMarker)); err != nil {
 			t.Errorf("disk %d missing rose_disk_uid marker: %v", id, err)
 		}
+	}
+}
+
+func TestRecoveryRejectsSubstitutedPlogIdentity(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	root := filepath.Join(dir, "disk")
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	before := NewServerWithDiskRoots(db, map[uint32]string{1: root})
+	before.SetMaintenanceInterval(0)
+	if err := before.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before.vlogMu.Lock()
+	firstVlog, _, err := before.provisionVlogLocked(ctx, "NONE", 1, 0)
+	if err == nil {
+		_, _, err = before.provisionVlogLocked(ctx, "NONE", 1, 0)
+	}
+	before.vlogMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: firstVlog, TxnId: 1, Buffer: []byte("first-vlog"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 1}); err != nil {
+		t.Fatal(err)
+	}
+	plogs, err := db.ListPlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plogs) != 2 {
+		t.Fatalf("plog count = %d, want 2", len(plogs))
+	}
+	firstPath := before.plogPath(plogs[0].DiskID, plogs[0].ID)
+	secondPath := before.plogPath(plogs[1].DiskID, plogs[1].ID)
+	before.CloseStorage()
+
+	substitute, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(firstPath, substitute, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	after := NewServerWithDiskRoots(db, map[uint32]string{1: root})
+	after.SetMaintenanceInterval(0)
+	if err := after.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer after.CloseStorage()
+	if !after.offlinePlogs[plogs[0].ID] || after.plogs[plogs[0].ID] != nil {
+		t.Fatal("recovery mounted a substituted plog under the victim catalog identity")
+	}
+	if _, err := after.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: firstVlog, Length: uint32(len("first-vlog")),
+	}); err == nil {
+		t.Fatal("read served bytes from a substituted plog")
 	}
 }
