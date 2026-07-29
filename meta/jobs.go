@@ -122,6 +122,18 @@ func (d *DB) GetOrCreateScrubRepairJob(ctx context.Context, targetVlog uint32) (
 	return Job{ID: id, Kind: JobScrubRepair, State: JobRunning, TargetVlog: targetVlog}, nil
 }
 
+// FinishRunningScrubRepairJob closes the crash window where every bad shard was
+// repaired but the job's final state update had not committed yet.
+func (d *DB) FinishRunningScrubRepairJob(ctx context.Context, targetVlog uint32) error {
+	_, err := d.db.ExecContext(ctx,
+		"UPDATE job SET state = ? WHERE kind = ? AND state = ? AND target_vlog = ?",
+		JobDone, JobScrubRepair, JobRunning, targetVlog)
+	if err != nil {
+		return fmt.Errorf("finish scrub-repair job for vlog %d: %w", targetVlog, err)
+	}
+	return nil
+}
+
 // GetOrCreateDrainJob returns the running drain job for a disk, creating one if
 // none exists. Like compaction, reusing an in-flight job is what lets a crashed
 // drain resume rather than restart: the disk is already draining and its

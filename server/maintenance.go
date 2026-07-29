@@ -465,6 +465,9 @@ func (s *Server) repairOneVlogLocked(ctx context.Context, vlogID uint32) (scrubb
 	}
 	corrupt = mergeShards(corrupt, offline)
 	if len(corrupt) == 0 {
+		if err := s.db.FinishRunningScrubRepairJob(ctx, vlogID); err != nil {
+			return scrubbed, 0, nil, err
+		}
 		return scrubbed, 0, nil, nil
 	}
 

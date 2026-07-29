@@ -1815,6 +1815,63 @@ func TestScrubAndRepairHealsDuplicate(t *testing.T) {
 	}
 }
 
+func TestRecoverFinishesScrubRepairCompletedBeforeCrash(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta.db")
+	roots := map[uint32]string{
+		1: filepath.Join(dir, "disk-1"),
+		2: filepath.Join(dir, "disk-2"),
+	}
+	db, err := meta.Open(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	before := server.NewServerWithDiskRoots(db, roots)
+	before.SetMaintenanceInterval(0)
+	if err := before.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	vlog, err := before.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "DUPLICATE",
+		DataShards:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// This is the durable state left when a repaired shard has been replaced and
+	// the process crashes before the scrub job's final state update: the vlog is
+	// healthy, but its job is still running.
+	job, err := db.GetOrCreateScrubRepairJob(ctx, vlog.GetVlogId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.CloseStorage()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := meta.Open(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	after := server.NewServerWithDiskRoots(reopened, roots)
+	after.SetMaintenanceInterval(0)
+	if err := after.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer after.StopMaintenanceDriver()
+	recovered, err := reopened.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != meta.JobDone {
+		t.Fatalf("post-repair scrub job state = %q, want done", recovered.State)
+	}
+}
+
 func TestDuplicatePlacementUsesEveryConfiguredDisk(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
