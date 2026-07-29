@@ -45,8 +45,30 @@ func diskUIDForRoot(root string) (uid.UID, error) {
 	if err := os.WriteFile(tmp, []byte(u.String()+"\n"), 0o644); err != nil {
 		return uid.UID{}, fmt.Errorf("write disk uid marker %q: %w", markerPath, err)
 	}
+	tmpFile, err := os.Open(tmp)
+	if err != nil {
+		return uid.UID{}, fmt.Errorf("open disk uid marker temp file %q: %w", tmp, err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return uid.UID{}, fmt.Errorf("sync disk uid marker temp file %q: %w", tmp, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return uid.UID{}, fmt.Errorf("close disk uid marker temp file %q: %w", tmp, err)
+	}
 	if err := os.Rename(tmp, markerPath); err != nil {
 		return uid.UID{}, fmt.Errorf("install disk uid marker %q: %w", markerPath, err)
+	}
+	dir, err := os.Open(root)
+	if err != nil {
+		return uid.UID{}, fmt.Errorf("open disk directory %q for sync: %w", root, err)
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return uid.UID{}, fmt.Errorf("sync disk directory %q: %w", root, err)
+	}
+	if err := dir.Close(); err != nil {
+		return uid.UID{}, fmt.Errorf("close disk directory %q: %w", root, err)
 	}
 	return u, nil
 }
