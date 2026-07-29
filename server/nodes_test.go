@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/reedsolomon"
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/storage"
@@ -430,6 +431,67 @@ func TestSlowVlogReadDoesNotBlockUnrelatedVlog(t *testing.T) {
 		t.Fatalf("read = %q, want %q", read.GetBuffer(), payload)
 	}
 	<-slowDone
+}
+
+type ecReadFaultClient struct {
+	data []byte
+	fail bool
+	slow bool
+}
+
+func (c *ecReadFaultClient) Write(context.Context, int64, []byte) (int64, error) {
+	return 0, fmt.Errorf("unused")
+}
+
+func (c *ecReadFaultClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
+	if c.fail {
+		return nil, fmt.Errorf("disk read failed")
+	}
+	if c.slow {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return append([]byte(nil), c.data[offset:offset+int64(length)]...), nil
+}
+
+func TestECReadDoesNotWaitForSlowShardAfterReconstructionQuorum(t *testing.T) {
+	defer storage.SetECColumnBytesForTest(32)()
+	shards := [][]byte{
+		bytes.Repeat([]byte{'a'}, 32),
+		bytes.Repeat([]byte{'b'}, 32),
+		make([]byte, 32),
+		make([]byte, 32),
+	}
+	encoder, err := reedsolomon.New(2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Encode(shards); err != nil {
+		t.Fatal(err)
+	}
+	vlog, err := storage.NewVlog(105, "EC", 2, 2, []storage.PlogClient{
+		&ecReadFaultClient{fail: true},
+		&ecReadFaultClient{data: shards[1]},
+		&ecReadFaultClient{data: shards[2]},
+		&ecReadFaultClient{slow: true},
+	}, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{vlogs: map[uint32]*storage.Vlog{105: vlog}}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{VlogId: 105, Length: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("EC reconstruction waited for a slow shard after reaching data quorum: %v", err)
+	}
+	if !bytes.Equal(read.GetBuffer(), shards[0][:8]) {
+		t.Fatalf("read = %q, want %q", read.GetBuffer(), shards[0][:8])
+	}
 }
 
 type writeFaultClient struct {

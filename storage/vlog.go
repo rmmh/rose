@@ -458,21 +458,40 @@ func (v *Vlog) readRowRange(ctx context.Context, row, a, b int64) ([]byte, error
 // vlogs only ever store complete rows.
 func (v *Vlog) reconstructRow(ctx context.Context, row int64) ([][]byte, error) {
 	shards := make([][]byte, len(v.clients))
-	var mu sync.Mutex
-	missing := 0
-	_ = v.fanout(ctx, func(opCtx context.Context, idx int, client PlogClient) error {
-		data, err := client.Read(opCtx, row*ecColumnBytes, int(ecColumnBytes))
-		mu.Lock()
-		defer mu.Unlock()
-		if err == nil && int64(len(data)) == ecColumnBytes {
-			shards[idx] = data
+	columnBytes := ecColumnBytes
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		index int
+		data  []byte
+		err   error
+	}
+	results := make(chan result, len(v.clients))
+	for index, client := range v.clients {
+		go func(idx int, c PlogClient) {
+			data, err := c.Read(readCtx, row*columnBytes, int(columnBytes))
+			if err == nil && int64(len(data)) != columnBytes {
+				err = fmt.Errorf("short shard read: got %d, want %d", len(data), columnBytes)
+			}
+			results <- result{index: idx, data: data, err: err}
+		}(index, client)
+	}
+	available := 0
+	failed := 0
+	for range v.clients {
+		got := <-results
+		if got.err != nil {
+			failed++
+			if failed > v.parityShards {
+				return nil, fmt.Errorf("EC vlog %d row %d: %d shards missing > %d parity", v.id, row, failed, v.parityShards)
+			}
 		} else {
-			missing++
+			shards[got.index] = got.data
+			available++
+			if available >= v.dataShards {
+				break
+			}
 		}
-		return nil
-	})
-	if missing > v.parityShards {
-		return nil, fmt.Errorf("EC vlog %d row %d: %d shards missing > %d parity", v.id, row, missing, v.parityShards)
 	}
 	if err := v.encoder.Reconstruct(shards); err != nil {
 		return nil, fmt.Errorf("reconstruct EC vlog %d row %d: %w", v.id, row, err)
