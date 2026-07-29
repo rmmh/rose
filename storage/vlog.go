@@ -537,6 +537,8 @@ func ReconstructECShard(dataShards, parityShards int, shards [][]byte) error {
 
 // Commit makes all physical writes issued through this virtual log durable.
 func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
+	v.writeMu.Lock()
+	defer v.writeMu.Unlock()
 	return v.fanoutQuorum(ctx, v.writeQuorum, func(opCtx context.Context, _ int, client PlogClient) error {
 		committer, ok := client.(committingPlogClient)
 		if !ok {

@@ -654,6 +654,48 @@ func TestConcurrentWriteVlogCannotCrossAddressBoundary(t *testing.T) {
 	}
 }
 
+func TestCommitVlogWaitsForConcurrentWrite(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	vlog, err := storage.NewVlog(106, "NONE", 1, 0, []storage.PlogClient{
+		&writeFaultClient{block: block, started: started},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newControlPlaneServer(t, 1)
+	s.vlogs = map[uint32]*storage.Vlog{106: vlog}
+	ctx := context.Background()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+			VlogId: 106, TxnId: 1, Buffer: []byte("slow write"),
+		})
+		writeDone <- err
+	}()
+	<-started
+
+	commitDone := make(chan error, 1)
+	go func() {
+		_, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 1})
+		commitDone <- err
+	}()
+	select {
+	case err := <-commitDone:
+		t.Fatalf("commit returned before concurrent write completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(block)
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-commitDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDiskRoundTripPreservesLeasedWriteTail(t *testing.T) {
 	s := newControlPlaneServer(t, 2)
 	ctx := context.Background()
