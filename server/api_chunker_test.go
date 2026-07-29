@@ -34,6 +34,26 @@ func TestWriteWaitingBehindCloseCannotMutateRemovedHandle(t *testing.T) {
 	}
 }
 
+func TestReadWaitingBehindCloseCannotUseRemovedHandle(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/close-read-race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.handles[open.GetHandle()]
+
+	// `h` is the pointer Read captured from the handle map. Complete a
+	// concurrent Close before resuming Read at its post-lookup cut point.
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	req := &pb.ReadRequest{Handle: open.GetHandle(), Length: 1}
+	if _, err := s.readHandle(ctx, req, h); err == nil || err.Error() != "invalid handle" {
+		t.Fatalf("Read after winning Close = %v, want invalid handle", err)
+	}
+}
+
 func TestPathTruncateFailureDoesNotLeakTransientHandle(t *testing.T) {
 	s := newControlPlaneServer(t, 1)
 	ctx := context.Background()

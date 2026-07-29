@@ -555,8 +555,17 @@ func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRespons
 		slog.Error("Read failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
 	}
+	return s.readHandle(ctx, req, h)
+}
+
+// readHandle is the post-lookup half of Read, split out so deterministic
+// concurrency tests can pause at the lookup-to-state-lock cut point.
+func (s *Server) readHandle(ctx context.Context, req *pb.ReadRequest, h *FileHandle) (*pb.ReadResponse, error) {
 	h.stateMu.Lock()
 	defer h.stateMu.Unlock()
+	if !s.handleStillRegistered(req.GetHandle(), h) {
+		return nil, fmt.Errorf("invalid handle")
+	}
 	if err := s.refreshCommittedHandle(ctx, h); err != nil {
 		return nil, err
 	}
