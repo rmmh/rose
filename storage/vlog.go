@@ -140,29 +140,20 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 	logicalLen := int64(len(data))
 
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
-		// Write to all clients concurrently
-		var wg sync.WaitGroup
-		errs := make(chan error, len(v.clients))
-
-		for _, c := range v.clients {
-			wg.Add(1)
-			go func(client PlogClient) {
-				defer wg.Done()
-				_, err := client.Write(ctx, txnID, data)
-				if err != nil {
-					errs <- err
-				}
-			}(c)
+		offset := atomic.LoadInt64(&v.length)
+		if err := v.fanout(func(_ int, client PlogClient) error {
+			if positioned, ok := client.(positionedPlogClient); ok {
+				return positioned.EnsureAppend(ctx, offset, data)
+			}
+			got, err := client.Write(ctx, txnID, data)
+			if err == nil && got != offset {
+				return fmt.Errorf("vlog %d plog append offset %d, want %d", v.id, got, offset)
+			}
+			return err
+		}); err != nil {
+			return 0, err
 		}
-		wg.Wait()
-		close(errs)
-
-		if len(errs) > 0 {
-			// In a real system, we'd handle partial failures via txn or ragged edges logic.
-			return 0, <-errs
-		}
-
-		offset := atomic.AddInt64(&v.length, logicalLen) - logicalLen
+		atomic.AddInt64(&v.length, logicalLen)
 		return offset, nil
 	}
 
@@ -183,9 +174,16 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 			if err != nil {
 				return 0, err
 			}
+			plogOffset := (offset + rowOff) / sw * ecColumnBytes
 			if err := v.fanout(func(idx int, client PlogClient) error {
-				_, werr := client.Write(ctx, txnID, shards[idx])
-				return werr
+				if positioned, ok := client.(positionedPlogClient); ok {
+					return positioned.EnsureAppend(ctx, plogOffset, shards[idx])
+				}
+				got, err := client.Write(ctx, txnID, shards[idx])
+				if err == nil && got != plogOffset {
+					return fmt.Errorf("EC vlog %d shard %d append offset %d, want %d", v.id, idx, got, plogOffset)
+				}
+				return err
 			}); err != nil {
 				return 0, err
 			}

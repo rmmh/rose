@@ -26,11 +26,22 @@ func (c *writeFailingPlogClient) Write(ctx context.Context, txnID int64, data []
 }
 
 func (c *writeFailingPlogClient) EnsureAppend(ctx context.Context, offset int64, data []byte) error {
+	if c.fail {
+		return fmt.Errorf("injected write failure")
+	}
 	positioned, ok := c.PlogClient.(positionedPlogClient)
 	if !ok {
 		return fmt.Errorf("wrapped client does not support positioned writes")
 	}
 	return positioned.EnsureAppend(ctx, offset, data)
+}
+
+func (c *writeFailingPlogClient) Commit(ctx context.Context, txnID int64) error {
+	committer, ok := c.PlogClient.(committingPlogClient)
+	if !ok {
+		return fmt.Errorf("wrapped client does not support commit")
+	}
+	return committer.Commit(ctx, txnID)
 }
 
 type commitFailingPlogClient struct {
@@ -103,11 +114,20 @@ func TestDuplicateVlogWritePartialFanoutRetryDoesNotAdvanceLength(t *testing.T) 
 	assert.Zero(t, v.Length())
 
 	failing.fail = false
-	require.NoError(t, v.EnsureWrite(context.Background(), 0, [][]byte{data}))
+	offset, err := v.Write(context.Background(), 1, data)
+	require.NoError(t, err)
+	assert.Zero(t, offset)
 	assert.Equal(t, int64(len(data)), v.Length())
+	next := bytes.Repeat([]byte("next-record"), 300)
+	nextOffset, err := v.Write(context.Background(), 2, next)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(data)), nextOffset)
 	for name, p := range map[string]*Plog{"a": a, "b": b} {
-		assert.Equal(t, int64(len(data)), p.LogicalLength(), "plog %s length", name)
+		assert.Equal(t, int64(len(data)+len(next)), p.LogicalLength(), "plog %s length", name)
 	}
+	got, err := v.Read(context.Background(), nextOffset, len(next))
+	require.NoError(t, err)
+	assert.Equal(t, next, got)
 }
 
 func TestECVlogFailedWriteReconcileTruncatesUncommittedShardTails(t *testing.T) {
@@ -155,6 +175,51 @@ func TestECVlogFailedWriteReconcileTruncatesUncommittedShardTails(t *testing.T) 
 	for i, p := range reopened {
 		assert.Zero(t, p.LogicalLength(), "reconciled plog %d length", i)
 	}
+}
+
+func TestECVlogWritePartialFanoutRetryUsesSameShardOffsets(t *testing.T) {
+	restore := SetECColumnBytesForTest(SectorSize)
+	defer restore()
+
+	dir := t.TempDir()
+	plogs := make([]*Plog, 3)
+	clients := make([]PlogClient, 3)
+	for i := range plogs {
+		p, err := OpenPlog(filepath.Join(dir, fmt.Sprintf("plog-%d", i)), uint32(i))
+		require.NoError(t, err)
+		defer p.Close()
+		plogs[i] = p
+		clients[i] = plogClientAdapter{p}
+	}
+	failing := &writeFailingPlogClient{PlogClient: clients[2], fail: true}
+	clients[2] = failing
+	v, err := NewVlog(1, "EC", 2, 1, clients, 0)
+	require.NoError(t, err)
+	first := make([]byte, int(v.stripeWidth()))
+	second := make([]byte, int(v.stripeWidth()))
+	for i := range first {
+		first[i] = byte(i*17 + 3)
+		second[i] = byte(i*29 + 11)
+	}
+
+	_, err = v.Write(context.Background(), 1, first)
+	require.Error(t, err)
+	assert.Zero(t, v.Length())
+	failing.fail = false
+	offset, err := v.Write(context.Background(), 1, first)
+	require.NoError(t, err)
+	assert.Zero(t, offset)
+	nextOffset, err := v.Write(context.Background(), 2, second)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(first)), nextOffset)
+	require.NoError(t, v.Commit(context.Background(), 2))
+
+	for i, p := range plogs {
+		assert.Equal(t, 2*ecColumnBytes, p.LogicalLength(), "plog %d length", i)
+	}
+	got, err := v.Read(context.Background(), nextOffset, len(second))
+	require.NoError(t, err)
+	assert.Equal(t, second, got)
 }
 
 func TestECStripeEnsureWriteRetriesMultiRowPartialFanout(t *testing.T) {
