@@ -54,6 +54,7 @@ type FileHandle struct {
 	writeSeq     int64
 	openedMtime  int64
 	pinOwner     int64
+	unlinked     bool
 }
 
 func (h *FileHandle) path() string {
@@ -73,6 +74,8 @@ func (h *FileHandle) mtimeOrNow() int64 {
 }
 
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
 	// Simple implementation
 	path := cleanPath(req.GetPath())
 	if path == "" {
@@ -177,6 +180,8 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 }
 
 func (s *Server) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.UnlinkResponse, error) {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
 	if req.GetPath() == "" {
 		return nil, fmt.Errorf("path cannot be empty")
 	}
@@ -189,10 +194,13 @@ func (s *Server) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.UnlinkR
 	if err := s.db.UnlinkFile(ctx, path); err != nil {
 		return nil, err
 	}
+	s.markOpenHandlesUnlinked(path)
 	return &pb.UnlinkResponse{}, nil
 }
 
 func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameResponse, error) {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
 	if req.GetOldPath() == "" || req.GetNewPath() == "" {
 		return nil, fmt.Errorf("old_path and new_path are required")
 	}
@@ -221,6 +229,25 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 	return &pb.RenameResponse{}, nil
 }
 
+// markOpenHandlesUnlinked prevents a later Close from publishing a pending
+// version back at a name that has already been removed. namespaceMu keeps new
+// opens and closes on the other side of the unlink's linearization point.
+func (s *Server) markOpenHandlesUnlinked(path string) {
+	s.handlesMu.Lock()
+	handles := make([]*FileHandle, 0, len(s.handles))
+	for _, h := range s.handles {
+		handles = append(handles, h)
+	}
+	s.handlesMu.Unlock()
+	for _, h := range handles {
+		h.stateMu.Lock()
+		if h.snapshotID == 0 && h.path() == path {
+			h.unlinked = true
+		}
+		h.stateMu.Unlock()
+	}
+}
+
 // retargetOpenHandles repoints every open handle for oldPath, or below oldPath
 // when it is a directory, so pending writes follow the namespace rename rather
 // than recreating an entry below the old name on Close. It reports whether any
@@ -235,6 +262,10 @@ func (s *Server) retargetOpenHandles(ctx context.Context, oldPath, newPath strin
 	found := false
 	for _, h := range handles {
 		h.stateMu.Lock()
+		if h.unlinked {
+			h.stateMu.Unlock()
+			continue
+		}
 		path := h.path()
 		target := ""
 		if path == oldPath {
@@ -796,6 +827,8 @@ func (s *Server) FlushHandle(ctx context.Context, handle int64) error {
 }
 
 func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, idempotencyKey string) error {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
 	s.handlesMu.Lock()
 	h, ok := s.handles[handle]
 	s.handlesMu.Unlock()
@@ -814,6 +847,23 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 	}
 	h.stateMu.Lock()
 	defer h.stateMu.Unlock()
+	if h.unlinked && h.writeOpID != 0 {
+		// Flush must not make an unlinked name visible, but the handle remains
+		// usable until Release/Close. The final close abandons its unpublished
+		// intent and releases every reclamation/lease hold.
+		if !remove {
+			return nil
+		}
+		if err := s.db.AbandonWriteOp(ctx, h.writeOpID); err != nil {
+			return err
+		}
+		s.releasePins(h.writeOpID)
+		s.handlesMu.Lock()
+		delete(s.handles, handle)
+		s.handlesMu.Unlock()
+		s.releasePins(h.pinOwner)
+		return nil
+	}
 	if h.writeOpID == 0 {
 		if remove {
 			s.handlesMu.Lock()

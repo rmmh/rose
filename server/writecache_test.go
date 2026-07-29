@@ -405,6 +405,34 @@ func TestRenameOpenUncommittedHandle(t *testing.T) {
 	}
 }
 
+func TestUnlinkOpenWriterDoesNotRepublishPathOnClose(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	const path = "/deleted-while-open"
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: path, OperationKey: "unlink-open-writer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: open.GetHandle(),
+		Buffer: []byte("must not be relinked"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Unlink(ctx, &pb.UnlinkRequest{Path: path}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{
+		Handle:         open.GetHandle(),
+		IdempotencyKey: "unlink-open-writer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := statPath(t, s, path); err == nil && ok {
+		t.Fatal("Close republished a path unlinked while its writer was open")
+	}
+}
+
 func TestRenameDirectoryRetargetsOpenDescendantHandle(t *testing.T) {
 	ctx := context.Background()
 	s := newServer(t)

@@ -93,7 +93,10 @@ type Server struct {
 	// contend on it, making a whole pass mutually exclusive with an operator (or
 	// test) that drives reclamation directly. It is distinct from maintenanceMu,
 	// which only guards the driver's lifecycle fields above.
-	maintRunMu    sync.Mutex
+	maintRunMu sync.Mutex
+	// namespaceMu serializes path publication on Close with Open, Rename, and
+	// Unlink so an open writer cannot race an unlink and relink the name.
+	namespaceMu   sync.Mutex
 	handlesMu     sync.Mutex
 	handles       map[int64]*FileHandle
 	handleCounter int64
