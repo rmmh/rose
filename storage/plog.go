@@ -212,6 +212,27 @@ func openPlogFile(path string, id uint32, flag int, header *pb.PlogHeader) (*Plo
 			f.Close()
 			return nil, fmt.Errorf("open plog %d: %w", id, err)
 		}
+		// The catalog may reference this plog as soon as OpenPlog returns. Make
+		// both its superblock and directory entry durable first, so a crash cannot
+		// leave committed placement pointing at a file that never reached disk.
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("open plog %d: sync superblock: %w", id, err)
+		}
+		dir, err := os.Open(filepath.Dir(path))
+		if err != nil {
+			f.Close()
+			return nil, fmt.Errorf("open plog %d directory for sync: %w", id, err)
+		}
+		if err := dir.Sync(); err != nil {
+			_ = dir.Close()
+			f.Close()
+			return nil, fmt.Errorf("open plog %d directory sync: %w", id, err)
+		}
+		if err := dir.Close(); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("close plog %d directory: %w", id, err)
+		}
 		p.header = header
 		p.logicalLength = 0
 	} else {
