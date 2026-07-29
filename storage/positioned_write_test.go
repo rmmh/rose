@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,6 +48,36 @@ func (c *writeFailingPlogClient) Commit(ctx context.Context, txnID int64) error 
 type commitFailingPlogClient struct {
 	PlogClient
 	fail bool
+}
+
+type delayedReadPlogClient struct {
+	PlogClient
+	delay time.Duration
+}
+
+func (c *delayedReadPlogClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
+	select {
+	case <-time.After(c.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return c.PlogClient.Read(ctx, offset, length)
+}
+
+func (c *delayedReadPlogClient) EnsureAppend(ctx context.Context, offset int64, data []byte) error {
+	positioned, ok := c.PlogClient.(positionedPlogClient)
+	if !ok {
+		return fmt.Errorf("wrapped client does not support positioned writes")
+	}
+	return positioned.EnsureAppend(ctx, offset, data)
+}
+
+func (c *delayedReadPlogClient) Commit(ctx context.Context, txnID int64) error {
+	committer, ok := c.PlogClient.(committingPlogClient)
+	if !ok {
+		return fmt.Errorf("wrapped client does not support commit")
+	}
+	return committer.Commit(ctx, txnID)
 }
 
 func (c *commitFailingPlogClient) Commit(ctx context.Context, txnID int64) error {
@@ -127,6 +158,47 @@ func TestDuplicateCommitUsesTheWriteQuorum(t *testing.T) {
 
 	aCommit.fail = false
 	require.NoError(t, v.Commit(context.Background(), 41))
+}
+
+func TestDuplicateReadIgnoresValidStaleNonWriter(t *testing.T) {
+	dir := t.TempDir()
+	a, err := OpenPlog(filepath.Join(dir, "a"), 1)
+	require.NoError(t, err)
+	defer a.Close()
+	b, err := OpenPlog(filepath.Join(dir, "b"), 2)
+	require.NoError(t, err)
+	defer b.Close()
+	c, err := OpenPlog(filepath.Join(dir, "c"), 3)
+	require.NoError(t, err)
+	defer c.Close()
+
+	stale := []byte("stale-valid-content")
+	_, err = c.Write(1, stale)
+	require.NoError(t, err)
+	require.NoError(t, c.Commit())
+	aWrite := &writeFailingPlogClient{PlogClient: plogClientAdapter{a}}
+	aClient := &delayedReadPlogClient{PlogClient: aWrite, delay: 5 * time.Millisecond}
+	bClient := &delayedReadPlogClient{PlogClient: plogClientAdapter{b}, delay: 5 * time.Millisecond}
+	v, err := NewVlog(1, "DUPLICATE", 1, 0, []PlogClient{
+		aClient, bClient, plogClientAdapter{c},
+	}, 0)
+	require.NoError(t, err)
+	require.NoError(t, v.SetWriteQuorum(2))
+
+	committed := []byte("fresh-good-content!")
+	require.Len(t, committed, len(stale))
+	_, err = v.Write(context.Background(), 42, committed)
+	require.NoError(t, err)
+	require.NoError(t, v.Commit(context.Background(), 42))
+	got, err := v.Read(context.Background(), 0, len(committed))
+	require.NoError(t, err)
+	assert.Equal(t, committed, got)
+
+	// C has the same length but a divergent prefix. It must not combine with B
+	// to form the next write quorum after A fails.
+	aWrite.fail = true
+	_, err = v.Write(context.Background(), 43, []byte("next"))
+	require.Error(t, err)
 }
 
 func TestDuplicateVlogWritePartialFanoutRetryDoesNotAdvanceLength(t *testing.T) {

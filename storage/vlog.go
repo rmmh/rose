@@ -62,12 +62,13 @@ type Vlog struct {
 	parityShards int
 	clients      []PlogClient // Index corresponds to shard index (0 for duplicate)
 	writeQuorum  int
-	// pendingReplicas is the set of mirrored clients that accepted every write
-	// since the last successful commit. A commit quorum must come from this same
-	// set; independently choosing write and commit quorums can otherwise
-	// acknowledge durability with fewer than writeQuorum complete copies.
-	// Guarded by writeMu. EC always writes every shard and does not use it.
-	pendingReplicas []bool
+	// completeReplicas is the set of mirrored clients known to contain the whole
+	// logical stream. Once a copy misses a write it cannot commit, serve reads, or
+	// receive later appends (which would preserve its divergent prefix) until the
+	// server catches it up and remounts the vlog. Nil means every client is
+	// complete, as at a fresh mount. EC always writes every shard and ignores it.
+	replicaMu        sync.RWMutex
+	completeReplicas []bool
 
 	encoder reedsolomon.Encoder // Only initialized if scheme == "EC"
 }
@@ -314,16 +315,25 @@ func (v *Vlog) fanoutQuorumEligible(ctx context.Context, quorum int, eligible []
 	return nil, fmt.Errorf("vlog %d write quorum %d not met", v.id, quorum)
 }
 
-// writeMirrors preserves one quorum membership across every append in the
-// current uncommitted tail. Once a copy misses a write it cannot count toward
-// making that tail durable.
+// writeMirrors preserves one complete-copy set across every append. Once a copy
+// misses a write it cannot count toward this or a later committed prefix until
+// the server catches it up and remounts the vlog.
 func (v *Vlog) writeMirrors(ctx context.Context, op func(context.Context, int, PlogClient) error) error {
-	successful, err := v.fanoutQuorumEligible(ctx, v.writeQuorum, v.pendingReplicas, op)
+	eligible := v.completeReplicaSnapshot()
+	successful, err := v.fanoutQuorumEligible(ctx, v.writeQuorum, eligible, op)
 	if err != nil {
 		return err
 	}
-	v.pendingReplicas = successful
+	v.replicaMu.Lock()
+	v.completeReplicas = successful
+	v.replicaMu.Unlock()
 	return nil
+}
+
+func (v *Vlog) completeReplicaSnapshot() []bool {
+	v.replicaMu.RLock()
+	defer v.replicaMu.RUnlock()
+	return v.completeReplicas
 }
 
 func totalPartsLen(parts [][]byte) int {
@@ -437,21 +447,31 @@ func (v *Vlog) Read(ctx context.Context, offset int64, length int) ([]byte, erro
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
 		// Read mirrors concurrently so a slow or unreachable copy cannot hide a
 		// healthy one for the full request deadline.
+		eligible := v.completeReplicaSnapshot()
+		candidates := 0
+		for i := range v.clients {
+			if eligible == nil || eligible[i] {
+				candidates++
+			}
+		}
 		readCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		type result struct {
 			data []byte
 			err  error
 		}
-		results := make(chan result, len(v.clients))
-		for _, client := range v.clients {
+		results := make(chan result, candidates)
+		for i, client := range v.clients {
+			if eligible != nil && !eligible[i] {
+				continue
+			}
 			go func(c PlogClient) {
 				data, err := c.Read(readCtx, offset, length)
 				results <- result{data: data, err: err}
 			}(client)
 		}
 		var lastErr error
-		for range v.clients {
+		for range candidates {
 			got := <-results
 			if got.err == nil {
 				return got.data, nil
@@ -587,11 +607,11 @@ func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
 		}
 		return committer.Commit(opCtx, txnID)
 	}
-	if (v.scheme == "NONE" || v.scheme == "DUPLICATE") && v.pendingReplicas != nil {
-		if _, err := v.fanoutQuorumEligible(ctx, v.writeQuorum, v.pendingReplicas, commit); err != nil {
+	eligible := v.completeReplicaSnapshot()
+	if (v.scheme == "NONE" || v.scheme == "DUPLICATE") && eligible != nil {
+		if _, err := v.fanoutQuorumEligible(ctx, v.writeQuorum, eligible, commit); err != nil {
 			return err
 		}
-		v.pendingReplicas = nil
 		return nil
 	}
 	return v.fanoutQuorum(ctx, v.writeQuorum, commit)
