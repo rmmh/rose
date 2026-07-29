@@ -104,3 +104,24 @@ func TestRecoverFinishesCompactionWhoseSourceWasRetired(t *testing.T) {
 		t.Fatalf("post-retirement compaction job state = %q, want done", recovered.State)
 	}
 }
+
+func TestCancelledVlogRetirementKeepsCatalogAndMount(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	vlogID := provision(t, s, "NONE", 1, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s.vlogMu.Lock()
+	err := s.retireVlogLocked(ctx, vlogID)
+	_, mounted := s.vlogs[vlogID]
+	s.vlogMu.Unlock()
+	if err == nil {
+		t.Fatal("retirement succeeded despite cancellation before admission")
+	}
+	if !mounted {
+		t.Fatal("cancelled retirement unmounted the vlog")
+	}
+	if _, err := s.db.GetVlog(context.Background(), vlogID); err != nil {
+		t.Fatalf("cancelled retirement removed the catalog vlog: %v", err)
+	}
+}

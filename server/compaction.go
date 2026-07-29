@@ -283,7 +283,14 @@ func (s *Server) finishCompactionLocked(ctx context.Context, sourceID uint32, jo
 // chunks, so a caller that has not relocated everything fails loudly rather than
 // losing data. The caller must hold vlogMu.
 func (s *Server) retireVlogLocked(ctx context.Context, vlogID uint32) error {
-	plogs, err := s.db.RetireVlog(ctx, vlogID)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// RetireVlog is the authoritative deletion. Once admitted, finish both the
+	// catalog transaction and in-memory unmount even if the maintenance caller
+	// goes away, so no stale mounted vlog can accept writes after its row is gone.
+	durableCtx := context.WithoutCancel(ctx)
+	plogs, err := s.db.RetireVlog(durableCtx, vlogID)
 	if err != nil {
 		return err
 	}
