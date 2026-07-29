@@ -1015,38 +1015,26 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 	oldPath := s.plogPath(fromDisk, plogID)
 	newPath := s.plogPath(toDisk, plogID)
 
-	// Flush and close the live handle so we copy a consistent, durable file.
+	// Flush the live handle so we copy a consistent, durable file. vlogMu
+	// excludes concurrent writers, so the source can stay open and readable
+	// until both the copy and the catalog flip succeed.
 	if p, ok := s.plogs[plogID]; ok {
 		if err := p.Commit(); err != nil {
 			return fmt.Errorf("drain: flush plog %d: %w", plogID, err)
 		}
-		_ = p.Close()
-		// Do not leave a closed handle registered if the external copy or the
-		// catalog flip fails. A later retry can reopen/copy the authoritative
-		// source once its disk is reachable again.
-		delete(s.plogs, plogID)
 	}
 	if err := copyFile(oldPath, newPath); err != nil {
-		copyErr := fmt.Errorf("drain: copy plog %d to disk %d: %w", plogID, toDisk, err)
-		// The source remains authoritative until MovePlogToDisk commits. If only
-		// the destination failed, reopen and remount the source so a failed
-		// maintenance request does not take healthy data offline.
-		reopened, reopenErr := storage.OpenExistingPlog(oldPath, plogID)
-		if reopenErr != nil {
-			return errors.Join(copyErr, fmt.Errorf("drain: restore source plog %d: %w", plogID, reopenErr))
-		}
-		s.plogs[plogID] = reopened
-		s.clearActiveVlogLocked(vlogID)
-		if remountErr := s.remountVlogLocked(context.WithoutCancel(ctx), vlogID); remountErr != nil {
-			_ = reopened.Close()
-			delete(s.plogs, plogID)
-			return errors.Join(copyErr, fmt.Errorf("drain: remount source vlog %d: %w", vlogID, remountErr))
-		}
-		return copyErr
+		_ = os.Remove(newPath)
+		return fmt.Errorf("drain: copy plog %d to disk %d: %w", plogID, toDisk, err)
 	}
 	// Until this commits, the source copy remains authoritative.
 	if err := s.db.MovePlogToDisk(ctx, plogID, toDisk); err != nil {
-		return err
+		_ = os.Remove(newPath)
+		return fmt.Errorf("drain: move plog %d to disk %d: %w", plogID, toDisk, err)
+	}
+	if p, ok := s.plogs[plogID]; ok {
+		_ = p.Close()
+		delete(s.plogs, plogID)
 	}
 	_ = os.Remove(oldPath)
 

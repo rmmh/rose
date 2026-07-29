@@ -160,6 +160,44 @@ func TestRemoveDiskFailureKeepsHealthySourceReadable(t *testing.T) {
 	}
 }
 
+func TestCancelledPlacementFlipKeepsDrainSourceReadable(t *testing.T) {
+	s := newControlPlaneServer(t, 2)
+	vlogID := provision(t, s, "NONE", 1, 0)
+	payload := bytes.Repeat([]byte("cancelled placement flip"), 300)
+	offset := writeVlog(t, s, vlogID, payload)
+	sourceDisk := diskOf(t, s, vlogID, 0)
+	destinationDisk := uint32(1)
+	if sourceDisk == destinationDisk {
+		destinationDisk = 2
+	}
+	sourcePlogs := mustPlogsOnDisk(t, s.db, sourceDisk)
+	if len(sourcePlogs) != 1 {
+		t.Fatalf("source disk has %d plogs, want 1", len(sourcePlogs))
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.vlogMu.Lock()
+	err := s.migratePlogLocked(
+		cancelled, sourcePlogs[0].PlogID, vlogID, sourceDisk, destinationDisk,
+	)
+	s.vlogMu.Unlock()
+	if err == nil {
+		t.Fatal("placement flip succeeded with a cancelled request")
+	}
+
+	got, readErr := s.vlogs[vlogID].Read(context.Background(), offset, len(payload))
+	if readErr != nil {
+		t.Fatalf("authoritative source became unreadable after cancelled placement flip: %v", readErr)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("source payload changed after cancelled placement flip")
+	}
+	if disk := diskOf(t, s, vlogID, 0); disk != sourceDisk {
+		t.Fatalf("cancelled placement flip moved shard to disk %d, want %d", disk, sourceDisk)
+	}
+}
+
 func TestDrainWithoutPlacementRoomFails(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 3) // EC 2+1 occupies all three disks
