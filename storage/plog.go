@@ -811,6 +811,22 @@ func (r ScrubResult) Healthy() bool {
 	return len(r.CorruptSectors) == 0 && len(r.BadHMACBlocks) == 0
 }
 
+// Verify reads the complete logical stream through the normal authenticated
+// read path without retaining it. Relocation uses this before publishing a
+// copied plog, catching a destination disk that silently changed data or
+// integrity sectors during the copy.
+func (p *Plog) Verify() error {
+	const batch = 1 << 20
+	length := p.LogicalLength()
+	for offset := int64(0); offset < length; offset += batch {
+		n := min(int64(batch), length-offset)
+		if _, err := p.Read(offset, int(n)); err != nil {
+			return fmt.Errorf("verify plog %d at %d: %w", p.id, offset, err)
+		}
+	}
+	return nil
+}
+
 // Scrub sequentially validates every completed hash-protected block,
 // recomputing each data sector's hash and the per-block HMAC. It reads strictly
 // forward to stay friendly to bulk sequential IO, matching the README's

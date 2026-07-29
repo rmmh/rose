@@ -539,3 +539,18 @@ func TestDuplicateVlogSurvivesBitrot(t *testing.T) {
 		t.Fatalf("duplicate vlog returned wrong data after bitrot")
 	}
 }
+
+func TestVerifyRejectsCorruptCopiedPlog(t *testing.T) {
+	p, path := tempPlog(t, "copied")
+	data := bytes.Repeat([]byte("destination-write-corruption"), 500)
+	if _, err := p.Write(1, data); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	corruptByte(t, path, CalcPhysical(100))
+	if err := p.Verify(); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("verify corrupt copy = %v, want ErrBitrot", err)
+	}
+}

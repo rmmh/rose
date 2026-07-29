@@ -1178,6 +1178,11 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 		_ = os.Remove(newPath)
 		return fmt.Errorf("drain: open copied plog %d on disk %d: %w", plogID, toDisk, err)
 	}
+	if err := reopened.Verify(); err != nil {
+		_ = reopened.Close()
+		_ = os.Remove(newPath)
+		return fmt.Errorf("drain: verify copied plog %d on disk %d: %w", plogID, toDisk, err)
+	}
 	diskUID, err := s.db.DiskUID(ctx, toDisk)
 	if err != nil {
 		_ = reopened.Close()
