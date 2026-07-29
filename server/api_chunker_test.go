@@ -34,6 +34,40 @@ func TestWriteWaitingBehindCloseCannotMutateRemovedHandle(t *testing.T) {
 	}
 }
 
+func TestPathTruncateFailureDoesNotLeakTransientHandle(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+	if err := s.SetDiskState(ctx, 1, meta.DiskFailed); err != nil {
+		t.Fatal(err)
+	}
+	req := &pb.TruncateRequest{
+		Path: "/truncate-after-disk-return", OperationKey: "path-truncate-disk-failure", Size: 1,
+	}
+	if _, err := s.Truncate(ctx, req); err == nil {
+		t.Fatal("path truncate succeeded with no live disk")
+	}
+	s.handlesMu.Lock()
+	handles := len(s.handles)
+	s.handlesMu.Unlock()
+	if handles != 0 {
+		t.Fatalf("failed path truncate leaked %d private handles", handles)
+	}
+
+	if err := s.SetDiskState(ctx, 1, meta.DiskActive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Truncate(ctx, req); err != nil {
+		t.Fatalf("path truncate retry after disk return: %v", err)
+	}
+	attr, err := s.Getattr(ctx, &pb.GetattrRequest{Path: req.GetPath()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attr.GetSize() != req.GetSize() {
+		t.Fatalf("truncated size = %d, want %d", attr.GetSize(), req.GetSize())
+	}
+}
+
 func collectChunkSizes(t *testing.T, chunker *chunkers.Chunker) []int {
 	t.Helper()
 	var sizes []int

@@ -84,6 +84,18 @@ func (s *Server) handleStillRegistered(handle int64, h *FileHandle) bool {
 	return ok && current == h
 }
 
+func (s *Server) discardHandle(handle int64) {
+	s.handlesMu.Lock()
+	h, ok := s.handles[handle]
+	if ok {
+		delete(s.handles, handle)
+	}
+	s.handlesMu.Unlock()
+	if ok {
+		s.releasePins(h.pinOwner)
+	}
+}
+
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	s.namespaceMu.Lock()
 	defer s.namespaceMu.Unlock()
@@ -1544,6 +1556,7 @@ func (s *Server) Truncate(ctx context.Context, req *pb.TruncateRequest) (*pb.Tru
 	if err != nil {
 		return nil, err
 	}
+	defer s.discardHandle(open.GetHandle())
 	if _, err := s.Truncate(ctx, &pb.TruncateRequest{Handle: open.GetHandle(), Size: req.GetSize()}); err != nil {
 		return nil, err
 	}
