@@ -386,9 +386,15 @@ func TestRecoverTornWriteFromCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 2. Corrupt a byte in the first data sector (logical offset 100)
-	corruptByte := []byte{0xFF}
-	if _, err := f.WriteAt(corruptByte, storage.CalcPhysical(100)); err != nil {
+	// 2. Corrupt a byte in the first data sector (logical offset 100).
+	// Flip the existing byte so the injection cannot accidentally be a no-op.
+	corruptByte := make([]byte, 1)
+	corruptOffset := storage.CalcPhysical(100)
+	if _, err := f.ReadAt(corruptByte, corruptOffset); err != nil {
+		t.Fatal(err)
+	}
+	corruptByte[0] ^= 0xff
+	if _, err := f.WriteAt(corruptByte, corruptOffset); err != nil {
 		t.Fatal(err)
 	}
 	f.Close()
