@@ -289,15 +289,6 @@ func initSchema(db *sql.DB, durable bool) error {
 	if err != nil {
 		return fmt.Errorf("init schema: %w", err)
 	}
-	// Existing databases predate file_head.  Preserve their newest immutable
-	// version as the live namespace entry during the lightweight migration.
-	if _, err := db.Exec(`
-		INSERT OR IGNORE INTO file_head (path, file_id)
-		SELECT f.path, f.id FROM file AS f
-		WHERE f.id = (SELECT MAX(latest.id) FROM file AS latest WHERE latest.path = f.path)
-	`); err != nil {
-		return fmt.Errorf("backfill file heads: %w", err)
-	}
 	// file_head predating the parent/name columns: a duplicate-column error just
 	// means the columns already exist.
 	for _, col := range []string{

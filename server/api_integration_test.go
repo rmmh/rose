@@ -580,6 +580,55 @@ func TestRestartDoesNotReuseLiveRPCHandles(t *testing.T) {
 	}
 }
 
+func TestRestartDoesNotResurrectHistoricalPaths(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta.db")
+	disk := filepath.Join(dir, "disk")
+	db, err := meta.Open(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	before := server.NewServerWithDataDir(db, disk)
+	writeServerFile(t, before, "/deleted", []byte("deleted data"))
+	if _, err := before.Unlink(ctx, &pb.UnlinkRequest{Path: "/deleted"}); err != nil {
+		t.Fatal(err)
+	}
+	writeServerFile(t, before, "/old-name", []byte("renamed data"))
+	if _, err := before.Rename(ctx, &pb.RenameRequest{OldPath: "/old-name", NewPath: "/new-name"}); err != nil {
+		t.Fatal(err)
+	}
+	before.CloseStorage()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := meta.Open(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	after := server.NewServerWithDataDir(reopened, disk)
+	if err := after.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer after.CloseStorage()
+	for _, path := range []string{"/deleted", "/old-name"} {
+		if _, err := after.Getattr(ctx, &pb.GetattrRequest{Path: path}); err == nil {
+			t.Fatalf("restart resurrected historical path %q", path)
+		}
+	}
+	if got := readServerFile(t, after, "/new-name"); !bytes.Equal(got, []byte("renamed data")) {
+		t.Fatalf("renamed file after restart = %q", got)
+	}
+	if _, err := after.GC(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := readServerFile(t, after, "/new-name"); !bytes.Equal(got, []byte("renamed data")) {
+		t.Fatalf("renamed file after post-restart GC = %q", got)
+	}
+}
+
 // TestPinnedDedupChunkSurvivesConcurrentReclaim exercises the dedup/GC race the
 // chunk-pin mechanism closes: an in-flight write deduplicates against an existing
 // chunk, that chunk's last committed reference is then deleted, and a full
