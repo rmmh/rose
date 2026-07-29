@@ -57,8 +57,20 @@ func do(t *testing.T, method, url string, body io.Reader, headers map[string]str
 func TestWebDAVMkcolPutGetPropfind(t *testing.T) {
 	base := newDAV(t)
 
+	// WebDAV does not create missing parent collections implicitly.
+	resp := do(t, "PUT", base+"/missing/a.txt", strings.NewReader("no parent"), nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("PUT below missing collection status = %d, want 409", resp.StatusCode)
+	}
+	resp = do(t, "MKCOL", base+"/missing/child", nil, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("MKCOL below missing collection status = %d, want 409", resp.StatusCode)
+	}
+
 	// MKCOL creates a directory.
-	resp := do(t, "MKCOL", base+"/bucket", nil, nil)
+	resp = do(t, "MKCOL", base+"/bucket", nil, nil)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("MKCOL status = %d, want 201", resp.StatusCode)

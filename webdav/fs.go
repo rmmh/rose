@@ -46,13 +46,38 @@ func base(path string) string {
 	return path
 }
 
+// requireParentCollection enforces WebDAV's explicit collection hierarchy at
+// the adapter boundary. Rose's native namespace may synthesize ancestors for a
+// file write, but WebDAV PUT/MKCOL/MOVE must fail when the destination parent
+// collection does not already exist.
+func (f *FS) requireParentCollection(ctx context.Context, path string) error {
+	i := strings.LastIndexByte(path, '/')
+	if i < 0 {
+		return nil // the namespace root is always present
+	}
+	parent := path[:i]
+	attr, err := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: parent})
+	if err != nil || !attr.GetIsDir() {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
 func (f *FS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
-	_, err := f.srv.Mkdir(ctx, &pb.MkdirRequest{Path: clean(name)})
+	path := clean(name)
+	if err := f.requireParentCollection(ctx, path); err != nil {
+		return err
+	}
+	_, err := f.srv.Mkdir(ctx, &pb.MkdirRequest{Path: path})
 	return err
 }
 
 func (f *FS) Rename(ctx context.Context, oldName, newName string) error {
-	_, err := f.srv.Rename(ctx, &pb.RenameRequest{OldPath: clean(oldName), NewPath: clean(newName)})
+	newPath := clean(newName)
+	if err := f.requireParentCollection(ctx, newPath); err != nil {
+		return err
+	}
+	_, err := f.srv.Rename(ctx, &pb.RenameRequest{OldPath: clean(oldName), NewPath: newPath})
 	return err
 }
 
@@ -99,6 +124,9 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 	path := clean(name)
 	writing := flag&(os.O_WRONLY|os.O_RDWR) != 0
 	if writing {
+		if err := f.requireParentCollection(ctx, path); err != nil {
+			return nil, err
+		}
 		attr, statErr := f.srv.Getattr(ctx, &pb.GetattrRequest{Path: path})
 		exists := statErr == nil
 		if flag&os.O_CREATE != 0 && flag&os.O_EXCL != 0 && exists {
