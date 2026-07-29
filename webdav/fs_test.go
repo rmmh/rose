@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/rmmh/rose/meta"
+	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
 	rosewebdav "github.com/rmmh/rose/webdav"
 	"golang.org/x/net/webdav"
@@ -191,6 +192,47 @@ func TestWebDAVCloseReportsCommitFailure(t *testing.T) {
 	}
 	if err := file.Close(); err == nil {
 		t.Fatal("WebDAV close hid degraded commit failure")
+	}
+}
+
+func TestWebDAVCancelledPutAbortsHandleAndLease(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	srv := server.NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	file, err := rosewebdav.New(srv).OpenFile(ctx, "/cancelled", os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(make([]byte, 5<<20)); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := file.Close(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close after client cancellation = %v, want context.Canceled", err)
+	}
+
+	var state string
+	if err := db.GetDB().QueryRow("SELECT state FROM write_op").Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != meta.WriteOpCancelled {
+		t.Fatalf("cancelled PUT write operation state = %q, want %q", state, meta.WriteOpCancelled)
+	}
+	var leases int
+	if err := db.GetDB().QueryRow("SELECT COUNT(*) FROM vlog_lease").Scan(&leases); err != nil {
+		t.Fatal(err)
+	}
+	if leases != 0 {
+		t.Fatalf("cancelled PUT retained %d vlog leases", leases)
+	}
+	if _, err := srv.Getattr(context.Background(), &pb.GetattrRequest{Path: "/cancelled"}); err == nil {
+		t.Fatal("cancelled PUT published a partial file")
 	}
 }
 

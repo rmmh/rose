@@ -97,6 +97,40 @@ func (s *Server) discardHandle(handle int64) {
 	}
 }
 
+// AbortHandle discards an unpublished client write and durably releases every
+// lease and pin it holds. It is used by protocol adapters when the client has
+// abandoned the request, where committing a partial body would be incorrect but
+// leaving the unreachable handle registered would prevent expiry and
+// maintenance forever. Repeating an abort after the handle is gone is a no-op.
+func (s *Server) AbortHandle(ctx context.Context, handle int64) error {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
+
+	s.handlesMu.Lock()
+	h, ok := s.handles[handle]
+	s.handlesMu.Unlock()
+	if !ok {
+		return nil
+	}
+
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
+	if !s.handleStillRegistered(handle, h) {
+		return nil
+	}
+	if h.writeOpID != 0 {
+		if err := s.db.CancelWriteOp(ctx, h.writeOpID); err != nil {
+			return err
+		}
+		s.releasePins(h.writeOpID)
+	}
+	s.handlesMu.Lock()
+	delete(s.handles, handle)
+	s.handlesMu.Unlock()
+	s.releasePins(h.pinOwner)
+	return nil
+}
+
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	s.namespaceMu.Lock()
 	defer s.namespaceMu.Unlock()

@@ -330,6 +330,16 @@ func (f *roseFile) Stat() (os.FileInfo, error) {
 
 func (f *roseFile) Close() error {
 	if f.handle != 0 {
+		if f.writing && f.ctx.Err() != nil {
+			// The HTTP request is gone, so publishing the partial PUT would be
+			// wrong. Use a non-canceled cleanup context to cancel its durable
+			// write intent and release the now-unreachable handle and vlog lease.
+			if err := f.srv.AbortHandle(context.WithoutCancel(f.ctx), f.handle); err != nil {
+				return err
+			}
+			f.handle = 0
+			return f.ctx.Err()
+		}
 		if _, err := f.srv.Close(f.ctx, &pb.CloseRequest{Handle: f.handle}); err != nil {
 			return err
 		}
