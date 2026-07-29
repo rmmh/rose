@@ -340,8 +340,10 @@ func TestDuplicateVlogWritesWithMinimumCopiesAfterNodeFailure(t *testing.T) {
 }
 
 type readFaultClient struct {
-	data []byte
-	slow bool
+	data    []byte
+	slow    bool
+	block   <-chan struct{}
+	started chan<- struct{}
 }
 
 func (c *readFaultClient) Write(context.Context, int64, []byte) (int64, error) {
@@ -349,6 +351,12 @@ func (c *readFaultClient) Write(context.Context, int64, []byte) (int64, error) {
 }
 
 func (c *readFaultClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
+	if c.block != nil {
+		if c.started != nil {
+			c.started <- struct{}{}
+		}
+		<-c.block
+	}
 	if c.slow {
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -383,6 +391,45 @@ func TestReadVlogDoesNotWaitForSlowDuplicate(t *testing.T) {
 	if !bytes.Equal(read.GetBuffer(), payload) {
 		t.Fatalf("read = %q, want %q", read.GetBuffer(), payload)
 	}
+}
+
+func TestSlowVlogReadDoesNotBlockUnrelatedVlog(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	slow, err := storage.NewVlog(101, "NONE", 1, 0, []storage.PlogClient{
+		&readFaultClient{data: []byte{'x'}, block: block, started: started},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("healthy")
+	healthy, err := storage.NewVlog(102, "NONE", 1, 0, []storage.PlogClient{
+		&readFaultClient{data: payload},
+	}, int64(len(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{vlogs: map[uint32]*storage.Vlog{101: slow, 102: healthy}}
+	slowDone := make(chan struct{})
+	go func() {
+		defer close(slowDone)
+		_, _ = s.ReadVlog(context.Background(), &pb.ReadVlogRequest{VlogId: 101, Length: 1})
+	}()
+	<-started
+	time.AfterFunc(50*time.Millisecond, func() { close(block) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: 102, Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatalf("slow unrelated vlog blocked healthy read: %v", err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload) {
+		t.Fatalf("read = %q, want %q", read.GetBuffer(), payload)
+	}
+	<-slowDone
 }
 
 type writeFaultClient struct {
