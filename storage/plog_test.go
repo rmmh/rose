@@ -554,3 +554,24 @@ func TestVerifyRejectsCorruptCopiedPlog(t *testing.T) {
 		t.Fatalf("verify corrupt copy = %v, want ErrBitrot", err)
 	}
 }
+
+func TestCommittedOpenTrailerRemainsTrustedDuringHotRecovery(t *testing.T) {
+	p, _ := tempPlog(t, "hot-recovered")
+	data := bytes.Repeat([]byte{0x73}, SectorSize)
+	if _, err := p.Write(1, data); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RecoverHashes(context.Background(), noRecoveredChunks{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.Read(0, len(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("hot recovery changed freshly committed data")
+	}
+}

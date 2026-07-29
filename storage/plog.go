@@ -893,12 +893,22 @@ func (p *Plog) Commit() error {
 	// session durable together -- no second sync. A just-completed block with no
 	// ragged edge has nothing to protect and needs no trailer; c only rises within
 	// a block, so no stale trailer can survive for the loader to mistake.
-	if len(p.hashes) > 0 || raggedLen > 0 {
+	wroteTrailer := len(p.hashes) > 0 || raggedLen > 0
+	if wroteTrailer {
 		if _, err := p.file.WriteAt(p.buildOpenTrailer(raggedLen), CalcPhysical(sealed)+SectorSize); err != nil {
 			return fmt.Errorf("commit plog %d open trailer: %w", p.id, err)
 		}
 	}
-	return p.file.Sync()
+	if err := p.file.Sync(); err != nil {
+		return err
+	}
+	if wroteTrailer {
+		// The in-memory hashes and ragged bytes produced this now-durable
+		// authenticated trailer. A later hot-return recovery pass must not treat
+		// them as unauthenticated fallback bytes and poison the rebuilt copy.
+		p.loadedFromTrailer = true
+	}
+	return nil
 }
 
 // buildOpenTrailer assembles the inline open-block trailer sector: the magic, the
