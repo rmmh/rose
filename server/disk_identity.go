@@ -95,11 +95,16 @@ func (s *Server) reconcileDiskRoots(ctx context.Context) error {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("read dynamic disk uid marker %q: %w", root, err)
+			// Keep a known disk bound to its deterministic slot so pass 1 can
+			// conservatively mark it failed without preventing healthy disks
+			// from mounting.
+			s.diskRoots[d.ID] = root
+			continue
 		}
 		markerUID, err := uid.Parse(strings.TrimSpace(string(raw)))
 		if err != nil {
-			return fmt.Errorf("parse dynamic disk uid marker %q: %w", root, err)
+			s.diskRoots[d.ID] = root
+			continue
 		}
 		if markerUID == d.UID {
 			s.diskRoots[d.ID] = root
@@ -125,6 +130,15 @@ func (s *Server) reconcileDiskRoots(ctx context.Context) error {
 		}
 		markerUID, err := diskUIDForRoot(path)
 		if err != nil {
+			if idKnown[configID] {
+				if stateErr := s.db.SetDiskState(ctx, configID, meta.DiskFailed); stateErr != nil {
+					return errors.Join(err, stateErr)
+				}
+				reconciled[configID] = path
+				slog.Warn("unreadable disk identity marker; keeping catalog disk failed",
+					"disk_id", configID, "path", path, "error", err)
+				continue
+			}
 			return err
 		}
 		if _, markerKnown := idByUID[markerUID]; !markerKnown && idKnown[configID] {

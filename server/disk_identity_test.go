@@ -176,3 +176,40 @@ func TestUnknownReplacementMediaDoesNotImpersonateKnownDisk(t *testing.T) {
 		t.Fatal("surviving mirror changed after foreign-media substitution")
 	}
 }
+
+func TestCorruptDiskUIDMarkerDoesNotBlockHealthyMirrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	root1 := filepath.Join(dir, "slot1")
+	root2 := filepath.Join(dir, "slot2")
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s1 := NewServerWithDiskRoots(db, map[uint32]string{1: root1, 2: root2})
+	s1.SetMaintenanceInterval(0)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("healthy mirror survives a corrupt disk marker"), 200)
+	writeServerFileInternal(t, s1, "/identity/corrupt-marker", payload)
+	s1.CloseStorage()
+	if err := os.WriteFile(filepath.Join(root1, diskUIDMarker), []byte("not-a-uid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s2 := NewServerWithDiskRoots(db, map[uint32]string{1: root1, 2: root2})
+	s2.SetMaintenanceInterval(0)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatalf("corrupt marker on one disk blocked degraded recovery: %v", err)
+	}
+	defer s2.CloseStorage()
+	if got := s2.DiskStates()[1]; got != meta.DiskFailed {
+		t.Fatalf("disk with corrupt marker state = %q, want failed", got)
+	}
+	if got := readServerFileInternal(t, s2, "/identity/corrupt-marker"); !bytes.Equal(got, payload) {
+		t.Fatal("surviving mirror changed after disk marker corruption")
+	}
+}
