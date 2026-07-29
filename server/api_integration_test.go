@@ -206,6 +206,33 @@ func TestMkdirCannotOverlapPendingFile(t *testing.T) {
 	}
 }
 
+func TestMkdirCannotDescendFromPendingFile(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+	open, err := client.Open(ctx, &pb.OpenRequest{Path: "/parent", OperationKey: "pending-parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte("file")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Mkdir(ctx, &pb.MkdirRequest{Path: "/parent/child"}); err == nil {
+		t.Fatal("Mkdir succeeded below an unpublished file")
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{
+		Handle: open.GetHandle(), IdempotencyKey: "pending-parent",
+	}); err != nil {
+		t.Fatalf("pending parent did not remain publishable: %v", err)
+	}
+	attr, err := client.Getattr(ctx, &pb.GetattrRequest{Path: "/parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attr.GetIsDir() || attr.GetSize() != int64(len("file")) {
+		t.Fatalf("published parent = dir:%v size:%d, want file size %d", attr.GetIsDir(), attr.GetSize(), len("file"))
+	}
+}
+
 func TestPendingFileRenameCannotReplaceDirectory(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()

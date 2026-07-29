@@ -292,7 +292,7 @@ func (s *Server) hasOpenHandleAtOrBelow(path string) bool {
 	return false
 }
 
-func (s *Server) hasOpenHandleAt(path string) bool {
+func (s *Server) hasOpenHandleAtOrAbove(path string) bool {
 	s.handlesMu.Lock()
 	handles := make([]*FileHandle, 0, len(s.handles))
 	for _, h := range s.handles {
@@ -301,7 +301,9 @@ func (s *Server) hasOpenHandleAt(path string) bool {
 	s.handlesMu.Unlock()
 	for _, h := range handles {
 		h.stateMu.Lock()
-		found := !h.unlinked && h.snapshotID == 0 && h.path() == path
+		handlePath := h.path()
+		found := !h.unlinked && h.snapshotID == 0 &&
+			(handlePath == path || strings.HasPrefix(path, handlePath+"/"))
 		h.stateMu.Unlock()
 		if found {
 			return true
@@ -729,8 +731,8 @@ func (s *Server) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.MkdirResp
 		return nil, fmt.Errorf("path cannot be empty")
 	}
 	path := cleanPath(req.GetPath())
-	if s.hasOpenHandleAt(path) {
-		return nil, fmt.Errorf("mkdir %q: an open file exists at that path", path)
+	if s.hasOpenHandleAtOrAbove(path) {
+		return nil, fmt.Errorf("mkdir %q: an open file occupies that path or an ancestor", path)
 	}
 	if err := s.db.Mkdir(ctx, path, time.Now().UnixNano()); err != nil {
 		return nil, err
