@@ -221,6 +221,12 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 	if err != nil {
 		return nil, err
 	}
+	if oldPath != newPath {
+		// Rename has just replaced the destination name. Any writer that opened
+		// the previous destination now refers to an unlinked object and must not
+		// overwrite the renamed source when it eventually closes.
+		s.markOpenHandlesUnlinked(newPath, false)
+	}
 	// The committed head moved; redirect any open write handle on the old path so
 	// a later Close republishes at the new path instead of resurrecting the old.
 	if _, err := s.retargetOpenHandles(ctx, oldPath, newPath); err != nil {

@@ -405,6 +405,35 @@ func TestRenameOpenUncommittedHandle(t *testing.T) {
 	}
 }
 
+func TestRenameOverwriteIsNotUndoneByOpenDestinationWriter(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	writeAt(t, s, "/src", 0, [][2]any{{0, []byte("renamed source")}})
+
+	dst, err := s.Open(ctx, &pb.OpenRequest{
+		Path:         "/dst",
+		OperationKey: "open-rename-destination",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: dst.GetHandle(),
+		Buffer: []byte("stale destination write"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Rename(ctx, &pb.RenameRequest{OldPath: "/src", NewPath: "/dst"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: dst.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(t, s, "/dst"); !bytes.Equal(got, []byte("renamed source")) {
+		t.Fatalf("destination after open-writer Close = %q, want renamed source", got)
+	}
+}
+
 func TestUnlinkOpenWriterDoesNotRepublishPathOnClose(t *testing.T) {
 	ctx := context.Background()
 	s := newServer(t)
