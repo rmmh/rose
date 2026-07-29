@@ -105,6 +105,9 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	} else if exists {
 		openedMtime = entry.Mtime
 	}
+	if err := s.validateFileAncestors(ctx, path); err != nil {
+		return nil, err
+	}
 
 	id, err := s.db.OpenFile(ctx, path)
 	if err != nil {
@@ -310,6 +313,32 @@ func (s *Server) hasOpenHandleAtOrAbove(path string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) validateFileAncestors(ctx context.Context, path string) error {
+	slash := strings.LastIndexByte(path, '/')
+	if slash < 0 {
+		return nil
+	}
+	parent := path[:slash]
+	if s.hasOpenHandleAtOrAbove(parent) {
+		return fmt.Errorf("regular file cannot be used as parent of %q", path)
+	}
+	for ancestor := parent; ancestor != ""; {
+		entry, exists, err := s.db.StatPath(ctx, ancestor)
+		if err != nil {
+			return err
+		}
+		if exists && !entry.IsDir {
+			return fmt.Errorf("regular file %q cannot be used as a parent directory", ancestor)
+		}
+		slash = strings.LastIndexByte(ancestor, '/')
+		if slash < 0 {
+			break
+		}
+		ancestor = ancestor[:slash]
+	}
+	return nil
 }
 
 // markOpenHandlesUnlinked prevents a later Close from publishing a pending

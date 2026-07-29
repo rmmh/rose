@@ -233,6 +233,39 @@ func TestMkdirCannotDescendFromPendingFile(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsRegularFileAncestors(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+	writeFile(t, client, "/committed", []byte("file"))
+	if _, err := client.Open(ctx, &pb.OpenRequest{
+		Path: "/committed/child", OperationKey: "committed-parent-child",
+	}); err == nil {
+		t.Fatal("Open succeeded below a committed regular file")
+	}
+
+	parent, err := client.Open(ctx, &pb.OpenRequest{
+		Path: "/pending", OperationKey: "pending-open-parent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(ctx, &pb.WriteRequest{
+		Handle: parent.GetHandle(), Buffer: []byte("pending"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Open(ctx, &pb.OpenRequest{
+		Path: "/pending/child", OperationKey: "pending-open-child",
+	}); err == nil {
+		t.Fatal("Open succeeded below an unpublished regular file")
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{
+		Handle: parent.GetHandle(), IdempotencyKey: "pending-open-parent",
+	}); err != nil {
+		t.Fatalf("pending parent did not remain publishable: %v", err)
+	}
+}
+
 func TestPendingFileRenameCannotReplaceDirectory(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()
