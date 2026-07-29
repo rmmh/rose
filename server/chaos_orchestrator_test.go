@@ -179,7 +179,7 @@ func (i *chaosInjector) bitrotAndRepair(ctx context.Context) error {
 		return err
 	}
 	if len(res.Unrepairable) != 0 {
-		return fmt.Errorf("bitrot left %d unrepaired shards", len(res.Unrepairable))
+		return fmt.Errorf("bitrot left %d unrepaired shards: %v", len(res.Unrepairable), res.Unrepairable)
 	}
 	if res.ShardsRepaired == 0 {
 		return fmt.Errorf("bitrot scrub repaired no shards")
@@ -229,17 +229,20 @@ func (i *chaosInjector) anyPlog(ctx context.Context) (uint32, uint32, error) {
 			return 0, 0, err
 		}
 		for _, p := range ps {
-			info, err := i.cluster.server().GetDB().GetVlog(ctx, p.VlogID)
+			path := filepath.Join(i.cluster.rootFor(disk), fmt.Sprintf("plog-%05d", p.PlogID))
+			opened, err := storage.OpenExistingPlog(path, p.PlogID)
 			if err != nil {
+				continue // a concurrent topology transition may have moved it
+			}
+			shardLength := opened.LogicalLength()
+			if err := opened.Close(); err != nil {
 				return 0, 0, err
 			}
-			shardLength := info.Length
-			if info.ProtectionScheme == "EC" {
-				shardLength /= int64(info.DataShards)
-			}
 			// The open ragged-edge sector has no durable sector hash until it
-			// fills. Choose only shards with a sealed first sector so byte
-			// corruption is guaranteed to be visible to Scrub.
+			// fills. Inspect the physical plog rather than its vlog's published
+			// cursor: a valid slow non-quorum mirror may be shorter than that
+			// cursor. Choose only an actually sealed first sector so corruption
+			// is guaranteed to be visible to Scrub.
 			if shardLength >= storage.SectorSize {
 				sealed = append(sealed, candidate{disk: disk, plog: p.PlogID})
 			}
