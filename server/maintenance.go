@@ -1264,7 +1264,11 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 		if rollbackErr := s.db.MovePlogToDisk(durableCtx, plogID, fromDisk); rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("drain: roll back plog %d placement: %w", plogID, rollbackErr))
 		}
-		s.plogs[plogID] = old
+		if old != nil {
+			s.plogs[plogID] = old
+		} else {
+			delete(s.plogs, plogID)
+		}
 		_ = reopened.Close()
 		_ = os.Remove(newPath)
 		return err

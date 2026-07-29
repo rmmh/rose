@@ -1312,6 +1312,95 @@ func TestReplaceResumesAfterRestart(t *testing.T) {
 	}
 }
 
+func TestRecoverLeavesInterruptedReplacePendingWhenSourceShardIsTruncated(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	roots := map[uint32]string{
+		1: filepath.Join(dir, "disk1"),
+		2: filepath.Join(dir, "disk2"),
+		3: filepath.Join(dir, "replacement"),
+	}
+	before := NewServerWithDiskRoots(db, roots)
+	before.SetMaintenanceInterval(0)
+	if err := before.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.SetDiskState(ctx, 3, meta.DiskDraining); err != nil {
+		t.Fatal(err)
+	}
+	vlogID := provision(t, before, "DUPLICATE", 1, 0)
+	if err := before.SetDiskState(ctx, 3, meta.DiskActive); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("replace survives a truncated source"), 300)
+	offset := writeVlog(t, before, vlogID, payload)
+	sourceDisk := diskOf(t, before, vlogID, 0)
+	shards, err := db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sourcePlog uint32
+	for _, shard := range shards {
+		if shard.DiskID == sourceDisk {
+			sourcePlog = shard.PlogID
+			break
+		}
+	}
+	if sourcePlog == 0 {
+		t.Fatalf("vlog %d has no plog on source disk %d", vlogID, sourceDisk)
+	}
+
+	// An operator started replacement, then the process and source media failed
+	// before its first relocation step. The catalog therefore contains the same
+	// running job and draining source state an interrupted ReplaceDisk RPC leaves.
+	if _, err := db.GetOrCreateReplaceJob(ctx, sourceDisk, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetDiskState(ctx, sourceDisk, meta.DiskDraining); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := before.plogPath(sourceDisk, sourcePlog)
+	before.CloseStorage()
+	if err := os.Truncate(sourcePath, storage.SectorSize); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recovery must stay online from the surviving mirror. The replacement
+	// remains retryable until its source is repaired; a failed remount must not
+	// leave a nil plog handle for the subsequent hash-recovery pass to dereference.
+	after := NewServerWithDiskRoots(db, roots)
+	after.SetMaintenanceInterval(0)
+	if err := after.Recover(ctx); err != nil {
+		t.Fatalf("recover around interrupted replacement: %v", err)
+	}
+	defer after.CloseStorage()
+	for id, plog := range after.plogs {
+		if plog == nil {
+			t.Fatalf("recovery published nil plog handle %d", id)
+		}
+	}
+	got, err := after.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatalf("read surviving mirror: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("payload changed while replacement remained pending")
+	}
+	jobs, err := db.RunningJobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].Kind != meta.JobReplace {
+		t.Fatalf("running jobs = %+v, want pending replacement", jobs)
+	}
+}
+
 func TestAttachDiskBringsCapacityOnline(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 2)
