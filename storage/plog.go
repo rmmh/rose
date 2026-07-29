@@ -92,7 +92,7 @@ const PlogFormatVersion = plogFormatVersion
 
 const (
 	plogMagic            = "ROSEPLG1"
-	plogFormatVersion    = 2
+	plogFormatVersion    = 3
 	plogHeaderSize       = SectorSize
 	plogHeaderPrefix     = 14 // magic(8) + version(2) + payloadLen(4)
 	plogHeaderHMACOffset = SectorSize - HashSize
@@ -136,6 +136,17 @@ func sectorHash(data []byte) [HashSize]byte {
 	sum := sha256.Sum256(data)
 	var out [HashSize]byte
 	copy(out[:], sum[:HashSize])
+	return out
+}
+
+func completedBlockMAC(blockIdx int64, hashes []byte) [HashSize]byte {
+	var index [8]byte
+	binary.LittleEndian.PutUint64(index[:], uint64(blockIdx))
+	mac := hmac.New(sha256.New, bitrotKey)
+	mac.Write(index[:])
+	mac.Write(hashes)
+	var out [HashSize]byte
+	copy(out[:], mac.Sum(nil)[:HashSize])
 	return out
 }
 
@@ -575,9 +586,9 @@ func (p *Plog) writeLocked(data []byte) (int64, error) {
 	if len(p.hashes) == HashesPerBlock*HashSize {
 		var hashSec [SectorSize]byte
 		copy(hashSec[:], p.hashes)
-		mac := hmac.New(sha256.New, bitrotKey)
-		mac.Write(p.hashes)
-		copy(hashSec[HashesPerBlock*HashSize:], mac.Sum(nil)[:HashSize])
+		blockIdx := p.logicalLength/dataPerBlock - 1
+		mac := completedBlockMAC(blockIdx, p.hashes)
+		copy(hashSec[HashesPerBlock*HashSize:], mac[:])
 
 		writeBuf = append(writeBuf, hashSec[:]...)
 		p.hashes = p.hashes[:0]
@@ -596,9 +607,9 @@ func (p *Plog) writeLocked(data []byte) (int64, error) {
 		if len(p.hashes) == HashesPerBlock*HashSize {
 			var hashSec [SectorSize]byte
 			copy(hashSec[:], p.hashes)
-			mac := hmac.New(sha256.New, bitrotKey)
-			mac.Write(p.hashes)
-			copy(hashSec[HashesPerBlock*HashSize:], mac.Sum(nil)[:HashSize])
+			blockIdx := p.logicalLength/dataPerBlock - 1
+			mac := completedBlockMAC(blockIdx, p.hashes)
+			copy(hashSec[HashesPerBlock*HashSize:], mac[:])
 
 			writeBuf = append(writeBuf, hashSec[:]...)
 			p.hashes = p.hashes[:0]
@@ -674,13 +685,11 @@ func (p *Plog) sealSector() error {
 			p.hashSector[i] = 0
 		}
 		copy(p.hashSector[:], p.hashes)
-		mac := hmac.New(sha256.New, bitrotKey)
-		mac.Write(p.hashes)
-		copy(p.hashSector[HashesPerBlock*HashSize:], mac.Sum(nil)[:HashSize])
-
 		// The hash sector sits right after the 255 data sectors just sealed.
 		sealed := p.logicalLength - int64(len(p.buf))
 		blockIdx := sealed/dataPerBlock - 1
+		mac := completedBlockMAC(blockIdx, p.hashes)
+		copy(p.hashSector[HashesPerBlock*HashSize:], mac[:])
 		if _, err := p.file.WriteAt(p.hashSector[:], hashSectorPhys(blockIdx)); err != nil {
 			return fmt.Errorf("write plog %d hash sector: %w", p.id, err)
 		}
@@ -789,9 +798,8 @@ func (p *Plog) sectorHashFor(sectorIdx, sealed int64, hashSectors map[int64][]by
 				return nil, false, fmt.Errorf("read plog %d hash sector %d: %w", p.id, blockIdx, err)
 			}
 			recorded = hashSector[:HashesPerBlock*HashSize]
-			mac := hmac.New(sha256.New, bitrotKey)
-			mac.Write(recorded)
-			if !hmac.Equal(mac.Sum(nil)[:HashSize], hashSector[HashesPerBlock*HashSize:]) {
+			want := completedBlockMAC(blockIdx, recorded)
+			if !hmac.Equal(want[:], hashSector[HashesPerBlock*HashSize:]) {
 				return nil, false, fmt.Errorf("plog %d hash sector %d authentication: %w", p.id, blockIdx, ErrBitrot)
 			}
 			hashSectors[blockIdx] = recorded
@@ -857,9 +865,8 @@ func (p *Plog) Scrub() (ScrubResult, error) {
 			return res, fmt.Errorf("scrub plog %d hash sector %d: %w", p.id, blockIdx, err)
 		}
 		recorded := hashSector[:HashesPerBlock*HashSize]
-		mac := hmac.New(sha256.New, bitrotKey)
-		mac.Write(recorded)
-		if !hmac.Equal(mac.Sum(nil)[:HashSize], hashSector[HashesPerBlock*HashSize:HashesPerBlock*HashSize+HashSize]) {
+		want := completedBlockMAC(blockIdx, recorded)
+		if !hmac.Equal(want[:], hashSector[HashesPerBlock*HashSize:HashesPerBlock*HashSize+HashSize]) {
 			res.BadHMACBlocks = append(res.BadHMACBlocks, blockIdx)
 		}
 		for pos := int64(0); pos < HashesPerBlock; pos++ {

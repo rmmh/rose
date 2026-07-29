@@ -177,6 +177,52 @@ func TestPlogReadAuthenticatesCompletedHashSector(t *testing.T) {
 	}
 }
 
+func TestPlogReadRejectsRelocatedCompletedBlock(t *testing.T) {
+	p, path := tempPlog(t, "plog")
+	data := append(
+		bytes.Repeat([]byte{0x11}, dataPerBlock),
+		bytes.Repeat([]byte{0x22}, dataPerBlock)...,
+	)
+	if _, err := p.Write(0, data); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model a disk returning two internally valid physical blocks at one
+	// another's addresses. Their data and hash sectors move together, so a MAC
+	// that authenticates only hash contents cannot detect the relocation.
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	first := make([]byte, blockPhysical)
+	second := make([]byte, blockPhysical)
+	firstPhys := int64(plogHeaderSize)
+	secondPhys := firstPhys + blockPhysical
+	if _, err := f.ReadAt(first, firstPhys); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.ReadAt(second, secondPhys); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt(second, firstPhys); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt(first, secondPhys); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := p.Read(0, SectorSize); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("read with relocated authenticated block = %v, want ErrBitrot", err)
+	}
+}
+
 func TestPlogScrubReportsCorruption(t *testing.T) {
 	p, path := tempPlog(t, "plog")
 	data := twoBlockPayload()
