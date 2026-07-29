@@ -37,6 +37,15 @@ func (s *Server) RemoveDisk(ctx context.Context, req *pb.RemoveDiskRequest) (*pb
 	if !ok {
 		return nil, fmt.Errorf("disk %d is not configured", req.GetDiskId())
 	}
+	if state == meta.DiskDetached {
+		job, exists, err := s.db.LatestDiskJob(ctx, meta.JobDrain, req.GetDiskId())
+		if err != nil {
+			return nil, err
+		}
+		if exists && job.State == meta.JobDone {
+			return &pb.MaintenanceJobResponse{JobId: uint64(job.ID)}, nil
+		}
+	}
 	if state != meta.DiskActive && state != meta.DiskDraining {
 		return nil, fmt.Errorf("disk %d is %s, cannot remove", req.GetDiskId(), state)
 	}

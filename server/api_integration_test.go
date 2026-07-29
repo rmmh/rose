@@ -731,6 +731,35 @@ func TestReplaceDiskUsesPreAttachedEmptyDestination(t *testing.T) {
 	}
 }
 
+func TestRemoveDiskRetryReturnsCompletedJob(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	srv := server.NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
+	srv.SetMaintenanceInterval(0)
+	if err := srv.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.StopMaintenanceDriver()
+
+	req := &pb.RemoveDiskRequest{DiskId: 1}
+	first, err := srv.RemoveDisk(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := srv.RemoveDisk(ctx, req)
+	if err != nil {
+		t.Fatalf("identical RemoveDisk retry failed: %v", err)
+	}
+	if retry.GetJobId() != first.GetJobId() {
+		t.Fatalf("RemoveDisk retry job = %d, want %d", retry.GetJobId(), first.GetJobId())
+	}
+}
+
 func TestVlogCommitControlsRecoveredLength(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))

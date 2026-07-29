@@ -130,6 +130,19 @@ func (d *DB) GetOrCreateDrainJob(ctx context.Context, targetDisk uint32) (Job, e
 	return d.getOrCreateDiskJob(ctx, JobDrain, targetDisk, 0)
 }
 
+// LatestDiskJob returns the newest job of kind for targetDisk, including a
+// completed job. Control-plane RPC retries use it to recover the response when
+// the first call finished durably but its reply was lost.
+func (d *DB) LatestDiskJob(ctx context.Context, kind string, targetDisk uint32) (Job, bool, error) {
+	j, err := scanJob(d.db.QueryRowContext(ctx,
+		"SELECT "+jobColumns+" FROM job WHERE kind = ? AND target_disk = ? ORDER BY id DESC LIMIT 1",
+		kind, targetDisk))
+	if err == sql.ErrNoRows {
+		return Job{}, false, nil
+	}
+	return j, err == nil, err
+}
+
 // GetOrCreateReprotectJob returns the running reprotect job for a failed disk,
 // creating one if none exists. Like drain it is keyed by target_disk, so a crash
 // mid-reprotect resumes from the shards still mapped to the failed disk's plogs
