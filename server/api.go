@@ -118,17 +118,21 @@ func (s *Server) AbortHandle(ctx context.Context, handle int64) error {
 	if !s.handleStillRegistered(handle, h) {
 		return nil
 	}
+	var cancelErr error
 	if h.writeOpID != 0 {
-		if err := s.db.CancelWriteOp(ctx, h.writeOpID); err != nil {
-			return err
+		cancelErr = s.db.CancelWriteOp(ctx, h.writeOpID)
+		if cancelErr == nil {
+			s.releasePins(h.writeOpID)
 		}
-		s.releasePins(h.writeOpID)
 	}
+	// Even if the durable cancellation failed, this client is gone. Unregister
+	// its unreachable handle so the write-op reaper can retry terminal cleanup;
+	// retain the operation pins until that durable transition succeeds.
 	s.handlesMu.Lock()
 	delete(s.handles, handle)
 	s.handlesMu.Unlock()
 	s.releasePins(h.pinOwner)
-	return nil
+	return cancelErr
 }
 
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {

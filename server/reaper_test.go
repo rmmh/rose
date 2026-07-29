@@ -88,6 +88,51 @@ func TestReapAbandonedWriteOps(t *testing.T) {
 	}
 }
 
+func TestFailedClientAbortLeavesWriteReapable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
+	if err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s.StopMaintenanceDriver()
+
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/aborted", OperationKey: "failed-abort"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: open.GetHandle(), Buffer: make([]byte, 5<<20),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := s.AbortHandle(cancelled, open.GetHandle()); err == nil {
+		t.Fatal("AbortHandle unexpectedly completed durable cancellation")
+	}
+	reaped, err := s.ReapAbandonedWriteOps(ctx, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaped != 1 {
+		t.Fatalf("reaped operations after failed abort = %d, want 1", reaped)
+	}
+	var leases int
+	if err := db.GetDB().QueryRowContext(ctx, "SELECT COUNT(*) FROM vlog_lease").Scan(&leases); err != nil {
+		t.Fatal(err)
+	}
+	if leases != 0 {
+		t.Fatalf("reaped failed abort retained %d vlog leases", leases)
+	}
+}
+
 func TestReaperWaitsForWriteOperationRegistration(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
