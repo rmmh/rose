@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rmmh/rose/meta"
+	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/storage"
 )
 
@@ -246,6 +247,58 @@ func TestReprotectDuplicateRegeneratesCopy(t *testing.T) {
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatal("payload changed across reprotect")
+	}
+}
+
+func TestStartReprotectRetryCleansFailedDestination(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 4)
+	if err := s.SetDiskState(ctx, 4, meta.DiskDraining); err != nil {
+		t.Fatal(err)
+	}
+	vlogID := provision(t, s, "DUPLICATE", 1, 0)
+	payload := bytes.Repeat([]byte("retry-reprotect"), 500)
+	offset := writeVlog(t, s, vlogID, payload)
+	if err := s.SetDiskState(ctx, 4, meta.DiskActive); err != nil {
+		t.Fatal(err)
+	}
+	victim := diskOf(t, s, vlogID, 0)
+	if err := s.SetDiskState(ctx, victim, meta.DiskFailed); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.db.ListPlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spareRoot := s.diskRoots[4]
+	blockedRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedRoot, []byte("offline destination"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.diskRoots[4] = blockedRoot
+
+	req := &pb.StartReprotectRequest{DiskId: victim}
+	if _, err := s.StartReprotect(ctx, req); err == nil {
+		t.Fatal("reprotection onto an unavailable destination succeeded")
+	}
+	after, err := s.db.ListPlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("failed reprotection leaked %d plog rows", len(after)-len(before))
+	}
+
+	s.diskRoots[4] = spareRoot
+	if _, err := s.StartReprotect(ctx, req); err != nil {
+		t.Fatalf("retry after destination returned: %v", err)
+	}
+	got, err := s.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("payload changed across retried reprotection")
 	}
 }
 

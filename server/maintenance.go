@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -266,29 +267,44 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	if err != nil {
 		return err
 	}
+	var np *storage.Plog
+	discard := func(cause error) error {
+		// Delete the catalog row first. Its unassigned predicate is the safety
+		// check for an ambiguous ReplaceShardPlog outcome: if the repoint did
+		// commit, retain the now-authoritative file and live handle.
+		if cleanupErr := s.db.DiscardUnassignedPlog(context.WithoutCancel(ctx), newPlogID); cleanupErr != nil {
+			return errors.Join(cause, cleanupErr)
+		}
+		if np != nil {
+			_ = np.Close()
+		}
+		delete(s.plogs, newPlogID)
+		_ = os.Remove(s.plogPath(toDisk, newPlogID))
+		return cause
+	}
 	header, err := s.basePlogHeader(ctx, newPlogID, toDisk, newPlogUID)
 	if err != nil {
-		return err
+		return discard(err)
 	}
 	// Stamp the destination vlog membership so the regenerated shard is as
 	// self-describing as a freshly provisioned one (best-effort recovery hint).
 	if err := s.stampVlogMembership(ctx, header, vlogID, shardIdx); err != nil {
-		return err
+		return discard(err)
 	}
-	np, err := storage.OpenPlog(s.plogPath(toDisk, newPlogID), newPlogID, storage.WithHeader(header))
+	np, err = storage.OpenPlog(s.plogPath(toDisk, newPlogID), newPlogID, storage.WithHeader(header))
 	if err != nil {
-		return fmt.Errorf("reprotect: open regenerated plog %d on disk %d: %w", newPlogID, toDisk, err)
+		return discard(fmt.Errorf("reprotect: open regenerated plog %d on disk %d: %w", newPlogID, toDisk, err))
 	}
 	if _, err := np.Write(0, shardData); err != nil {
-		return fmt.Errorf("reprotect: write regenerated shard to plog %d: %w", newPlogID, err)
+		return discard(fmt.Errorf("reprotect: write regenerated shard to plog %d: %w", newPlogID, err))
 	}
 	if err := np.Commit(); err != nil {
-		return fmt.Errorf("reprotect: commit regenerated plog %d: %w", newPlogID, err)
+		return discard(fmt.Errorf("reprotect: commit regenerated plog %d: %w", newPlogID, err))
 	}
 	s.plogs[newPlogID] = np
 
 	if err := s.db.ReplaceShardPlog(ctx, vlogID, shardIdx, lostPlogID, newPlogID); err != nil {
-		return err
+		return discard(err)
 	}
 	delete(s.plogs, lostPlogID)
 	delete(s.offlinePlogs, lostPlogID)
