@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -104,6 +105,42 @@ func TestPathTruncateFailureDoesNotLeakTransientHandle(t *testing.T) {
 	}
 	if attr.GetSize() != req.GetSize() {
 		t.Fatalf("truncated size = %d, want %d", attr.GetSize(), req.GetSize())
+	}
+}
+
+func TestRawLogWritesRejectUnrepresentableOffsets(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+
+	made, err := s.MakePlog(ctx, &pb.MakePlogRequest{DiskId: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plogID := made.GetPlogId()
+	plog := s.plogs[plogID]
+	path := s.plogPath(1, plogID)
+	if err := plog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, storage.CalcPhysical(MaxVlogBytes)); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := storage.OpenPlog(path, plogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.plogs[plogID] = reopened
+	if _, err := s.WritePlog(ctx, &pb.WritePlogRequest{PlogId: plogID}); err == nil {
+		t.Fatal("zero-length plog write returned a wrapped offset")
+	}
+
+	vlog, err := storage.NewVlog(99, "NONE", 1, 0, []storage.PlogClient{offlinePlogClient{}}, MaxVlogBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.vlogs[99] = vlog
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{VlogId: 99}); err == nil {
+		t.Fatal("zero-length vlog write returned a wrapped offset")
 	}
 }
 

@@ -1704,6 +1704,10 @@ func (s *Server) WritePlog(ctx context.Context, req *pb.WritePlogRequest) (*pb.W
 	if !ok {
 		return nil, fmt.Errorf("plog not found")
 	}
+	length := plog.LogicalLength()
+	if length > math.MaxUint32 || int64(len(req.GetBuffer())) > MaxVlogBytes-length {
+		return nil, fmt.Errorf("plog %d would exceed its 32-bit address space", req.GetPlogId())
+	}
 	offset, err := plog.Write(req.GetTxnId(), req.GetBuffer())
 	if err != nil {
 		return nil, err
@@ -1757,6 +1761,9 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 	s.vlogMu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("vlog not found")
+	}
+	if v.Length() > math.MaxUint32 {
+		return nil, fmt.Errorf("vlog %d has no representable write offset", req.GetVlogId())
 	}
 	if v.Length()+int64(len(req.GetBuffer())) > MaxVlogBytes {
 		return nil, fmt.Errorf("vlog %d would exceed max size %d", req.GetVlogId(), MaxVlogBytes)
