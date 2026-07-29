@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	pathpkg "path"
@@ -375,16 +374,13 @@ func (s *Server) Recover(ctx context.Context) error {
 		}
 		plog, err := storage.OpenExistingPlog(s.plogPath(info.DiskID, info.ID), info.ID)
 		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				// The disk's directory is present (the pre-scan did not fail it), but
-				// this individual shard file is gone -- removed out-of-band, or a
-				// stray loss. Stub the shard offline and leave the disk active: reads
-				// fall through to surviving redundancy and the disk keeps serving its
-				// other shards, rather than condemning the whole disk for one file.
-				s.offlinePlogs[info.ID] = true
-				continue
-			}
-			return fmt.Errorf("recover plog %d on disk %d: %w", info.ID, info.DiskID, err)
+			// The disk root is reachable, but this individual shard is absent,
+			// corrupt, or unreadable. Stub only the shard offline: surviving
+			// redundancy can still mount, while maintenance repairs it later.
+			s.offlinePlogs[info.ID] = true
+			slog.Warn("taking unreadable plog offline during recovery",
+				"plogID", info.ID, "diskID", info.DiskID, "error", err)
+			continue
 		}
 		plogByID[info.ID] = plog
 	}
