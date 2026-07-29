@@ -96,6 +96,9 @@ func TestMakeVlogPlogPersistUID(t *testing.T) {
 	}
 	defer db.Close()
 
+	if err := db.RegisterNode(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.RegisterDisk(ctx, 1, 1, uid.New()); err != nil {
 		t.Fatal(err)
 	}
