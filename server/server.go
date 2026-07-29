@@ -394,6 +394,28 @@ func (s *Server) Recover(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// A present file can still be unusable after a torn catch-up or media
+	// truncation. Treat a shard shorter than the committed vlog length exactly
+	// like a missing shard so recover can mount surviving redundancy degraded.
+	for _, info := range vlogInfos {
+		expected := info.Length
+		if info.ProtectionScheme == "EC" {
+			expected /= int64(info.DataShards)
+		}
+		mappings, err := s.db.ListVlogPlogs(ctx, info.ID)
+		if err != nil {
+			return err
+		}
+		for _, mapping := range mappings {
+			plog, ok := s.plogs[mapping.PlogID]
+			if !ok || plog.LogicalLength() >= expected {
+				continue
+			}
+			_ = plog.Close()
+			delete(s.plogs, mapping.PlogID)
+			s.offlinePlogs[mapping.PlogID] = true
+		}
+	}
 	vlogs := make(map[uint32]*storage.Vlog, len(vlogInfos))
 	s.vlogKeys = make(map[uint32][16]byte, len(vlogInfos))
 	for _, info := range vlogInfos {

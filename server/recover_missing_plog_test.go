@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/rmmh/rose/meta"
+	"github.com/rmmh/rose/storage"
 )
 
 // TestRecoverStubsSingleMissingPlogFile covers an individual shard file removed
@@ -108,6 +109,66 @@ func TestRecoverStubsSingleMissingPlogFile(t *testing.T) {
 	// The data still reads correctly: the surviving mirror carries the read.
 	if got := readServerFileInternal(t, s2, "/mirror/file"); !bytes.Equal(got, payload) {
 		t.Fatal("payload changed after recovering with a lost shard")
+	}
+}
+
+func TestRecoverStubsTruncatedDuplicateShard(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	roots := map[uint32]string{1: filepath.Join(dir, "disk1"), 2: filepath.Join(dir, "disk2")}
+	s1 := NewServerWithDiskRoots(db, roots)
+	s1.SetMaintenanceInterval(0)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("truncated shard must degrade"), 300)
+	writeServerFileInternal(t, s1, "/mirror/truncated", payload)
+
+	vlogs, err := db.ListVlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lostPlogID, lostDiskID uint32
+	for _, vlog := range vlogs {
+		if vlog.ProtectionScheme != "DUPLICATE" || vlog.IsStaging() || vlog.Length == 0 {
+			continue
+		}
+		mappings, err := db.ListVlogPlogs(ctx, vlog.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		disks, err := db.VlogShardDisks(ctx, vlog.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lostPlogID, lostDiskID = mappings[0].PlogID, disks[0].DiskID
+		break
+	}
+	if lostPlogID == 0 {
+		t.Fatal("no committed duplicate shard found")
+	}
+	lostPath := s1.plogPath(lostDiskID, lostPlogID)
+	s1.CloseStorage()
+	if err := os.Truncate(lostPath, storage.SectorSize); err != nil {
+		t.Fatal(err)
+	}
+
+	s2 := NewServerWithDiskRoots(db, roots)
+	s2.SetMaintenanceInterval(0)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatalf("recover with a truncated duplicate shard should boot degraded: %v", err)
+	}
+	defer s2.CloseStorage()
+	if !s2.offlinePlogs[lostPlogID] {
+		t.Fatalf("truncated plog %d was not taken offline", lostPlogID)
+	}
+	if got := readServerFileInternal(t, s2, "/mirror/truncated"); !bytes.Equal(got, payload) {
+		t.Fatal("payload changed after recovering around a truncated shard")
 	}
 }
 
