@@ -82,7 +82,13 @@ func (i *chaosInjector) inject(ctx context.Context) {
 		return
 	}
 	i.faults.Add(1)
-	i.assertInvariants(ctx)
+	// The workload deadline may expire between the check above and this audit.
+	// Give a fault that already completed its own bounded window to verify the
+	// resulting state instead of turning cancellation midway through scrub into
+	// a false corruption report.
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	i.assertInvariants(auditCtx)
 }
 
 func (i *chaosInjector) nodeOutage(ctx context.Context) error {
@@ -266,7 +272,7 @@ func (i *chaosInjector) assertInvariants(ctx context.Context) {
 	if err != nil {
 		i.t.Errorf("post-fault scrub: %v", err)
 	} else if len(res.Unrepairable) != 0 {
-		i.t.Errorf("post-fault scrub has %d unrepaired shards", len(res.Unrepairable))
+		i.t.Errorf("post-fault scrub has %d unrepaired shards: %v", len(res.Unrepairable), res.Unrepairable)
 	}
 }
 
