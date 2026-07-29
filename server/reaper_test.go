@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -84,6 +85,63 @@ func TestReapAbandonedWriteOps(t *testing.T) {
 	}
 	if _, err := s.Open(ctx, &pb.OpenRequest{Path: "/f1", OperationKey: "op-1"}); err == nil {
 		t.Fatal("Open accepted an abandoned write operation key")
+	}
+}
+
+func TestReaperWaitsForWriteOperationRegistration(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
+	if err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s.StopMaintenanceDriver()
+
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/active-write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.handles[open.GetHandle()]
+	h.stateMu.Lock()
+	key := fmt.Sprintf("legacy-handle-%d-0", open.GetHandle())
+	op, err := db.CreateWriteOp(ctx, key, "/active-write")
+	if err != nil {
+		h.stateMu.Unlock()
+		t.Fatal(err)
+	}
+
+	type reapResult struct {
+		count int
+		err   error
+	}
+	started := make(chan struct{})
+	done := make(chan reapResult, 1)
+	go func() {
+		close(started)
+		count, err := s.ReapAbandonedWriteOps(ctx, -time.Nanosecond)
+		done <- reapResult{count, err}
+	}()
+	<-started
+	select {
+	case result := <-done:
+		h.stateMu.Unlock()
+		t.Fatalf("reaper passed a write holding its handle state: count=%d err=%v", result.count, result.err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	h.writeOpID, h.writeKey = op.ID, key
+	h.stateMu.Unlock()
+	result := <-done
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if result.count != 0 {
+		t.Fatalf("reaped %d active write operations, want 0", result.count)
 	}
 }
 

@@ -11,19 +11,29 @@ import (
 // their vlog leases) if they have exceeded the ageThreshold.
 // It returns the count of operations abandoned, or an error.
 func (s *Server) ReapAbandonedWriteOps(ctx context.Context, ageThreshold time.Duration) (int, error) {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
+
 	ops, err := s.db.ListPreparedWriteOps(ctx)
 	if err != nil {
 		return 0, err
 	}
 
 	s.handlesMu.Lock()
-	activeIDs := make(map[int64]bool, len(s.handles))
+	handles := make([]*FileHandle, 0, len(s.handles))
 	for _, h := range s.handles {
+		handles = append(handles, h)
+	}
+	s.handlesMu.Unlock()
+
+	activeIDs := make(map[int64]bool, len(handles))
+	for _, h := range handles {
+		h.stateMu.Lock()
 		if h.writeOpID != 0 {
 			activeIDs[h.writeOpID] = true
 		}
+		h.stateMu.Unlock()
 	}
-	s.handlesMu.Unlock()
 
 	now := time.Now()
 	reaped := 0
