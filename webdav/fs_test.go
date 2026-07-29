@@ -202,6 +202,20 @@ func TestWebDAVCloseReportsCommitFailure(t *testing.T) {
 	if err := file.Close(); err == nil {
 		t.Fatal("WebDAV close hid degraded commit failure")
 	}
+	var state string
+	if err := db.GetDB().QueryRow("SELECT state FROM write_op").Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != meta.WriteOpCancelled {
+		t.Fatalf("failed WebDAV commit state = %q, want %q", state, meta.WriteOpCancelled)
+	}
+	var leases int
+	if err := db.GetDB().QueryRow("SELECT COUNT(*) FROM vlog_lease").Scan(&leases); err != nil {
+		t.Fatal(err)
+	}
+	if leases != 0 {
+		t.Fatalf("failed WebDAV commit retained %d vlog leases", leases)
+	}
 }
 
 func TestWebDAVCancelledPutAbortsHandleAndLease(t *testing.T) {

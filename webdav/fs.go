@@ -10,6 +10,7 @@ package webdav
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -381,7 +382,13 @@ func (f *roseFile) Close() error {
 			return f.ctx.Err()
 		}
 		if _, err := f.srv.Close(f.ctx, &pb.CloseRequest{Handle: f.handle}); err != nil {
-			return err
+			// The upstream handler will not call Close again, and this adapter's
+			// generated operation key is not exposed to the client for a retry.
+			// Abort the unpublished attempt so a disk failure does not leave a
+			// permanently active handle and lease behind.
+			abortErr := f.srv.AbortHandle(context.WithoutCancel(f.ctx), f.handle)
+			f.handle = 0
+			return errors.Join(err, abortErr)
 		}
 		f.handle = 0
 	}
