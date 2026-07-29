@@ -211,6 +211,12 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 		// write handle whose data has not been published yet -- rsync renames its
 		// temp file into place before closing it. Retarget the live handle so its
 		// pending bytes commit at the new path on Close, and report success.
+		if !s.hasOpenHandleAtOrBelow(oldPath) {
+			return nil, err
+		}
+		if oldPath != newPath {
+			s.markOpenHandlesUnlinked(newPath, false)
+		}
 		if found, retargetErr := s.retargetOpenHandles(ctx, oldPath, newPath); retargetErr != nil {
 			return nil, retargetErr
 		} else if found {
@@ -233,6 +239,25 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 		return nil, err
 	}
 	return &pb.RenameResponse{}, nil
+}
+
+func (s *Server) hasOpenHandleAtOrBelow(path string) bool {
+	s.handlesMu.Lock()
+	handles := make([]*FileHandle, 0, len(s.handles))
+	for _, h := range s.handles {
+		handles = append(handles, h)
+	}
+	s.handlesMu.Unlock()
+	for _, h := range handles {
+		h.stateMu.Lock()
+		handlePath := h.path()
+		found := !h.unlinked && (handlePath == path || strings.HasPrefix(handlePath, path+"/"))
+		h.stateMu.Unlock()
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 // markOpenHandlesUnlinked prevents a later Close from publishing a pending

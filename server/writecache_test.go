@@ -432,6 +432,48 @@ func TestRenameOverwriteIsNotUndoneByOpenDestinationWriter(t *testing.T) {
 	if got := readAll(t, s, "/dst"); !bytes.Equal(got, []byte("renamed source")) {
 		t.Fatalf("destination after open-writer Close = %q, want renamed source", got)
 	}
+
+	src, err := s.Open(ctx, &pb.OpenRequest{
+		Path:         "/pending-src",
+		OperationKey: "pending-rename-source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: src.GetHandle(),
+		Buffer: []byte("pending renamed source"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dst, err = s.Open(ctx, &pb.OpenRequest{
+		Path:         "/pending-dst",
+		OperationKey: "pending-rename-destination",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: dst.GetHandle(),
+		Buffer: []byte("pending stale destination"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Rename(ctx, &pb.RenameRequest{
+		OldPath: "/pending-src",
+		NewPath: "/pending-dst",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: src.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: dst.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(t, s, "/pending-dst"); !bytes.Equal(got, []byte("pending renamed source")) {
+		t.Fatalf("pending destination after stale Close = %q, want renamed source", got)
+	}
 }
 
 func TestUnlinkOpenWriterDoesNotRepublishPathOnClose(t *testing.T) {
