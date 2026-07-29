@@ -982,6 +982,10 @@ func (s *Server) leasedVlogForWriteReserved(ctx context.Context, opID int64, pat
 		if lengthOf(id, v)+int64(n) > MaxVlogBytes {
 			continue
 		}
+		active, err := s.vlogPlacementActiveLocked(ctx, id)
+		if err != nil || !active {
+			continue
+		}
 		info, err := s.db.GetVlog(ctx, id)
 		if err != nil {
 			continue
@@ -1007,6 +1011,26 @@ func (s *Server) leasedVlogForWriteReserved(ctx context.Context, opID int64, pat
 		reserved[id] = lengthOf(id, v) + int64(n)
 	}
 	return id, v, nil
+}
+
+// vlogPlacementActiveLocked reports whether every shard of an existing vlog is
+// still eligible for new writes. A draining disk remains reachable for an
+// operation that already holds the vlog lease, but a different operation must
+// not claim that vlog and extend the evacuation indefinitely.
+func (s *Server) vlogPlacementActiveLocked(ctx context.Context, vlogID uint32) (bool, error) {
+	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		return false, err
+	}
+	if len(shards) == 0 {
+		return false, nil
+	}
+	for _, sh := range shards {
+		if s.offlinePlogs[sh.PlogID] || !s.diskLiveLocked(sh.DiskID) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // vlogMatchesPolicy reports whether an existing vlog can hold chunks written

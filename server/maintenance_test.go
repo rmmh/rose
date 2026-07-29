@@ -160,6 +160,100 @@ func TestRemoveDiskFailureKeepsHealthySourceReadable(t *testing.T) {
 	}
 }
 
+func TestReplaceDiskDefersLeasedVlog(t *testing.T) {
+	s := newControlPlaneServer(t, 2)
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{
+		Path: "/replace-leased-write", OperationKey: "replace-leased-write",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("leased-replace"), (5<<20)/len("leased-replace")+1)
+	payload = payload[:5<<20]
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: open.GetHandle(), Buffer: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	newRoot := filepath.Join(t.TempDir(), "replacement")
+	if err := os.MkdirAll(newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AttachDiskOnNode(ctx, 3, 1, newRoot, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceDiskWith(ctx, 1, 3); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DiskStates()[1]; got != meta.DiskDraining {
+		t.Fatalf("leased source disk state = %q, want draining", got)
+	}
+
+	if _, err := s.Close(ctx, &pb.CloseRequest{
+		Handle: open.GetHandle(), IdempotencyKey: "replace-leased-write",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Once the original lease is released, a different client write must not
+	// claim the old vlog while one of its shards is still on the draining disk.
+	second, err := s.Open(ctx, &pb.OpenRequest{
+		Path: "/write-during-drain", OperationKey: "write-during-drain",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: second.GetHandle(), Buffer: []byte("new data while source is draining"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{
+		Handle: second.GetHandle(), IdempotencyKey: "write-during-drain",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fileID, err := s.db.OpenFile(ctx, "/write-during-drain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks, err := s.db.FileVersionChunks(ctx, fileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, chunk := range chunks {
+		shards, err := s.db.VlogShardDisks(ctx, chunk.VlogID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, shard := range shards {
+			if shard.DiskID == 1 {
+				t.Fatalf("new write used draining disk through vlog %d", chunk.VlogID)
+			}
+		}
+	}
+
+	if err := s.ReplaceDiskWith(ctx, 1, 3); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DiskStates()[1]; got != meta.DiskDetached {
+		t.Fatalf("source disk state after retry = %q, want detached", got)
+	}
+	read, err := s.Open(ctx, &pb.OpenRequest{Path: "/replace-leased-write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Read(ctx, &pb.ReadRequest{Handle: read.GetHandle(), Length: int64(len(payload))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.GetBuffer(), payload) {
+		t.Fatalf("file after deferred replace has %d bytes, want %d", len(got.GetBuffer()), len(payload))
+	}
+}
+
 func TestCancelledPlacementFlipKeepsDrainSourceReadable(t *testing.T) {
 	s := newControlPlaneServer(t, 2)
 	vlogID := provision(t, s, "NONE", 1, 0)

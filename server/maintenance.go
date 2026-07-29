@@ -173,7 +173,16 @@ func (s *Server) DrainDisk(ctx context.Context, diskID uint32) error {
 	if err != nil {
 		return err
 	}
+	deferred := false
 	for _, p := range plogs {
+		leased, err := s.db.VlogLeased(ctx, p.VlogID)
+		if err != nil {
+			return err
+		}
+		if leased {
+			deferred = true
+			continue
+		}
 		dest, err := s.pickDrainDestinationLocked(ctx, p.VlogID, diskID)
 		if err != nil {
 			return err
@@ -181,6 +190,9 @@ func (s *Server) DrainDisk(ctx context.Context, diskID uint32) error {
 		if err := s.migratePlogLocked(ctx, p.PlogID, p.VlogID, diskID, dest); err != nil {
 			return err
 		}
+	}
+	if deferred {
+		return nil
 	}
 
 	if err := s.setDiskStateLocked(ctx, diskID, meta.DiskDetached); err != nil {
@@ -222,7 +234,16 @@ func (s *Server) ReprotectDisk(ctx context.Context, diskID uint32) error {
 	if err != nil {
 		return err
 	}
+	deferred := false
 	for _, p := range plogs {
+		leased, err := s.db.VlogLeased(ctx, p.VlogID)
+		if err != nil {
+			return err
+		}
+		if leased {
+			deferred = true
+			continue
+		}
 		dest, err := s.pickDrainDestinationLocked(ctx, p.VlogID, diskID)
 		if err != nil {
 			return err
@@ -230,6 +251,9 @@ func (s *Server) ReprotectDisk(ctx context.Context, diskID uint32) error {
 		if err := s.regenerateShardLocked(ctx, p.VlogID, p.ShardIndex, p.PlogID, dest); err != nil {
 			return err
 		}
+	}
+	if deferred {
+		return nil
 	}
 
 	return s.db.MarkJobDone(ctx, job.ID)
@@ -801,13 +825,25 @@ func (s *Server) ReplaceDiskWith(ctx context.Context, oldDisk, newDisk uint32) e
 	if err != nil {
 		return err
 	}
+	deferred := false
 	for _, p := range plogs {
+		leased, err := s.db.VlogLeased(ctx, p.VlogID)
+		if err != nil {
+			return err
+		}
+		if leased {
+			deferred = true
+			continue
+		}
 		if err := s.ensurePlacementAllowedLocked(ctx, p.VlogID, newDisk, oldDisk); err != nil {
 			return err
 		}
 		if err := s.migratePlogLocked(ctx, p.PlogID, p.VlogID, oldDisk, newDisk); err != nil {
 			return err
 		}
+	}
+	if deferred {
+		return nil
 	}
 
 	if err := s.setDiskStateLocked(ctx, oldDisk, meta.DiskDetached); err != nil {
@@ -956,6 +992,13 @@ func (s *Server) rebalanceOneLocked(ctx context.Context, src uint32, minSkewByte
 	})
 
 	for _, p := range candidates {
+		leased, err := s.db.VlogLeased(ctx, p.VlogID)
+		if err != nil {
+			return false, err
+		}
+		if leased {
+			continue
+		}
 		sz := sizeByPlog[p.PlogID]
 		occupied, err := s.occupiedDisksLocked(ctx, p.VlogID, src)
 		if err != nil {

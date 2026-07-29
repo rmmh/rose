@@ -362,18 +362,18 @@ func (s *Server) readThreshold(info meta.VlogInfo) int {
 	return 1
 }
 
-// liveShardCountLocked reports how many of a vlog's shards currently sit on a
-// live disk (active lifecycle state on a working node), plus the total shards
-// provisioned. A failed node's disks are not live, so its shards stop counting
-// toward commit/read durability until the node returns. The caller must hold
-// vlogMu.
+// liveShardCountLocked reports how many of a vlog's existing shards are
+// reachable, plus the total shards provisioned. Draining and detached disks
+// remain reachable while their files exist, so an in-flight leased write can
+// finish during evacuation. Failed disks and disks on failed nodes do not count.
+// The caller must hold vlogMu.
 func (s *Server) liveShardCountLocked(ctx context.Context, vlogID uint32) (live, total int, err error) {
 	shards, err := s.db.VlogShardDisks(ctx, vlogID)
 	if err != nil {
 		return 0, 0, err
 	}
 	for _, sh := range shards {
-		if !s.offlinePlogs[sh.PlogID] && s.diskLiveLocked(sh.DiskID) {
+		if !s.offlinePlogs[sh.PlogID] && s.diskReachableLocked(sh.DiskID) {
 			live++
 		}
 	}
