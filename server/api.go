@@ -194,7 +194,7 @@ func (s *Server) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.UnlinkR
 	if err := s.db.UnlinkFile(ctx, path); err != nil {
 		return nil, err
 	}
-	s.markOpenHandlesUnlinked(path)
+	s.markOpenHandlesUnlinked(path, false)
 	return &pb.UnlinkResponse{}, nil
 }
 
@@ -230,9 +230,10 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 }
 
 // markOpenHandlesUnlinked prevents a later Close from publishing a pending
-// version back at a name that has already been removed. namespaceMu keeps new
-// opens and closes on the other side of the unlink's linearization point.
-func (s *Server) markOpenHandlesUnlinked(path string) {
+// version back at a name (or removed directory subtree) that has already been
+// removed. namespaceMu keeps new opens and closes on the other side of the
+// removal's linearization point.
+func (s *Server) markOpenHandlesUnlinked(path string, descendants bool) {
 	s.handlesMu.Lock()
 	handles := make([]*FileHandle, 0, len(s.handles))
 	for _, h := range s.handles {
@@ -241,7 +242,9 @@ func (s *Server) markOpenHandlesUnlinked(path string) {
 	s.handlesMu.Unlock()
 	for _, h := range handles {
 		h.stateMu.Lock()
-		if h.snapshotID == 0 && h.path() == path {
+		handlePath := h.path()
+		if h.snapshotID == 0 &&
+			(handlePath == path || descendants && strings.HasPrefix(handlePath, path+"/")) {
 			h.unlinked = true
 		}
 		h.stateMu.Unlock()
@@ -625,6 +628,8 @@ func (s *Server) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.MkdirResp
 }
 
 func (s *Server) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.RmdirResponse, error) {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
 	if req.GetPath() == "" {
 		return nil, fmt.Errorf("path cannot be empty")
 	}
@@ -637,6 +642,7 @@ func (s *Server) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.RmdirResp
 	if err := s.db.Rmdir(ctx, path); err != nil {
 		return nil, err
 	}
+	s.markOpenHandlesUnlinked(path, true)
 	return &pb.RmdirResponse{}, nil
 }
 

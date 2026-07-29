@@ -433,6 +433,38 @@ func TestUnlinkOpenWriterDoesNotRepublishPathOnClose(t *testing.T) {
 	}
 }
 
+func TestRmdirDoesNotLetOpenDescendantRecreateSubtree(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	if _, err := s.Mkdir(ctx, &pb.MkdirRequest{Path: "/removed-dir"}); err != nil {
+		t.Fatal(err)
+	}
+	open, err := s.Open(ctx, &pb.OpenRequest{
+		Path:         "/removed-dir/pending",
+		OperationKey: "rmdir-open-descendant",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: open.GetHandle(),
+		Buffer: []byte("pending"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Rmdir(ctx, &pb.RmdirRequest{Path: "/removed-dir"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/removed-dir", "/removed-dir/pending"} {
+		if _, ok, err := statPath(t, s, path); err == nil && ok {
+			t.Fatalf("Close recreated removed path %q", path)
+		}
+	}
+}
+
 func TestRenameDirectoryRetargetsOpenDescendantHandle(t *testing.T) {
 	ctx := context.Background()
 	s := newServer(t)
