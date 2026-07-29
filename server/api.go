@@ -287,6 +287,24 @@ func (s *Server) hasOpenHandleAtOrBelow(path string) bool {
 	return false
 }
 
+func (s *Server) hasOpenHandleAt(path string) bool {
+	s.handlesMu.Lock()
+	handles := make([]*FileHandle, 0, len(s.handles))
+	for _, h := range s.handles {
+		handles = append(handles, h)
+	}
+	s.handlesMu.Unlock()
+	for _, h := range handles {
+		h.stateMu.Lock()
+		found := !h.unlinked && h.snapshotID == 0 && h.path() == path
+		h.stateMu.Unlock()
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
 // markOpenHandlesUnlinked prevents a later Close from publishing a pending
 // version back at a name (or removed directory subtree) that has already been
 // removed. namespaceMu keeps new opens and closes on the other side of the
@@ -700,10 +718,16 @@ func (s *Server) ListDir(ctx context.Context, req *pb.ListDirRequest) (*pb.ListD
 }
 
 func (s *Server) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.MkdirResponse, error) {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
 	if req.GetPath() == "" {
 		return nil, fmt.Errorf("path cannot be empty")
 	}
-	if err := s.db.Mkdir(ctx, req.GetPath(), time.Now().UnixNano()); err != nil {
+	path := cleanPath(req.GetPath())
+	if s.hasOpenHandleAt(path) {
+		return nil, fmt.Errorf("mkdir %q: an open file exists at that path", path)
+	}
+	if err := s.db.Mkdir(ctx, path, time.Now().UnixNano()); err != nil {
 		return nil, err
 	}
 	return &pb.MkdirResponse{}, nil
