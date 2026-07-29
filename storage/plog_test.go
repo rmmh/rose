@@ -121,6 +121,62 @@ func TestPlogDetectsBitrotOnRead(t *testing.T) {
 	}
 }
 
+func TestPlogReadAuthenticatesCompletedHashSector(t *testing.T) {
+	p, path := tempPlog(t, "plog")
+	data := make([]byte, dataPerBlock)
+	for sector := 0; sector < HashesPerBlock; sector++ {
+		for i := 0; i < SectorSize; i++ {
+			data[sector*SectorSize+i] = byte(sector)
+		}
+	}
+	if _, err := p.Write(0, data); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model a disk misdirecting two complete data sectors together with their
+	// adjacent integrity slots. Each sector still matches the hash now beside
+	// it, but the hash-sector HMAC no longer authenticates that reordered list.
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	first := make([]byte, SectorSize)
+	second := make([]byte, SectorSize)
+	if _, err := f.ReadAt(first, CalcPhysical(0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.ReadAt(second, CalcPhysical(SectorSize)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt(second, CalcPhysical(0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt(first, CalcPhysical(SectorSize)); err != nil {
+		t.Fatal(err)
+	}
+	hashes := make([]byte, 2*HashSize)
+	if _, err := f.ReadAt(hashes, hashSectorPhys(0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt(hashes[HashSize:], hashSectorPhys(0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt(hashes[:HashSize], hashSectorPhys(0)+HashSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := p.Read(0, 2*SectorSize); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("read with reordered data and hash slots = %v, want ErrBitrot", err)
+	}
+}
+
 func TestPlogScrubReportsCorruption(t *testing.T) {
 	p, path := tempPlog(t, "plog")
 	data := twoBlockPayload()

@@ -713,6 +713,7 @@ func (p *Plog) readLocked(offset int64, length int) ([]byte, error) {
 
 	sealed := p.logicalLength - int64(len(p.buf))
 	out := make([]byte, 0, length)
+	hashSectors := make(map[int64][]byte)
 	for cur := offset; cur < end; {
 		sectorIdx := cur / SectorSize
 		sectorStart := sectorIdx * SectorSize
@@ -727,7 +728,7 @@ func (p *Plog) readLocked(offset int64, length int) ([]byte, error) {
 			sector = p.buf
 		} else {
 			var err error
-			sector, err = p.readDataSector(sectorIdx, sealed)
+			sector, err = p.readDataSector(sectorIdx, sealed, hashSectors)
 			if err != nil {
 				return nil, err
 			}
@@ -749,7 +750,7 @@ func (p *Plog) readLocked(offset int64, length int) ([]byte, error) {
 
 // readDataSector reads one sealed data sector and verifies it against its
 // recorded hash.
-func (p *Plog) readDataSector(sectorIdx, sealed int64) ([]byte, error) {
+func (p *Plog) readDataSector(sectorIdx, sealed int64, hashSectors map[int64][]byte) ([]byte, error) {
 	sectorStart := sectorIdx * SectorSize
 	size := int64(SectorSize)
 	if sectorStart+size > sealed {
@@ -759,7 +760,7 @@ func (p *Plog) readDataSector(sectorIdx, sealed int64) ([]byte, error) {
 	if _, err := p.file.ReadAt(sector, CalcPhysical(sectorStart)); err != nil {
 		return nil, fmt.Errorf("read plog %d sector %d: %w", p.id, sectorIdx, err)
 	}
-	expected, ok, err := p.sectorHashFor(sectorIdx, sealed)
+	expected, ok, err := p.sectorHashFor(sectorIdx, sealed, hashSectors)
 	if err != nil {
 		return nil, err
 	}
@@ -775,18 +776,28 @@ func (p *Plog) readDataSector(sectorIdx, sealed int64) ([]byte, error) {
 // sectorHashFor returns the recorded 16-byte hash of a sealed data sector.
 // Sectors in a completed block read their hash from the on-disk hash sector;
 // sectors still in the open block read it from the in-memory accumulator.
-func (p *Plog) sectorHashFor(sectorIdx, sealed int64) ([]byte, bool, error) {
+func (p *Plog) sectorHashFor(sectorIdx, sealed int64, hashSectors map[int64][]byte) ([]byte, bool, error) {
 	blockIdx := sectorIdx / HashesPerBlock
 	posInBlock := sectorIdx % HashesPerBlock
 	blockEndLogical := (blockIdx + 1) * dataPerBlock
 
 	if sealed >= blockEndLogical {
-		hashPhys := hashSectorPhys(blockIdx)
-		hash := make([]byte, HashSize)
-		if _, err := p.file.ReadAt(hash, hashPhys+posInBlock*HashSize); err != nil {
-			return nil, false, fmt.Errorf("read plog %d hash sector %d: %w", p.id, blockIdx, err)
+		recorded := hashSectors[blockIdx]
+		if recorded == nil {
+			hashSector := make([]byte, SectorSize)
+			if _, err := p.file.ReadAt(hashSector, hashSectorPhys(blockIdx)); err != nil {
+				return nil, false, fmt.Errorf("read plog %d hash sector %d: %w", p.id, blockIdx, err)
+			}
+			recorded = hashSector[:HashesPerBlock*HashSize]
+			mac := hmac.New(sha256.New, bitrotKey)
+			mac.Write(recorded)
+			if !hmac.Equal(mac.Sum(nil)[:HashSize], hashSector[HashesPerBlock*HashSize:]) {
+				return nil, false, fmt.Errorf("plog %d hash sector %d authentication: %w", p.id, blockIdx, ErrBitrot)
+			}
+			hashSectors[blockIdx] = recorded
 		}
-		return hash, true, nil
+		start := int(posInBlock) * HashSize
+		return recorded[start : start+HashSize], true, nil
 	}
 
 	start := int(posInBlock) * HashSize
