@@ -865,6 +865,25 @@ func (p *Plog) Scrub() (ScrubResult, error) {
 			}
 		}
 	}
+	// The current block has not emitted its standalone hash sector yet, but every
+	// sealed sector in it still has an authenticated hash (persisted in the open
+	// trailer on Commit and retained in memory after verification on open).
+	// Scrubbing only complete blocks would leave the common sub-megabyte plog
+	// entirely unscrubbed.
+	openBlockStart := completeBlocks * dataPerBlock
+	for pos := 0; pos < len(p.hashes)/HashSize; pos++ {
+		sectorStart := openBlockStart + int64(pos)*SectorSize
+		sector := make([]byte, SectorSize)
+		if _, err := p.file.ReadAt(sector, CalcPhysical(sectorStart)); err != nil {
+			return res, fmt.Errorf("scrub plog %d open sector %d: %w", p.id, pos, err)
+		}
+		res.SectorsChecked++
+		expected := p.hashes[pos*HashSize : pos*HashSize+HashSize]
+		hash := sectorHash(sector)
+		if !bytes.Equal(hash[:], expected) {
+			res.CorruptSectors = append(res.CorruptSectors, sectorStart)
+		}
+	}
 	return res, nil
 }
 

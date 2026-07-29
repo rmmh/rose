@@ -145,6 +145,22 @@ func TestPlogScrubReportsCorruption(t *testing.T) {
 	if res.CorruptSectors[0] != wantOffset {
 		t.Fatalf("corrupt sector offset = %d, want %d", res.CorruptSectors[0], wantOffset)
 	}
+
+	open, openPath := tempPlog(t, "open-block")
+	if _, err := open.Write(0, bytes.Repeat([]byte{0x41}, 2*SectorSize)); err != nil {
+		t.Fatal(err)
+	}
+	if err := open.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	corruptByte(t, openPath, CalcPhysical(100))
+	openRes, err := open.Scrub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(openRes.CorruptSectors) != 1 || openRes.CorruptSectors[0] != 0 {
+		t.Fatalf("scrub open-block corruption = %v, want sector 0", openRes.CorruptSectors)
+	}
 }
 
 // TestPlogRaggedEdgeAcrossCommits exercises the case that previously misaligned
