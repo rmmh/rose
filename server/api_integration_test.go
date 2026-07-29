@@ -223,6 +223,57 @@ func TestConflictingWriteOperationRetryIsRejected(t *testing.T) {
 	}
 }
 
+func TestConflictingWriteOperationMtimeRetryIsRejected(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	first, err := s.Open(ctx, &pb.OpenRequest{Path: "/mtime-retry", OperationKey: "mtime-op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Open(ctx, &pb.OpenRequest{Path: "/mtime-retry", OperationKey: "mtime-op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetHandleMtime(ctx, first.GetHandle(), 111); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetHandleMtime(ctx, second.GetHandle(), 222); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: first.GetHandle(), IdempotencyKey: "mtime-op"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: second.GetHandle(), IdempotencyKey: "mtime-op"}); err == nil {
+		t.Fatal("conflicting mtime retry reported success")
+	}
+	attr, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/mtime-retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attr.GetMtime() != 111 {
+		t.Fatalf("committed mtime = %d, want 111", attr.GetMtime())
+	}
+
+	sameA, err := s.Open(ctx, &pb.OpenRequest{Path: "/same-mtime-retry", OperationKey: "same-mtime-op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameB, err := s.Open(ctx, &pb.OpenRequest{Path: "/same-mtime-retry", OperationKey: "same-mtime-op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, handle := range []int64{sameA.GetHandle(), sameB.GetHandle()} {
+		if err := s.SetHandleMtime(ctx, handle, 333); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, handle := range []int64{sameA.GetHandle(), sameB.GetHandle()} {
+		if _, err := s.Close(ctx, &pb.CloseRequest{Handle: handle, IdempotencyKey: "same-mtime-op"}); err != nil {
+			t.Fatalf("identical mtime retry failed: %v", err)
+		}
+	}
+}
+
 func TestCloseRejectsMismatchedOperationKey(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()

@@ -1142,6 +1142,9 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		if err != nil {
 			return err
 		}
+		if h.mtimeSet.Load() && h.mtimeNs.Load() != committedMtime {
+			return fmt.Errorf("conflicting mtime retry for committed write operation %q", h.writeKey)
+		}
 	}
 	if remove {
 		s.handlesMu.Lock()
