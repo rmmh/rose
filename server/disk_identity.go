@@ -87,6 +87,11 @@ func (s *Server) reconcileDiskRoots(ctx context.Context) error {
 		root := filepath.Join(s.dataDir, fmt.Sprintf("disk-%d", d.ID))
 		raw, err := os.ReadFile(filepath.Join(root, diskUIDMarker))
 		if errors.Is(err, fs.ErrNotExist) {
+			// Keep the deterministic root bound even when the disk is currently
+			// absent. Because the id already exists in the catalog, pass 2 will
+			// not recreate the directory or mint a replacement identity; Recover
+			// can instead mark the missing disk failed and keep it out of placement.
+			s.diskRoots[d.ID] = root
 			continue
 		}
 		if err != nil {
