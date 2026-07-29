@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	chunkers "github.com/PlakarKorp/go-cdc-chunkers"
 	_ "github.com/PlakarKorp/go-cdc-chunkers/chunkers/fastcdc"
@@ -141,6 +142,34 @@ func TestRawLogWritesRejectUnrepresentableOffsets(t *testing.T) {
 	s.vlogs[99] = vlog
 	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{VlogId: 99}); err == nil {
 		t.Fatal("zero-length vlog write returned a wrapped offset")
+	}
+}
+
+func TestListDirSerializesWithNamespaceMutation(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+	if _, err := s.Mkdir(ctx, &pb.MkdirRequest{Path: "/listed"}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.namespaceMu.Lock()
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := s.ListDir(ctx, &pb.ListDirRequest{})
+		done <- err
+	}()
+	<-started
+	select {
+	case err := <-done:
+		s.namespaceMu.Unlock()
+		t.Fatalf("ListDir crossed an in-progress namespace mutation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	s.namespaceMu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

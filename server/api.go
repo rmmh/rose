@@ -811,6 +811,8 @@ func (s *Server) setHandleMtime(ctx context.Context, handle int64, mtime int64, 
 }
 
 func (s *Server) ListDir(ctx context.Context, req *pb.ListDirRequest) (*pb.ListDirResponse, error) {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
 	entries, err := s.db.ListDir(ctx, req.GetPath())
 	if err != nil {
 		return nil, err
