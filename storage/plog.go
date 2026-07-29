@@ -391,7 +391,14 @@ func (p *Plog) TruncateTo(logical int64) error {
 		return fmt.Errorf("truncate plog %d: %w", p.id, err)
 	}
 	p.logicalLength = logical
-	return p.rebuildOpenBlock()
+	if err := p.rebuildOpenBlock(); err != nil {
+		return err
+	}
+	// The authenticated trailer described the pre-reconciliation geometry and
+	// was removed by the truncate. The rebuilt hashes came from disk bytes, so
+	// startup must validate them against cataloged chunks before trusting them.
+	p.loadedFromTrailer = false
+	return nil
 }
 
 // recoverFromTrailer reconstructs the open block's geometry and sealed-sector

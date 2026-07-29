@@ -347,6 +347,41 @@ func TestPlogCatalogFailureCannotBlessLostTrailerBytes(t *testing.T) {
 	}
 }
 
+func TestPlogReconciledTrailerRequiresFreshCatalogProof(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plog")
+	p, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{0x3c}, 4*SectorSize+100)
+	if _, err := p.Write(0, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	corruptByte(t, path, CalcPhysical(200))
+
+	reopened, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	// Model recovery trimming a physically durable but metadata-uncommitted tail.
+	if err := reopened.TruncateTo(3 * SectorSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.RecoverHashes(context.Background(), noRecoveredChunks{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.Read(0, SectorSize); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("read after trailer-backed reconciliation = %v, want ErrBitrot", err)
+	}
+}
+
 func TestPlogRaggedEdgeVerifiableAcrossRestart(t *testing.T) {
 	for _, tc := range []struct {
 		name string
