@@ -632,6 +632,30 @@ func TestNodeFailurePreservesConcurrentSuccessfulWrite(t *testing.T) {
 	}
 }
 
+func TestNodeReturnUsesAllReturnedDisksForMirrorAgreement(t *testing.T) {
+	s := newNodeServer(t, map[uint32]uint32{1: 10, 2: 10})
+	ctx := context.Background()
+	vlogID := provision(t, s, "DUPLICATE", 1, 0)
+	payload := bytes.Repeat([]byte{0x76}, 2*storage.SectorSize)
+	writeVlog(t, s, vlogID, payload)
+
+	if err := s.SetNodeState(ctx, 10, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodeState(ctx, 10, meta.NodeWorking); err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: vlogID, Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload) {
+		t.Fatal("multi-disk node return changed committed mirror bytes")
+	}
+}
+
 type readFaultClient struct {
 	data    []byte
 	slow    bool

@@ -267,7 +267,18 @@ func (s *Server) reopenPlogsLocked(
 			affected[vlogID] = true
 		}
 	}
+	// Stage every handle from the returning fault domain together. Agreement for
+	// a mirrored vlog may require two disks on this same node; checking one
+	// candidate at a time would see its returned sibling as offline and reject a
+	// perfectly intact two-copy quorum. vlogMu keeps these staged handles hidden
+	// from client RPCs until the liveness transition finishes below.
+	for id, p := range reopened {
+		s.plogs[id] = p
+	}
 	if err := s.catchUpReturnedDuplicatesLocked(ctx, reopened); err != nil {
+		for id := range reopened {
+			delete(s.plogs, id)
+		}
 		discardReopened()
 		return err
 	}
