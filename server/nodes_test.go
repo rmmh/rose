@@ -385,6 +385,71 @@ func TestReadVlogDoesNotWaitForSlowDuplicate(t *testing.T) {
 	}
 }
 
+type writeFaultClient struct {
+	slow bool
+}
+
+func (c *writeFaultClient) Write(context.Context, int64, []byte) (int64, error) {
+	return 0, fmt.Errorf("positioned writes expected")
+}
+
+func (c *writeFaultClient) Read(context.Context, int64, int) ([]byte, error) {
+	return nil, fmt.Errorf("unused")
+}
+
+func (c *writeFaultClient) EnsureAppend(ctx context.Context, _ int64, _ []byte) error {
+	if c.slow {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (c *writeFaultClient) Commit(ctx context.Context, _ int64) error {
+	if c.slow {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func TestWriteVlogDoesNotWaitForSlowCopyAfterQuorum(t *testing.T) {
+	clients := []storage.PlogClient{
+		&writeFaultClient{},
+		&writeFaultClient{},
+		&writeFaultClient{slow: true},
+	}
+	vlog, err := storage.NewVlog(100, "DUPLICATE", 1, 0, clients, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vlog.SetWriteQuorum(2); err != nil {
+		t.Fatal(err)
+	}
+	s := newControlPlaneServer(t, 1)
+	s.vlogs = map[uint32]*storage.Vlog{100: vlog}
+
+	writeCtx, cancelWrite := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelWrite()
+	if _, err := s.WriteVlog(writeCtx, &pb.WriteVlogRequest{
+		VlogId: 100, TxnId: 1, Buffer: []byte("quorum"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCtx.Err(); err != nil {
+		t.Fatalf("write waited for slow copy after reaching quorum: %v", err)
+	}
+
+	commitCtx, cancelCommit := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelCommit()
+	if _, err := s.CommitVlog(commitCtx, &pb.CommitVlogRequest{TxnId: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitCtx.Err(); err != nil {
+		t.Fatalf("commit waited for slow copy after reaching quorum: %v", err)
+	}
+}
+
 // TestNodeStatePersistsAcrossRecover checks node liveness survives a restart, so
 // a node failed before a crash keeps its disks out of the live set afterward.
 func TestNodeStatePersistsAcrossRecover(t *testing.T) {

@@ -154,11 +154,11 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
 		offset := atomic.LoadInt64(&v.length)
-		if err := v.fanoutQuorum(v.writeQuorum, func(_ int, client PlogClient) error {
+		if err := v.fanoutQuorum(ctx, v.writeQuorum, func(opCtx context.Context, _ int, client PlogClient) error {
 			if positioned, ok := client.(positionedPlogClient); ok {
-				return positioned.EnsureAppend(ctx, offset, data)
+				return positioned.EnsureAppend(opCtx, offset, data)
 			}
-			got, err := client.Write(ctx, txnID, data)
+			got, err := client.Write(opCtx, txnID, data)
 			if err == nil && got != offset {
 				return fmt.Errorf("vlog %d plog append offset %d, want %d", v.id, got, offset)
 			}
@@ -188,11 +188,11 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 				return 0, err
 			}
 			plogOffset := (offset + rowOff) / sw * ecColumnBytes
-			if err := v.fanout(func(idx int, client PlogClient) error {
+			if err := v.fanout(ctx, func(opCtx context.Context, idx int, client PlogClient) error {
 				if positioned, ok := client.(positionedPlogClient); ok {
-					return positioned.EnsureAppend(ctx, plogOffset, shards[idx])
+					return positioned.EnsureAppend(opCtx, plogOffset, shards[idx])
 				}
-				got, err := client.Write(ctx, txnID, shards[idx])
+				got, err := client.Write(opCtx, txnID, shards[idx])
 				if err == nil && got != plogOffset {
 					return fmt.Errorf("EC vlog %d shard %d append offset %d, want %d", v.id, idx, got, plogOffset)
 				}
@@ -228,32 +228,41 @@ func (v *Vlog) encodeRow(rowData []byte) ([][]byte, error) {
 
 // fanout runs op against every backing plog client concurrently and returns the
 // first error. Each EC stripe row appends its data and parity columns this way.
-func (v *Vlog) fanout(op func(idx int, client PlogClient) error) error {
-	return v.fanoutQuorum(len(v.clients), op)
+func (v *Vlog) fanout(ctx context.Context, op func(context.Context, int, PlogClient) error) error {
+	return v.fanoutQuorum(ctx, len(v.clients), op)
 }
 
-func (v *Vlog) fanoutQuorum(quorum int, op func(idx int, client PlogClient) error) error {
-	var wg sync.WaitGroup
+func (v *Vlog) fanoutQuorum(ctx context.Context, quorum int, op func(context.Context, int, PlogClient) error) error {
+	opCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	errs := make(chan error, len(v.clients))
-	var succeeded atomic.Int64
 	for i, c := range v.clients {
-		wg.Add(1)
 		go func(idx int, client PlogClient) {
-			defer wg.Done()
-			if err := op(idx, client); err != nil {
+			if err := op(opCtx, idx, client); err != nil {
 				errs <- err
 				return
 			}
-			succeeded.Add(1)
+			errs <- nil
 		}(i, c)
 	}
-	wg.Wait()
-	close(errs)
-	if int(succeeded.Load()) >= quorum {
-		return nil
-	}
-	if err := <-errs; err != nil {
-		return err
+	succeeded := 0
+	failed := 0
+	var firstErr error
+	for range v.clients {
+		if err := <-errs; err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+			if failed > len(v.clients)-quorum {
+				return firstErr
+			}
+			continue
+		}
+		succeeded++
+		if succeeded >= quorum {
+			return nil
+		}
 	}
 	return fmt.Errorf("vlog %d write quorum %d not met", v.id, quorum)
 }
@@ -301,12 +310,12 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) er
 					return err
 				}
 				plogOffset := (offset + rowOff) / sw * ecColumnBytes
-				if err := v.fanout(func(idx int, client PlogClient) error {
+				if err := v.fanout(ctx, func(opCtx context.Context, idx int, client PlogClient) error {
 					positioned, ok := client.(positionedPlogClient)
 					if !ok {
 						return fmt.Errorf("vlog %d plog client does not support positioned writes", v.id)
 					}
-					return positioned.EnsureAppend(ctx, plogOffset, shards[idx])
+					return positioned.EnsureAppend(opCtx, plogOffset, shards[idx])
 				}); err != nil {
 					return err
 				}
@@ -325,7 +334,7 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) er
 		return fmt.Errorf("unknown protection scheme: %s", v.scheme)
 	}
 	// Mirror schemes write the same bytes at the same logical offset to every copy.
-	if err := v.fanoutQuorum(v.writeQuorum, func(_ int, client PlogClient) error {
+	if err := v.fanoutQuorum(ctx, v.writeQuorum, func(opCtx context.Context, _ int, client PlogClient) error {
 		positioned, ok := client.(positionedPlogClient)
 		if !ok {
 			return fmt.Errorf("vlog %d plog client does not support positioned writes", v.id)
@@ -335,7 +344,7 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) er
 			if len(part) == 0 {
 				continue
 			}
-			if err := positioned.EnsureAppend(ctx, partOffset, part); err != nil {
+			if err := positioned.EnsureAppend(opCtx, partOffset, part); err != nil {
 				return err
 			}
 			partOffset += int64(len(part))
@@ -451,8 +460,8 @@ func (v *Vlog) reconstructRow(ctx context.Context, row int64) ([][]byte, error) 
 	shards := make([][]byte, len(v.clients))
 	var mu sync.Mutex
 	missing := 0
-	_ = v.fanout(func(idx int, client PlogClient) error {
-		data, err := client.Read(ctx, row*ecColumnBytes, int(ecColumnBytes))
+	_ = v.fanout(ctx, func(opCtx context.Context, idx int, client PlogClient) error {
+		data, err := client.Read(opCtx, row*ecColumnBytes, int(ecColumnBytes))
 		mu.Lock()
 		defer mu.Unlock()
 		if err == nil && int64(len(data)) == ecColumnBytes {
@@ -485,12 +494,12 @@ func ReconstructECShard(dataShards, parityShards int, shards [][]byte) error {
 
 // Commit makes all physical writes issued through this virtual log durable.
 func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
-	return v.fanoutQuorum(v.writeQuorum, func(_ int, client PlogClient) error {
+	return v.fanoutQuorum(ctx, v.writeQuorum, func(opCtx context.Context, _ int, client PlogClient) error {
 		committer, ok := client.(committingPlogClient)
 		if !ok {
 			return fmt.Errorf("plog client does not support commit")
 		}
-		return committer.Commit(ctx, txnID)
+		return committer.Commit(opCtx, txnID)
 	})
 }
 
