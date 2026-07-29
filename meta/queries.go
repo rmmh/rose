@@ -884,6 +884,10 @@ func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 		WriteOpCancelled, newPath, WriteOpPrepared); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, "UPDATE write_op SET path = ? WHERE path = ? AND state = ?",
+		newPath, oldPath, WriteOpPrepared); err != nil {
+		return err
+	}
 
 	var oldID int64
 	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", oldPath).Scan(&oldID)

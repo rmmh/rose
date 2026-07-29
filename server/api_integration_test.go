@@ -328,6 +328,54 @@ func TestRenameCancelsPreparedDestinationWriteAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestRenameRetargetsPreparedSourceWriteAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta.db")
+	dataDir := filepath.Join(dir, "plogs")
+	db, err := meta.Open(metaPath)
+	require.NoError(t, err)
+	ctx := context.Background()
+	before := server.NewServerWithDataDir(db, dataDir)
+	before.SetMaintenanceInterval(0)
+	require.NoError(t, before.Recover(ctx))
+
+	open, err := before.Open(ctx, &pb.OpenRequest{Path: "/prepared-source"})
+	require.NoError(t, err)
+	_, err = before.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte("source")})
+	require.NoError(t, err)
+	_, err = before.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()})
+	require.NoError(t, err)
+	_, err = before.Open(ctx, &pb.OpenRequest{
+		Path: "/prepared-source", OperationKey: "prepared-source-op",
+	})
+	require.NoError(t, err)
+	before.CloseStorage()
+	require.NoError(t, db.Close())
+
+	reopened, err := meta.Open(metaPath)
+	require.NoError(t, err)
+	defer reopened.Close()
+	after := server.NewServerWithDataDir(reopened, dataDir)
+	after.SetMaintenanceInterval(0)
+	require.NoError(t, after.Recover(ctx))
+	defer after.StopMaintenanceDriver()
+	_, err = after.Rename(ctx, &pb.RenameRequest{
+		OldPath: "/prepared-source", NewPath: "/prepared-dest",
+	})
+	require.NoError(t, err)
+
+	retry, err := after.Open(ctx, &pb.OpenRequest{
+		Path: "/prepared-dest", OperationKey: "prepared-source-op",
+	})
+	if err != nil {
+		t.Fatalf("prepared source write did not follow file rename across restart: %v", err)
+	}
+	_, err = after.Close(ctx, &pb.CloseRequest{
+		Handle: retry.GetHandle(), IdempotencyKey: "prepared-source-op",
+	})
+	require.NoError(t, err)
+}
+
 func TestMkdirCannotOverlapPendingFile(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()
