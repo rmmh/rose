@@ -149,42 +149,71 @@ func (i *chaosInjector) drainAndReplace(ctx context.Context) error {
 }
 
 func (i *chaosInjector) bitrotAndRepair(ctx context.Context) error {
-	disk, plog, err := i.anyPlog(ctx)
-	if err != nil {
-		return err
+	for attempt := 0; attempt < 5; attempt++ {
+		disk, plog, err := i.anyPlog(ctx)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(i.cluster.rootFor(disk), fmt.Sprintf("plog-%05d", plog))
+		f, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			continue // concurrent relocation won after selection
+		}
+		// Logical offset 100 is inside the first hash-protected data sector.
+		// Convert it to a physical offset so the leading superblock is untouched.
+		b := []byte{0}
+		offset := storage.CalcPhysical(100)
+		if _, err = f.ReadAt(b, offset); err == nil {
+			b[0] ^= 0xff
+			_, err = f.WriteAt(b, offset)
+		}
+		if err == nil {
+			err = f.Sync()
+		}
+		closeErr := f.Close()
+		if err != nil {
+			continue
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		res, err := i.cluster.server().ScrubAndRepair(ctx)
+		if err != nil {
+			return err
+		}
+		if len(res.Unrepairable) != 0 {
+			return fmt.Errorf("bitrot left %d unrepaired shards: %v", len(res.Unrepairable), res.Unrepairable)
+		}
+		if res.ShardsRepaired != 0 {
+			return nil
+		}
+
+		// Explicit maintenance can move the chosen plog between selection and
+		// scrub. If it no longer maps to this disk (or the byte was overwritten),
+		// the injected fault hit a stale file; retry instead of reporting a false
+		// scrub miss.
+		mapped := false
+		plogs, err := i.cluster.server().GetDB().PlogsOnDisk(ctx, disk)
+		if err != nil {
+			return err
+		}
+		for _, p := range plogs {
+			if p.PlogID == plog {
+				mapped = true
+				break
+			}
+		}
+		current := []byte{0}
+		check, openErr := os.Open(path)
+		if openErr == nil {
+			_, openErr = check.ReadAt(current, offset)
+			_ = check.Close()
+		}
+		if mapped && openErr == nil && current[0] == b[0] {
+			return fmt.Errorf("bitrot scrub repaired no shards")
+		}
 	}
-	path := filepath.Join(i.cluster.rootFor(disk), fmt.Sprintf("plog-%05d", plog))
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	// Logical offset 100 is inside the first hash-protected data sector for every
-	// plog created by this workload (writes are at least 1 KiB). Convert it to a
-	// physical offset so the leading superblock is not corrupted instead.
-	b := []byte{0}
-	offset := storage.CalcPhysical(100)
-	if _, err = f.ReadAt(b, offset); err != nil {
-		return err
-	}
-	b[0] ^= 0xff
-	if _, err = f.WriteAt(b, offset); err != nil {
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		return err
-	}
-	res, err := i.cluster.server().ScrubAndRepair(ctx)
-	if err != nil {
-		return err
-	}
-	if len(res.Unrepairable) != 0 {
-		return fmt.Errorf("bitrot left %d unrepaired shards: %v", len(res.Unrepairable), res.Unrepairable)
-	}
-	if res.ShardsRepaired == 0 {
-		return fmt.Errorf("bitrot scrub repaired no shards")
-	}
-	return nil
+	return fmt.Errorf("bitrot injection repeatedly raced plog relocation")
 }
 
 func (i *chaosInjector) diskWithPlogs(ctx context.Context) (uint32, error) {
