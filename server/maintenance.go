@@ -1081,6 +1081,9 @@ func removePlog(plogs []meta.PlogOnDisk, plogID uint32) []meta.PlogOnDisk {
 // leave the mounted cursor ahead of the catalog until CommitVlog. Moving either
 // vlog would remount it against an incomplete catalog length.
 func (s *Server) vlogRelocationDeferredLocked(ctx context.Context, vlogID uint32) (bool, error) {
+	if s.rawVlogWrites[vlogID] != 0 {
+		return true, nil
+	}
 	leased, err := s.db.VlogLeased(ctx, vlogID)
 	if err != nil || leased {
 		return leased, err

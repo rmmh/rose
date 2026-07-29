@@ -300,6 +300,81 @@ func TestReplaceDiskPreservesRawVlogTailBeforeCommit(t *testing.T) {
 	}
 }
 
+func TestReplaceDiskDefersInFlightRawVlogWrite(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+	made, err := s.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "NONE", DataShards: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mappings, err := s.db.ListVlogPlogs(ctx, made.GetVlogId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	s.vlogMu.Lock()
+	vlog, err := storage.NewVlog(made.GetVlogId(), "NONE", 1, 0, []storage.PlogClient{
+		&writeFaultClient{
+			block: block, started: started,
+			local: &localPlogClient{plog: s.plogs[mappings[0].PlogID]},
+		},
+	}, 0)
+	if err == nil {
+		s.vlogs[made.GetVlogId()] = vlog
+	}
+	s.vlogMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte("raw write blocked on a slow node")
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+			VlogId: made.GetVlogId(), TxnId: 42, Buffer: payload,
+		})
+		writeDone <- err
+	}()
+	<-started
+
+	newRoot := filepath.Join(t.TempDir(), "replacement")
+	if err := os.MkdirAll(newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AttachDiskOnNode(ctx, 2, 1, newRoot, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceDiskWith(ctx, 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DiskStates()[1]; got != meta.DiskDraining {
+		t.Fatalf("source disk state during raw write = %q, want draining", got)
+	}
+
+	close(block)
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 42}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceDiskWith(ctx, 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: made.GetVlogId(), Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.GetBuffer(), payload) {
+		t.Fatalf("raw vlog after slow write and replace = %q, want %q", got.GetBuffer(), payload)
+	}
+}
+
 func TestCancelledPlacementFlipKeepsDrainSourceReadable(t *testing.T) {
 	s := newControlPlaneServer(t, 2)
 	vlogID := provision(t, s, "NONE", 1, 0)

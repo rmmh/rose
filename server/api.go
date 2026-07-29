@@ -1790,10 +1790,24 @@ func (s *Server) ReadVlog(ctx context.Context, req *pb.ReadVlogRequest) (*pb.Rea
 func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.WriteVlogResponse, error) {
 	s.vlogMu.Lock()
 	v, ok := s.vlogs[req.GetVlogId()]
+	if ok {
+		if s.rawVlogWrites == nil {
+			s.rawVlogWrites = make(map[uint32]int)
+		}
+		s.rawVlogWrites[req.GetVlogId()]++
+	}
 	s.vlogMu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("vlog not found")
 	}
+	defer func() {
+		s.vlogMu.Lock()
+		s.rawVlogWrites[req.GetVlogId()]--
+		if s.rawVlogWrites[req.GetVlogId()] == 0 {
+			delete(s.rawVlogWrites, req.GetVlogId())
+		}
+		s.vlogMu.Unlock()
+	}()
 	if v.Length() > math.MaxUint32 {
 		return nil, fmt.Errorf("vlog %d has no representable write offset", req.GetVlogId())
 	}

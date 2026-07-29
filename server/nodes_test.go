@@ -544,17 +544,21 @@ type writeFaultClient struct {
 	slow    bool
 	block   <-chan struct{}
 	started chan<- struct{}
+	local   *localPlogClient
 }
 
 func (c *writeFaultClient) Write(context.Context, int64, []byte) (int64, error) {
 	return 0, fmt.Errorf("positioned writes expected")
 }
 
-func (c *writeFaultClient) Read(context.Context, int64, int) ([]byte, error) {
+func (c *writeFaultClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
+	if c.local != nil {
+		return c.local.Read(ctx, offset, length)
+	}
 	return nil, fmt.Errorf("unused")
 }
 
-func (c *writeFaultClient) EnsureAppend(ctx context.Context, _ int64, _ []byte) error {
+func (c *writeFaultClient) EnsureAppend(ctx context.Context, offset int64, data []byte) error {
 	if c.block != nil {
 		if c.started != nil {
 			c.started <- struct{}{}
@@ -565,6 +569,9 @@ func (c *writeFaultClient) EnsureAppend(ctx context.Context, _ int64, _ []byte) 
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	if c.local != nil {
+		return c.local.EnsureAppend(ctx, offset, data)
+	}
 	return ctx.Err()
 }
 
@@ -572,6 +579,9 @@ func (c *writeFaultClient) Commit(ctx context.Context, _ int64) error {
 	if c.slow {
 		<-ctx.Done()
 		return ctx.Err()
+	}
+	if c.local != nil {
+		return c.local.Commit(ctx, 0)
 	}
 	return nil
 }
