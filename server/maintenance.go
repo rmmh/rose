@@ -1156,27 +1156,50 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 		_ = os.Remove(newPath)
 		return fmt.Errorf("drain: copy plog %d to disk %d: %w", plogID, toDisk, err)
 	}
-	// Until this commits, the source copy remains authoritative.
-	if err := s.db.MovePlogToDisk(ctx, plogID, toDisk); err != nil {
+	// Validate and open the durable destination before making it authoritative.
+	// A dead destination must leave the catalog and mounted vlog on the source.
+	reopened, err := storage.OpenExistingPlog(newPath, plogID)
+	if err != nil {
+		_ = os.Remove(newPath)
+		return fmt.Errorf("drain: open copied plog %d on disk %d: %w", plogID, toDisk, err)
+	}
+	if err := ctx.Err(); err != nil {
+		_ = reopened.Close()
+		_ = os.Remove(newPath)
+		return err
+	}
+
+	// Once admitted, finish the catalog flip and in-memory remount even if the
+	// initiating RPC is canceled. Returning between those steps would strand the
+	// mounted vlog on a source the catalog no longer knows it must retain.
+	durableCtx := context.WithoutCancel(ctx)
+	if err := s.db.MovePlogToDisk(durableCtx, plogID, toDisk); err != nil {
+		_ = reopened.Close()
 		_ = os.Remove(newPath)
 		return fmt.Errorf("drain: move plog %d to disk %d: %w", plogID, toDisk, err)
 	}
-	if p, ok := s.plogs[plogID]; ok {
-		_ = p.Close()
-		delete(s.plogs, plogID)
-	}
-	_ = os.Remove(oldPath)
-
-	reopened, err := storage.OpenPlog(newPath, plogID)
-	if err != nil {
-		return fmt.Errorf("drain: reopen plog %d on disk %d: %w", plogID, toDisk, err)
-	}
+	old := s.plogs[plogID]
 	s.plogs[plogID] = reopened
 
 	// The active vlog must not stay pinned to a relocated shard mid-write; force
 	// a fresh active vlog for subsequent writes, as compaction does.
 	s.clearActiveVlogLocked(vlogID)
-	return s.remountVlogLocked(ctx, vlogID)
+	if err := s.remountVlogLocked(durableCtx, vlogID); err != nil {
+		// The source is still intact, so put the catalog and mounted plog back on
+		// it rather than returning with a half-published relocation.
+		if rollbackErr := s.db.MovePlogToDisk(durableCtx, plogID, fromDisk); rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("drain: roll back plog %d placement: %w", plogID, rollbackErr))
+		}
+		s.plogs[plogID] = old
+		_ = reopened.Close()
+		_ = os.Remove(newPath)
+		return err
+	}
+	if old != nil {
+		_ = old.Close()
+	}
+	_ = os.Remove(oldPath)
+	return nil
 }
 
 // remountVlogLocked rebuilds a vlog's in-memory client set from current
