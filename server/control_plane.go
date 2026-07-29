@@ -360,7 +360,7 @@ func (s *Server) liveShardCountLocked(ctx context.Context, vlogID uint32) (live,
 		return 0, 0, err
 	}
 	for _, sh := range shards {
-		if s.diskLiveLocked(sh.DiskID) {
+		if !s.offlinePlogs[sh.PlogID] && s.diskLiveLocked(sh.DiskID) {
 			live++
 		}
 	}

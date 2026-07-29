@@ -113,6 +113,7 @@ func (d *DB) DiskCapacity(ctx context.Context, diskID uint32) (uint64, error) {
 // VlogShardDisk maps one shard of a vlog to the disk currently backing it.
 type VlogShardDisk struct {
 	ShardIndex int
+	PlogID     uint32
 	DiskID     uint32
 }
 
@@ -159,7 +160,7 @@ func (d *DB) MovePlogToDisk(ctx context.Context, plogID, newDiskID uint32) error
 // disk IDs against the disk catalog's lifecycle states.
 func (d *DB) VlogShardDisks(ctx context.Context, vlogID uint32) ([]VlogShardDisk, error) {
 	rows, err := d.db.QueryContext(ctx, `
-		SELECT vp.shard_idx, p.disk_id
+		SELECT vp.shard_idx, vp.plog_id, p.disk_id
 		FROM vlog_plog vp JOIN plog p ON p.id = vp.plog_id
 		WHERE vp.vlog_id = ? ORDER BY vp.shard_idx`, vlogID)
 	if err != nil {
@@ -169,7 +170,7 @@ func (d *DB) VlogShardDisks(ctx context.Context, vlogID uint32) ([]VlogShardDisk
 	var out []VlogShardDisk
 	for rows.Next() {
 		var s VlogShardDisk
-		if err := rows.Scan(&s.ShardIndex, &s.DiskID); err != nil {
+		if err := rows.Scan(&s.ShardIndex, &s.PlogID, &s.DiskID); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

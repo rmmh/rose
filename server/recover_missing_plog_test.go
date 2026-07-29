@@ -48,7 +48,7 @@ func TestRecoverStubsSingleMissingPlogFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var lostPlogID, lostDiskID uint32
+	var lostVlogID, lostPlogID, lostDiskID uint32
 	for _, v := range vlogs {
 		if v.ProtectionScheme != "DUPLICATE" || v.IsStaging() {
 			continue
@@ -64,6 +64,7 @@ func TestRecoverStubsSingleMissingPlogFile(t *testing.T) {
 		if len(mappings) < 2 {
 			continue
 		}
+		lostVlogID = v.ID
 		lostPlogID = mappings[0].PlogID
 		lostDiskID = shardDisks[0].DiskID
 		break
@@ -100,6 +101,11 @@ func TestRecoverStubsSingleMissingPlogFile(t *testing.T) {
 	}
 	if _, ok := s2.plogs[lostPlogID]; ok {
 		t.Fatalf("plog %d should not have an open handle after its file went missing", lostPlogID)
+	}
+	if ready, err := s2.CommitReady(ctx, lostVlogID); err != nil {
+		t.Fatal(err)
+	} else if ready {
+		t.Fatal("CommitReady counted an offline shard on an otherwise-active disk")
 	}
 	// ...and it was not resurrected as an empty file by an O_CREATE open.
 	if _, err := os.Stat(lostPath); !errors.Is(err, fs.ErrNotExist) {
