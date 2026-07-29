@@ -25,6 +25,12 @@ func (s *Server) SetDiskState(ctx context.Context, diskID uint32, state string) 
 		return fmt.Errorf("disk %d is not configured", diskID)
 	}
 	previous := s.diskState[diskID]
+	if state == meta.DiskActive && previous == meta.DiskFailed &&
+		s.nodeState[s.nodeOf(diskID)] != meta.NodeFailed {
+		if err := s.validateDiskRootIdentity(ctx, diskID); err != nil {
+			return err
+		}
+	}
 	if err := s.setDiskStateLocked(ctx, diskID, state); err != nil {
 		return err
 	}
@@ -70,6 +76,17 @@ func (s *Server) SetNodeState(ctx context.Context, nodeID uint32, state string) 
 	defer s.vlogMu.Unlock()
 	if !s.nodeConfiguredLocked(nodeID) {
 		return fmt.Errorf("node %d is not configured", nodeID)
+	}
+	if state == meta.NodeWorking {
+		for diskID, diskState := range s.diskState {
+			if s.nodeOf(diskID) != nodeID ||
+				(diskState != meta.DiskActive && diskState != meta.DiskDraining) {
+				continue
+			}
+			if err := s.validateDiskRootIdentity(ctx, diskID); err != nil {
+				return err
+			}
+		}
 	}
 	if err := s.db.SetNodeState(ctx, nodeID, state); err != nil {
 		return err

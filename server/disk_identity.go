@@ -73,6 +73,30 @@ func diskUIDForRoot(root string) (uid.UID, error) {
 	return u, nil
 }
 
+// validateDiskRootIdentity checks that currently mounted media is the catalog
+// disk expected in this configured slot. Unlike diskUIDForRoot it never creates
+// a marker: hot-returning known media without its identity marker is a failed
+// return, not a fresh disk to provision under the old id.
+func (s *Server) validateDiskRootIdentity(ctx context.Context, diskID uint32) error {
+	root := s.diskRoot(diskID)
+	raw, err := os.ReadFile(filepath.Join(root, diskUIDMarker))
+	if err != nil {
+		return fmt.Errorf("read returned disk %d identity at %q: %w", diskID, root, err)
+	}
+	got, err := uid.Parse(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return fmt.Errorf("parse returned disk %d identity at %q: %w", diskID, root, err)
+	}
+	want, err := s.db.DiskUID(ctx, diskID)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("returned disk %d uid %s does not match catalog uid %s", diskID, got, want)
+	}
+	return nil
+}
+
 // reconcileDiskRoots rebinds the configured disk roots to catalog disk ids by the
 // rose_disk_uid marker each directory carries, making the disk's UID -- not the
 // numeric id its mount point is configured as -- the authoritative identity. The

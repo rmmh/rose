@@ -213,3 +213,49 @@ func TestCorruptDiskUIDMarkerDoesNotBlockHealthyMirrors(t *testing.T) {
 		t.Fatal("surviving mirror changed after disk marker corruption")
 	}
 }
+
+func TestHotReturnRejectsUnknownEmptyMedia(t *testing.T) {
+	for _, viaNode := range []bool{false, true} {
+		name := "disk"
+		if viaNode {
+			name = "node"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := newControlPlaneServer(t, 1)
+			s.SetMaintenanceInterval(0)
+			root := s.diskRoot(1)
+			if viaNode {
+				if err := s.SetNodeState(ctx, 1, meta.NodeFailed); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := s.SetDiskState(ctx, 1, meta.DiskFailed); err != nil {
+				t.Fatal(err)
+			}
+
+			removed := root + ".removed"
+			if err := os.Rename(root, removed); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := diskUIDForRoot(root); err != nil {
+				t.Fatal(err)
+			}
+
+			var err error
+			if viaNode {
+				err = s.SetNodeState(ctx, 1, meta.NodeWorking)
+				if got := s.NodeStates()[1]; got != meta.NodeFailed {
+					t.Fatalf("node state after foreign-media return = %q, want failed", got)
+				}
+			} else {
+				err = s.SetDiskState(ctx, 1, meta.DiskActive)
+				if got := s.DiskStates()[1]; got != meta.DiskFailed {
+					t.Fatalf("disk state after foreign-media return = %q, want failed", got)
+				}
+			}
+			if err == nil {
+				t.Fatal("foreign empty media was accepted under a known disk identity")
+			}
+		})
+	}
+}
