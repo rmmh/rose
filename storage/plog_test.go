@@ -259,6 +259,49 @@ func TestPlogTrailingBlockVerifiableAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestPlogRaggedEdgeVerifiableAcrossRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
+		{name: "no sealed sectors", size: 200},
+		{name: "full trailer", size: 254*SectorSize + 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "plog")
+			p, err := OpenPlog(path, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := make([]byte, tc.size)
+			rand.New(rand.NewSource(8)).Read(payload)
+			if _, err := p.Write(0, payload); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			raggedOffset := int64(len(payload) - 100)
+			corruptByte(t, path, CalcPhysical(raggedOffset))
+			reopened, err := OpenPlog(path, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			if _, err := reopened.Read(raggedOffset, 100); !errors.Is(err, ErrBitrot) {
+				t.Fatalf("read of rotted ragged edge after restart = %v, want ErrBitrot", err)
+			}
+			if _, err := reopened.Write(0, []byte("append")); !errors.Is(err, ErrBitrot) {
+				t.Fatalf("append after rotted ragged edge = %v, want ErrBitrot", err)
+			}
+		})
+	}
+}
+
 // TestPlogOpenTrailerConsumedWhenBlockCompletes checks that continued writes
 // overwrite the trailer as the block fills, so once the block completes and
 // flushes its real hash sector the file is a dense full block with no leftover

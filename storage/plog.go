@@ -41,8 +41,8 @@ var ErrPlogHeaderCorrupt = errors.New("plog superblock corrupt")
 //
 // The trailing partial sector is held in memory and persisted on Commit as a
 // "ragged edge": subsequent writes overwrite it in place so sectors stay 4KB
-// aligned and immutable once sealed. Its hash is only recorded once it fills,
-// so within-session reads of it are trusted from the buffer.
+// aligned and immutable once sealed. The open trailer authenticates its bytes
+// across restarts; within-session reads use the trusted in-memory buffer.
 //
 // The sealed sectors of the still-open block (those before a block completes and
 // emits its hash sector) have their hashes written inline on Commit, in an
@@ -60,9 +60,10 @@ type Plog struct {
 	id                uint32
 	file              *os.File
 	logicalLength     int64 // total logical bytes, including the open buffered sector
-	loadedFromTrailer bool  // set to true if loaded from a valid open-block trailer
+	loadedFromTrailer bool  // set when geometry came from an open-block trailer
 
 	buf        []byte // open trailing sector, 0..4096 bytes (sealed once full)
+	bufCorrupt bool   // committed trailer or ragged bytes failed authentication
 	hashes     []byte // hashes of sealed sectors in the current open block
 	writeBuf   []byte // reusable batched-write scratch, grown under p.mu
 	hashSector [SectorSize]byte
@@ -321,6 +322,7 @@ func (p *Plog) reload() error {
 // logicalLength first.
 func (p *Plog) rebuildOpenBlock() error {
 	p.buf = p.buf[:0]
+	p.bufCorrupt = false
 	p.hashes = p.hashes[:0]
 	partial := p.logicalLength % SectorSize
 	sealed := p.logicalLength - partial
@@ -374,7 +376,7 @@ func (p *Plog) TruncateTo(logical int64) error {
 // recoverFromTrailer reconstructs the open block's geometry and sealed-sector
 // hashes from the inline trailer Commit writes as the last sector of a cleanly
 // committed open block. It returns true and sets logicalLength, buf, and hashes
-// when a valid trailer is found; false leaves the Plog for reload's
+// when a recognized trailer is found; false leaves the Plog for reload's
 // trust-the-bytes fallback. The HMAC (and the requirement that the implied block
 // start be block-aligned) means a real data sector left in the trailer's place
 // by a torn write is rejected rather than mistaken for one.
@@ -390,18 +392,16 @@ func (p *Plog) recoverFromTrailer(size int64) bool {
 		return false
 	}
 	c := int(binary.LittleEndian.Uint16(trailer[8:10]))
-	raggedLen := int(binary.LittleEndian.Uint16(trailer[10:12]))
+	raggedField := binary.LittleEndian.Uint16(trailer[10:12])
+	authenticatesRagged := raggedField&0x8000 != 0
+	raggedLen := int(raggedField & 0x7fff)
 	// The open block never holds a full block's worth of sealed sectors (the
-	// 255th seal emits the hash sector and clears them), so c is 1..254.
-	if c < 1 || c >= HashesPerBlock || raggedLen >= SectorSize {
+	// 255th seal emits the hash sector and clears them). A trailer with no
+	// sealed sectors is valid only when it authenticates a ragged edge.
+	if c >= HashesPerBlock || raggedLen >= SectorSize || (c == 0 && raggedLen == 0) {
 		return false
 	}
 	hashesEnd := openTrailerHeader + c*HashSize
-	mac := hmac.New(sha256.New, bitrotKey)
-	mac.Write(trailer[:hashesEnd])
-	if !hmac.Equal(mac.Sum(nil)[:HashSize], trailer[hashesEnd:hashesEnd+HashSize]) {
-		return false
-	}
 	// The trailer sits at block-position c+1, so the block begins c+1 sectors
 	// before it; that start must land on a block boundary to be the real thing.
 	// blockStartPhys is a physical file offset (superblock-inclusive), so the
@@ -422,6 +422,20 @@ func (p *Plog) recoverFromTrailer(size int64) bool {
 	}
 	p.logicalLength = sealed + int64(raggedLen)
 	p.hashes = append(p.hashes[:0], trailer[openTrailerHeader:hashesEnd]...)
+	mac := hmac.New(sha256.New, bitrotKey)
+	mac.Write(trailer[:hashesEnd])
+	if authenticatesRagged {
+		mac.Write(p.buf)
+	}
+	if !hmac.Equal(mac.Sum(nil)[:HashSize], trailer[hashesEnd:hashesEnd+HashSize]) {
+		if authenticatesRagged {
+			// Preserve the trailer's bounded geometry so reads report the
+			// corruption instead of trusting and re-hashing the damaged tail.
+			p.bufCorrupt = true
+			return true
+		}
+		return false
+	}
 	return true
 }
 
@@ -469,6 +483,9 @@ func (p *Plog) Write(txnID int64, data []byte) (int64, error) {
 }
 
 func (p *Plog) writeLocked(data []byte) (int64, error) {
+	if p.bufCorrupt {
+		return 0, fmt.Errorf("plog %d open sector: %w", p.id, ErrBitrot)
+	}
 	offset := p.logicalLength
 	pos := 0
 
@@ -655,7 +672,11 @@ func (p *Plog) readLocked(offset int64, length int) ([]byte, error) {
 
 		var sector []byte
 		if sectorStart >= sealed {
-			// The open, not-yet-sealed sector: trusted from the buffer.
+			// Authentication of the open, not-yet-sealed sector happens while
+			// loading its trailer; retain that failure for every later read.
+			if p.bufCorrupt {
+				return nil, fmt.Errorf("plog %d sector %d (logical %d): %w", p.id, sectorIdx, sectorStart, ErrBitrot)
+			}
 			sector = p.buf
 		} else {
 			var err error
@@ -803,10 +824,10 @@ func (p *Plog) Commit() error {
 	// it as the block grows, and the block's real hash sector replaces it on
 	// completion. The trailer only describes sectors already written above, so a
 	// single fsync makes the ragged edge, the trailer, and any sectors sealed this
-	// session durable together -- no second sync. A fresh or just-completed block
-	// holds no sealed sectors, so nothing to protect and no trailer; c only rises
-	// within a block, so no stale trailer can survive for the loader to mistake.
-	if len(p.hashes) > 0 {
+	// session durable together -- no second sync. A just-completed block with no
+	// ragged edge has nothing to protect and needs no trailer; c only rises within
+	// a block, so no stale trailer can survive for the loader to mistake.
+	if len(p.hashes) > 0 || raggedLen > 0 {
 		if _, err := p.file.WriteAt(p.buildOpenTrailer(raggedLen), CalcPhysical(sealed)+SectorSize); err != nil {
 			return fmt.Errorf("commit plog %d open trailer: %w", p.id, err)
 		}
@@ -815,17 +836,26 @@ func (p *Plog) Commit() error {
 }
 
 // buildOpenTrailer assembles the inline open-block trailer sector: the magic, the
-// sealed-sector count and ragged-edge length, the sealed-sector hashes, then an
-// HMAC over all of that, zero-padded to a full sector.
+// sealed-sector count and flagged ragged-edge length, the sealed-sector hashes,
+// then an HMAC over that metadata plus the ragged bytes, zero-padded to a full
+// sector. Including the bytes in the MAC avoids needing another hash slot when
+// the trailer already contains all 254 possible sealed-sector hashes.
 func (p *Plog) buildOpenTrailer(raggedLen int) []byte {
 	trailer := make([]byte, SectorSize)
 	copy(trailer, openTrailerMagic)
 	binary.LittleEndian.PutUint16(trailer[8:10], uint16(len(p.hashes)/HashSize))
-	binary.LittleEndian.PutUint16(trailer[10:12], uint16(raggedLen))
+	raggedField := uint16(raggedLen)
+	if raggedLen > 0 {
+		raggedField |= 0x8000
+	}
+	binary.LittleEndian.PutUint16(trailer[10:12], raggedField)
 	copy(trailer[openTrailerHeader:], p.hashes)
 	hashesEnd := openTrailerHeader + len(p.hashes)
 	mac := hmac.New(sha256.New, bitrotKey)
 	mac.Write(trailer[:hashesEnd])
+	if raggedLen > 0 {
+		mac.Write(p.buf)
+	}
 	copy(trailer[hashesEnd:], mac.Sum(nil)[:HashSize])
 	return trailer
 }
