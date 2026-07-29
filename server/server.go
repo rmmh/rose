@@ -419,38 +419,31 @@ func (s *Server) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, job := range jobs {
+		var resumeErr error
 		switch job.Kind {
 		case meta.JobCompact:
-			if err := s.CompactVlog(ctx, job.TargetVlog); err != nil {
-				return fmt.Errorf("resume compaction of vlog %d: %w", job.TargetVlog, err)
-			}
+			resumeErr = s.CompactVlog(ctx, job.TargetVlog)
 		case meta.JobPromote:
-			if _, err := s.PromoteStagingVlog(ctx, job.TargetVlog); err != nil {
-				return fmt.Errorf("resume promotion of staging vlog %d: %w", job.TargetVlog, err)
-			}
+			_, resumeErr = s.PromoteStagingVlog(ctx, job.TargetVlog)
 		case meta.JobDrain:
-			if err := s.DrainDisk(ctx, job.TargetDisk); err != nil {
-				return fmt.Errorf("resume drain of disk %d: %w", job.TargetDisk, err)
-			}
+			resumeErr = s.DrainDisk(ctx, job.TargetDisk)
 		case meta.JobReprotect:
-			if err := s.ReprotectDisk(ctx, job.TargetDisk); err != nil {
-				return fmt.Errorf("resume reprotect of disk %d: %w", job.TargetDisk, err)
-			}
+			resumeErr = s.ReprotectDisk(ctx, job.TargetDisk)
 		case meta.JobReplace:
-			if err := s.ReplaceDiskWith(ctx, job.TargetDisk, job.DestDisk); err != nil {
-				return fmt.Errorf("resume replace of disk %d: %w", job.TargetDisk, err)
-			}
+			resumeErr = s.ReplaceDiskWith(ctx, job.TargetDisk, job.DestDisk)
 		case meta.JobRebalance:
-			if _, err := s.Rebalance(ctx); err != nil {
-				return fmt.Errorf("resume rebalance: %w", err)
-			}
-			if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
-				return fmt.Errorf("finish resumed rebalance: %w", err)
+			if _, resumeErr = s.Rebalance(ctx); resumeErr == nil {
+				resumeErr = s.db.MarkJobDone(ctx, job.ID)
 			}
 		case meta.JobScrubRepair:
-			if _, err := s.RepairVlog(ctx, job.TargetVlog); err != nil {
-				return fmt.Errorf("resume scrub-repair of vlog %d: %w", job.TargetVlog, err)
-			}
+			_, resumeErr = s.RepairVlog(ctx, job.TargetVlog)
+		}
+		if resumeErr != nil {
+			// Maintenance jobs are durable and retryable. A disk or node that is
+			// still unavailable must not prevent the server from mounting the
+			// surviving replicas and serving degraded reads.
+			slog.Warn("maintenance job remains pending after recovery",
+				"job", job.ID, "kind", job.Kind, "error", resumeErr)
 		}
 	}
 	for id, plog := range s.plogs {

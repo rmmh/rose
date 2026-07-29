@@ -299,6 +299,53 @@ func TestRecoverFailsWhollyMissingDisk(t *testing.T) {
 	}
 }
 
+func TestRecoverServesDegradedWithPendingDrainOnMissingDisk(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	disk1 := filepath.Join(dir, "disk1")
+	disk2 := filepath.Join(dir, "disk2")
+	roots := map[uint32]string{1: disk1, 2: disk2}
+	s1 := NewServerWithDiskRoots(db, roots)
+	s1.SetMaintenanceInterval(0)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("surviving replica"), 300)
+	writeServerFileInternal(t, s1, "/mirror/pending-drain", payload)
+	if _, err := db.GetOrCreateDrainJob(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.SetDiskState(ctx, 1, meta.DiskDraining); err != nil {
+		t.Fatal(err)
+	}
+	s1.CloseStorage()
+	if err := os.RemoveAll(disk1); err != nil {
+		t.Fatal(err)
+	}
+
+	s2 := NewServerWithDiskRoots(db, roots)
+	s2.SetMaintenanceInterval(0)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatalf("pending drain on a missing disk blocked degraded startup: %v", err)
+	}
+	defer s2.CloseStorage()
+	if got := readServerFileInternal(t, s2, "/mirror/pending-drain"); !bytes.Equal(got, payload) {
+		t.Fatal("surviving replica changed while drain remained pending")
+	}
+	jobs, err := db.RunningJobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].Kind != meta.JobDrain {
+		t.Fatalf("pending drain job was not preserved for retry: %+v", jobs)
+	}
+}
+
 // TestRecoverFailedDiskGetsReprotected closes the loop end to end: a disk lost at
 // boot is marked failed, and the very next maintenance pass regenerates the
 // shards it held onto a healthy spare disk, restoring full redundancy without any
