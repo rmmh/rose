@@ -76,6 +76,11 @@ func (h *FileHandle) mtimeOrNow() int64 {
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	s.namespaceMu.Lock()
 	defer s.namespaceMu.Unlock()
+	// Resolve the opened version and publish its handle pin while holding the
+	// same lock reclamation uses. GC cannot delete its chunk rows, and compaction
+	// cannot pass its final pin check, in the gap between lookup and registration.
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
 	// Simple implementation
 	path := cleanPath(req.GetPath())
 	if path == "" {
@@ -137,7 +142,7 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 		}
 		ack = op.AcknowledgedOffset
 	}
-	s.replacePins(h.pinOwner, chunks)
+	s.replacePinsLocked(h.pinOwner, chunks)
 	s.handlesMu.Lock()
 	s.handles[hid] = h
 	s.handlesMu.Unlock()
@@ -147,6 +152,8 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 }
 
 func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) (*pb.OpenResponse, error) {
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
 	if req.GetPath() == "" || req.GetSnapshotId() == 0 {
 		return nil, fmt.Errorf("snapshot_id and path are required")
 	}
@@ -175,7 +182,7 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 		openedMtime: mtime, pinOwner: handlePinOwner(hid),
 	}
 	hs.setPath(path)
-	s.replacePins(hs.pinOwner, chunks)
+	s.replacePinsLocked(hs.pinOwner, chunks)
 	s.handlesMu.Lock()
 	s.handles[hid] = hs
 	s.handlesMu.Unlock()
@@ -592,6 +599,8 @@ func (s *Server) refreshCommittedHandle(ctx context.Context, h *FileHandle) erro
 	mu := s.writeOperationLock(h.writeOpID)
 	mu.Lock()
 	defer mu.Unlock()
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
 	op, err := s.db.WriteOpByKey(ctx, h.writeKey)
 	if err != nil {
 		return err
@@ -609,7 +618,7 @@ func (s *Server) refreshCommittedHandle(ctx context.Context, h *FileHandle) erro
 		return err
 	}
 	h.cache = nil
-	s.replacePins(h.pinOwner, chunks)
+	s.replacePinsLocked(h.pinOwner, chunks)
 	return nil
 }
 

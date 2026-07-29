@@ -14,6 +14,10 @@ func handlePinOwner(handle int64) int64 { return -handle }
 func (s *Server) replacePins(owner int64, chunks []meta.ChunkPlacement) {
 	s.pinMu.Lock()
 	defer s.pinMu.Unlock()
+	s.replacePinsLocked(owner, chunks)
+}
+
+func (s *Server) replacePinsLocked(owner int64, chunks []meta.ChunkPlacement) {
 	if len(chunks) == 0 {
 		delete(s.pinnedChunks, owner)
 		return
