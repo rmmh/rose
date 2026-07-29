@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -131,5 +132,47 @@ func TestDiskRebindsByUIDOnRelocation(t *testing.T) {
 	}
 	if again, _ := db.DiskUID(ctx, 2); again != uid2 {
 		t.Fatalf("disk 2 uid changed: %s -> %s", uid2, again)
+	}
+}
+
+func TestUnknownReplacementMediaDoesNotImpersonateKnownDisk(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	root1 := filepath.Join(dir, "slot1")
+	root2 := filepath.Join(dir, "slot2")
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s1 := NewServerWithDiskRoots(db, map[uint32]string{1: root1, 2: root2})
+	s1.SetMaintenanceInterval(0)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("foreign media must not inherit disk identity"), 200)
+	writeServerFileInternal(t, s1, "/identity/file", payload)
+	s1.CloseStorage()
+
+	oldMedia := filepath.Join(dir, "removed-disk1")
+	if err := os.Rename(root1, oldMedia); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := diskUIDForRoot(root1); err != nil {
+		t.Fatal(err)
+	}
+
+	s2 := NewServerWithDiskRoots(db, map[uint32]string{1: root1, 2: root2})
+	s2.SetMaintenanceInterval(0)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s2.CloseStorage()
+	if got := s2.DiskStates()[1]; got != meta.DiskFailed {
+		t.Fatalf("foreign media in disk-1 slot left catalog disk active: %q", got)
+	}
+	if got := readServerFileInternal(t, s2, "/identity/file"); !bytes.Equal(got, payload) {
+		t.Fatal("surviving mirror changed after foreign-media substitution")
 	}
 }

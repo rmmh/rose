@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/rmmh/rose/meta"
 	"github.com/rmmh/rose/uid"
 )
 
@@ -120,6 +121,18 @@ func (s *Server) reconcileDiskRoots(ctx context.Context) error {
 		markerUID, err := diskUIDForRoot(path)
 		if err != nil {
 			return err
+		}
+		if _, markerKnown := idByUID[markerUID]; !markerKnown && idKnown[configID] {
+			// A configured slot for an existing catalog disk now contains
+			// unrecognized media. It must be explicitly attached under a fresh
+			// identity; never let the numeric slot impersonate the missing disk.
+			if err := s.db.SetDiskState(ctx, configID, meta.DiskFailed); err != nil {
+				return err
+			}
+			reconciled[configID] = path
+			slog.Warn("unknown media found in configured disk slot; keeping catalog disk failed",
+				"disk_id", configID, "uid", markerUID.String(), "path", path)
+			continue
 		}
 		effectiveID := configID
 		if knownID, ok := idByUID[markerUID]; ok {
