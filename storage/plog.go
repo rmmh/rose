@@ -150,6 +150,18 @@ func completedBlockMAC(blockIdx int64, hashes []byte) [HashSize]byte {
 	return out
 }
 
+func openBlockMAC(blockIdx int64, trailerPrefix, ragged []byte) [HashSize]byte {
+	var index [8]byte
+	binary.LittleEndian.PutUint64(index[:], uint64(blockIdx))
+	mac := hmac.New(sha256.New, bitrotKey)
+	mac.Write(index[:])
+	mac.Write(trailerPrefix)
+	mac.Write(ragged)
+	var out [HashSize]byte
+	copy(out[:], mac.Sum(nil)[:HashSize])
+	return out
+}
+
 // OpenOption configures OpenPlog.
 type OpenOption func(*openOptions)
 
@@ -480,12 +492,12 @@ func (p *Plog) recoverFromTrailer(size int64) bool {
 	}
 	p.logicalLength = sealed + int64(raggedLen)
 	p.hashes = append(p.hashes[:0], trailer[openTrailerHeader:hashesEnd]...)
-	mac := hmac.New(sha256.New, bitrotKey)
-	mac.Write(trailer[:hashesEnd])
+	var ragged []byte
 	if authenticatesRagged {
-		mac.Write(p.buf)
+		ragged = p.buf
 	}
-	if !hmac.Equal(mac.Sum(nil)[:HashSize], trailer[hashesEnd:hashesEnd+HashSize]) {
+	want := openBlockMAC(blockStartLogical/dataPerBlock, trailer[:hashesEnd], ragged)
+	if !hmac.Equal(want[:], trailer[hashesEnd:hashesEnd+HashSize]) {
 		if authenticatesRagged {
 			// Preserve the trailer's bounded geometry so reads report the
 			// corruption instead of trusting and re-hashing the damaged tail.
@@ -968,12 +980,13 @@ func (p *Plog) buildOpenTrailer(raggedLen int) []byte {
 	binary.LittleEndian.PutUint16(trailer[10:12], raggedField)
 	copy(trailer[openTrailerHeader:], p.hashes)
 	hashesEnd := openTrailerHeader + len(p.hashes)
-	mac := hmac.New(sha256.New, bitrotKey)
-	mac.Write(trailer[:hashesEnd])
+	var ragged []byte
 	if raggedLen > 0 {
-		mac.Write(p.buf)
+		ragged = p.buf
 	}
-	copy(trailer[hashesEnd:], mac.Sum(nil)[:HashSize])
+	sealed := p.logicalLength - int64(raggedLen)
+	mac := openBlockMAC(sealed/dataPerBlock, trailer[:hashesEnd], ragged)
+	copy(trailer[hashesEnd:], mac[:])
 	return trailer
 }
 

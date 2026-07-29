@@ -257,6 +257,66 @@ func TestPlogInvalidOpenTrailerPoisonsSealedSectorHashes(t *testing.T) {
 	}
 }
 
+func TestPlogReadRejectsRelocatedOpenBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plog")
+	p, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openLen := 3*SectorSize + 123
+	firstOpen := bytes.Repeat([]byte{0x31}, openLen)
+	if _, err := p.Write(0, firstOpen); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// Capture the first open block: three sealed sectors, its ragged sector
+	// slot, and the authenticated trailer.
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	captured := make([]byte, 5*SectorSize)
+	if _, err := f.ReadAt(captured, plogHeaderSize); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := p.Write(0, bytes.Repeat([]byte{0x55}, dataPerBlock-openLen)); err != nil {
+		t.Fatal(err)
+	}
+	secondOpen := bytes.Repeat([]byte{0x72}, openLen)
+	if _, err := p.Write(0, secondOpen); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Return the earlier internally valid open block at block 1's address. A
+	// position-free trailer MAC accepts its old hashes and ragged bytes there.
+	secondBlockPhys := int64(plogHeaderSize) + blockPhysical
+	if _, err := f.WriteAt(captured, secondBlockPhys); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenExistingPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Read(dataPerBlock, SectorSize); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("read with relocated authenticated open block = %v, want ErrBitrot", err)
+	}
+}
+
 func TestPlogScrubReportsCorruption(t *testing.T) {
 	p, path := tempPlog(t, "plog")
 	data := twoBlockPayload()
