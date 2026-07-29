@@ -243,9 +243,16 @@ func (w *workload) run(ctx context.Context, workers int, seed int64) {
 			client := w.cluster.client()
 			rng := rand.New(rand.NewSource(seed + int64(workerID)*1_000_003))
 			for ctx.Err() == nil {
+				// The run deadline stops scheduling new operations, but must not
+				// cancel an operation after the server has committed and before
+				// gRPC returns its result. Give each already-started step its own
+				// bounded lifetime so the oracle always observes a definite
+				// success or failure.
+				opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				w.restartMu.RLock()
-				w.step(ctx, client, workerID, rng)
+				w.step(opCtx, client, workerID, rng)
 				w.restartMu.RUnlock()
+				cancel()
 			}
 		}(id)
 	}
