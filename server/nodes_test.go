@@ -541,10 +541,12 @@ func TestECReadDoesNotWaitForSlowShardAfterReconstructionQuorum(t *testing.T) {
 }
 
 type writeFaultClient struct {
-	slow    bool
-	block   <-chan struct{}
-	started chan<- struct{}
-	local   *localPlogClient
+	slow        bool
+	block       <-chan struct{}
+	started     chan<- struct{}
+	local       *localPlogClient
+	readBlock   <-chan struct{}
+	readStarted chan<- struct{}
 }
 
 func (c *writeFaultClient) Write(context.Context, int64, []byte) (int64, error) {
@@ -552,6 +554,12 @@ func (c *writeFaultClient) Write(context.Context, int64, []byte) (int64, error) 
 }
 
 func (c *writeFaultClient) Read(ctx context.Context, offset int64, length int) ([]byte, error) {
+	if c.readBlock != nil {
+		if c.readStarted != nil {
+			c.readStarted <- struct{}{}
+		}
+		<-c.readBlock
+	}
 	if c.local != nil {
 		return c.local.Read(ctx, offset, length)
 	}

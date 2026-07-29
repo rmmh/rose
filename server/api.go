@@ -1775,10 +1775,14 @@ func (s *Server) CommitPlog(ctx context.Context, req *pb.CommitPlogRequest) (*pb
 func (s *Server) ReadVlog(ctx context.Context, req *pb.ReadVlogRequest) (*pb.ReadVlogResponse, error) {
 	s.vlogMu.Lock()
 	v, ok := s.vlogs[req.GetVlogId()]
+	if ok {
+		s.beginRawVlogOpLocked(req.GetVlogId())
+	}
 	s.vlogMu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("vlog not found")
 	}
+	defer s.endRawVlogOp(req.GetVlogId())
 
 	data, err := v.Read(ctx, int64(req.GetOffset()), int(req.GetLength()))
 	if err != nil {
@@ -1791,23 +1795,13 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 	s.vlogMu.Lock()
 	v, ok := s.vlogs[req.GetVlogId()]
 	if ok {
-		if s.rawVlogWrites == nil {
-			s.rawVlogWrites = make(map[uint32]int)
-		}
-		s.rawVlogWrites[req.GetVlogId()]++
+		s.beginRawVlogOpLocked(req.GetVlogId())
 	}
 	s.vlogMu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("vlog not found")
 	}
-	defer func() {
-		s.vlogMu.Lock()
-		s.rawVlogWrites[req.GetVlogId()]--
-		if s.rawVlogWrites[req.GetVlogId()] == 0 {
-			delete(s.rawVlogWrites, req.GetVlogId())
-		}
-		s.vlogMu.Unlock()
-	}()
+	defer s.endRawVlogOp(req.GetVlogId())
 	if v.Length() > math.MaxUint32 {
 		return nil, fmt.Errorf("vlog %d has no representable write offset", req.GetVlogId())
 	}
@@ -1816,6 +1810,22 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 		return nil, err
 	}
 	return &pb.WriteVlogResponse{Offset: uint32(offset)}, nil
+}
+
+func (s *Server) beginRawVlogOpLocked(vlogID uint32) {
+	if s.rawVlogOps == nil {
+		s.rawVlogOps = make(map[uint32]int)
+	}
+	s.rawVlogOps[vlogID]++
+}
+
+func (s *Server) endRawVlogOp(vlogID uint32) {
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	s.rawVlogOps[vlogID]--
+	if s.rawVlogOps[vlogID] == 0 {
+		delete(s.rawVlogOps, vlogID)
+	}
 }
 
 func (s *Server) CommitVlog(ctx context.Context, req *pb.CommitVlogRequest) (*pb.CommitVlogResponse, error) {

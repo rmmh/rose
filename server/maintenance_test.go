@@ -375,6 +375,78 @@ func TestReplaceDiskDefersInFlightRawVlogWrite(t *testing.T) {
 	}
 }
 
+func TestReplaceDiskDefersInFlightRawVlogRead(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+	made, err := s.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "NONE", DataShards: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("raw read blocked on a slow node")
+	writeVlog(t, s, made.GetVlogId(), payload)
+	mappings, err := s.db.ListVlogPlogs(ctx, made.GetVlogId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	s.vlogMu.Lock()
+	vlog, err := storage.NewVlog(made.GetVlogId(), "NONE", 1, 0, []storage.PlogClient{
+		&writeFaultClient{
+			readBlock: block, readStarted: started,
+			local: &localPlogClient{plog: s.plogs[mappings[0].PlogID]},
+		},
+	}, int64(len(payload)))
+	if err == nil {
+		s.vlogs[made.GetVlogId()] = vlog
+	}
+	s.vlogMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type readResult struct {
+		buffer []byte
+		err    error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		got, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+			VlogId: made.GetVlogId(), Length: uint32(len(payload)),
+		})
+		readDone <- readResult{buffer: got.GetBuffer(), err: err}
+	}()
+	<-started
+
+	newRoot := filepath.Join(t.TempDir(), "replacement")
+	if err := os.MkdirAll(newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AttachDiskOnNode(ctx, 2, 1, newRoot, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceDiskWith(ctx, 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DiskStates()[1]; got != meta.DiskDraining {
+		t.Fatalf("source disk state during raw read = %q, want draining", got)
+	}
+
+	close(block)
+	result := <-readDone
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if !bytes.Equal(result.buffer, payload) {
+		t.Fatalf("slow raw read = %q, want %q", result.buffer, payload)
+	}
+	if err := s.ReplaceDiskWith(ctx, 1, 2); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCancelledPlacementFlipKeepsDrainSourceReadable(t *testing.T) {
 	s := newControlPlaneServer(t, 2)
 	vlogID := provision(t, s, "NONE", 1, 0)
