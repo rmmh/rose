@@ -298,6 +298,36 @@ func TestPendingFileRenameCannotReplaceDirectory(t *testing.T) {
 	}
 }
 
+func TestRenameCannotDescendFromPendingFile(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+	writeFile(t, client, "/source", []byte("source"))
+	parent, err := client.Open(ctx, &pb.OpenRequest{
+		Path: "/pending-parent", OperationKey: "rename-pending-parent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(ctx, &pb.WriteRequest{
+		Handle: parent.GetHandle(), Buffer: []byte("parent"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Rename(ctx, &pb.RenameRequest{
+		OldPath: "/source", NewPath: "/pending-parent/child",
+	}); err == nil {
+		t.Fatal("Rename succeeded below an unpublished regular file")
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{
+		Handle: parent.GetHandle(), IdempotencyKey: "rename-pending-parent",
+	}); err != nil {
+		t.Fatalf("pending parent did not remain publishable: %v", err)
+	}
+	if _, err := client.Getattr(ctx, &pb.GetattrRequest{Path: "/source"}); err != nil {
+		t.Fatalf("failed rename removed source: %v", err)
+	}
+}
+
 func TestFileSnapshotNamespaceLifecycleOverGRPC(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()

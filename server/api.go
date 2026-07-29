@@ -87,11 +87,6 @@ func (s *Server) handleStillRegistered(handle int64, h *FileHandle) bool {
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	s.namespaceMu.Lock()
 	defer s.namespaceMu.Unlock()
-	// Resolve the opened version and publish its handle pin while holding the
-	// same lock reclamation uses. GC cannot delete its chunk rows, and compaction
-	// cannot pass its final pin check, in the gap between lookup and registration.
-	s.pinMu.Lock()
-	defer s.pinMu.Unlock()
 	// Simple implementation
 	path := cleanPath(req.GetPath())
 	if path == "" {
@@ -108,6 +103,11 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	if err := s.validateFileAncestors(ctx, path); err != nil {
 		return nil, err
 	}
+	// Resolve the opened version and publish its handle pin while holding the
+	// same lock reclamation uses. GC cannot delete its chunk rows, and compaction
+	// cannot pass its final pin check, in the gap between lookup and registration.
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
 
 	id, err := s.db.OpenFile(ctx, path)
 	if err != nil {
@@ -231,6 +231,9 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 		return nil, fmt.Errorf("old_path and new_path are required")
 	}
 	oldPath, newPath := cleanPath(req.GetOldPath()), cleanPath(req.GetNewPath())
+	if err := s.validateFileAncestors(ctx, newPath); err != nil {
+		return nil, err
+	}
 	err := s.db.RenameFile(ctx, oldPath, newPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		// The source has no committed file head. It may still exist as an open
