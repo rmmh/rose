@@ -2398,6 +2398,29 @@ func TestRenamePreservesSourceMtime(t *testing.T) {
 	assert.Equal(t, sourceMtime, attr.GetMtime())
 }
 
+func TestUnlinkedHandleCannotChangeReplacementMtime(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	writeAt(t, s, "/stale-mtime", -1, [][2]any{{0, []byte("old destination")}})
+	stale, err := s.Open(ctx, &pb.OpenRequest{Path: "/stale-mtime"})
+	require.NoError(t, err)
+
+	writeAt(t, s, "/mtime-replacement", -1, [][2]any{{0, []byte("replacement")}})
+	replacementMtime := int64(789)
+	_, err = s.Setattr(ctx, &pb.SetattrRequest{Path: "/mtime-replacement", Mtime: &replacementMtime})
+	require.NoError(t, err)
+	_, err = s.Rename(ctx, &pb.RenameRequest{
+		OldPath: "/mtime-replacement",
+		NewPath: "/stale-mtime",
+	})
+	require.NoError(t, err)
+
+	require.Error(t, s.SetHandleMtime(ctx, stale.GetHandle(), 999))
+	attr, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/stale-mtime"})
+	require.NoError(t, err)
+	assert.Equal(t, replacementMtime, attr.GetMtime())
+}
+
 func TestSnapshotHandleRejectsMtimeMutation(t *testing.T) {
 	s := newServer(t)
 	ctx := context.Background()

@@ -792,6 +792,9 @@ func (s *Server) setHandleMtime(ctx context.Context, handle int64, mtime int64, 
 	if h.snapshotID != 0 {
 		return fmt.Errorf("snapshot handles are read-only")
 	}
+	if h.unlinked {
+		return fmt.Errorf("handle refers to an unlinked file")
+	}
 	if h.writeOpID != 0 {
 		h.mtimeNs.Store(mtime)
 		h.mtimeSet.Store(true)
