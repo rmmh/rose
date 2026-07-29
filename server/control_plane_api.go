@@ -144,6 +144,13 @@ func (s *Server) StartReprotect(ctx context.Context, req *pb.StartReprotectReque
 	if state != meta.DiskFailed && state != meta.DiskDraining {
 		return nil, fmt.Errorf("disk %d is %s, only failed or draining disks are reprotected", req.GetDiskId(), state)
 	}
+	previous, exists, err := s.db.LatestDiskJob(ctx, meta.JobReprotect, req.GetDiskId())
+	if err != nil {
+		return nil, err
+	}
+	if exists && previous.State == meta.JobDone {
+		return &pb.MaintenanceJobResponse{JobId: uint64(previous.ID)}, nil
+	}
 	job, err := s.db.GetOrCreateReprotectJob(ctx, req.GetDiskId())
 	if err != nil {
 		return nil, err

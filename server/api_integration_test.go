@@ -769,6 +769,38 @@ func TestRemoveDiskRetryReturnsCompletedJob(t *testing.T) {
 	}
 }
 
+func TestStartReprotectRetryReturnsCompletedJob(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	srv := server.NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
+	srv.SetMaintenanceInterval(0)
+	if err := srv.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.StopMaintenanceDriver()
+	if err := srv.SetDiskState(ctx, 1, meta.DiskFailed); err != nil {
+		t.Fatal(err)
+	}
+
+	req := &pb.StartReprotectRequest{DiskId: 1}
+	first, err := srv.StartReprotect(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := srv.StartReprotect(ctx, req)
+	if err != nil {
+		t.Fatalf("identical StartReprotect retry failed: %v", err)
+	}
+	if retry.GetJobId() != first.GetJobId() {
+		t.Fatalf("StartReprotect retry job = %d, want %d", retry.GetJobId(), first.GetJobId())
+	}
+}
+
 func TestVlogCommitControlsRecoveredLength(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
