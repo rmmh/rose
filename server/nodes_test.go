@@ -597,6 +597,20 @@ func (c *writeFaultClient) Commit(ctx context.Context, _ int64) error {
 	return nil
 }
 
+func (c *writeFaultClient) Scrub() (storage.ScrubResult, error) {
+	if c.local == nil {
+		return storage.ScrubResult{}, fmt.Errorf("unused")
+	}
+	return c.local.Scrub()
+}
+
+func (c *writeFaultClient) TruncateTo(logical int64) error {
+	if c.local == nil {
+		return fmt.Errorf("unused")
+	}
+	return c.local.TruncateTo(logical)
+}
+
 func TestWriteVlogDoesNotWaitForSlowCopyAfterQuorum(t *testing.T) {
 	clients := []storage.PlogClient{
 		&writeFaultClient{},

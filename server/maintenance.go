@@ -539,6 +539,13 @@ func (s *Server) repairOneVlogLocked(ctx context.Context, vlogID uint32) (scrubb
 		}
 		return scrubbed, 0, nil, nil
 	}
+	busy, err := s.vlogRelocationDeferredLocked(ctx, vlogID)
+	if err != nil {
+		return scrubbed, 0, nil, err
+	}
+	if busy {
+		return scrubbed, 0, nil, nil
+	}
 
 	info, err := s.db.GetVlog(ctx, vlogID)
 	if err != nil {
@@ -673,6 +680,10 @@ func (s *Server) RepairOfflineShards(ctx context.Context) (ScrubRepairResult, er
 func (s *Server) repairOfflineShardsOneVlogLocked(ctx context.Context, vlogID uint32) (repaired int, failures []RepairFailure, err error) {
 	offline, err := s.offlineShardsLocked(ctx, vlogID)
 	if err != nil || len(offline) == 0 {
+		return 0, nil, err
+	}
+	busy, err := s.vlogRelocationDeferredLocked(ctx, vlogID)
+	if err != nil || busy {
 		return 0, nil, err
 	}
 	info, err := s.db.GetVlog(ctx, vlogID)

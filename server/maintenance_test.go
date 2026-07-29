@@ -556,6 +556,143 @@ func TestReplaceDiskDefersInFlightFileRead(t *testing.T) {
 	}
 }
 
+func TestScrubRepairDefersInFlightFileRead(t *testing.T) {
+	s := newControlPlaneServer(t, 3)
+	ctx := context.Background()
+	if err := s.SetDiskState(ctx, 3, meta.DiskDraining); err != nil {
+		t.Fatal(err)
+	}
+	open, err := s.Open(ctx, &pb.OpenRequest{
+		Path: "/slow-repair-read", OperationKey: "slow-repair-read",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("repair must wait for file read"), (2<<20)/len("repair must wait for file read")+1)
+	payload = payload[:2<<20]
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: open.GetHandle(), Buffer: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{
+		Handle: open.GetHandle(), IdempotencyKey: "slow-repair-read",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDiskState(ctx, 3, meta.DiskActive); err != nil {
+		t.Fatal(err)
+	}
+
+	fileID, err := s.db.OpenFile(ctx, "slow-repair-read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks, err := s.db.FileVersionChunks(ctx, fileID)
+	if err != nil || len(chunks) == 0 {
+		t.Fatalf("file chunks = %d, err = %v", len(chunks), err)
+	}
+	vlogID := chunks[0].VlogID
+	info, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shards, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptPath := s.plogPath(shards[0].DiskID, mappings[0].PlogID)
+	f, err := os.OpenFile(corruptPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b [1]byte
+	corruptOffset := storage.CalcPhysical(100)
+	if _, err := f.ReadAt(b[:], corruptOffset); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	b[0] ^= 0xff
+	if _, err := f.WriteAt(b[:], corruptOffset); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scrub, err := s.plogs[mappings[0].PlogID].Scrub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scrub.Healthy() {
+		t.Fatal("injected corruption was not detectable")
+	}
+
+	block := make(chan struct{})
+	started := make(chan struct{}, len(mappings))
+	clients := make([]storage.PlogClient, len(mappings))
+	s.vlogMu.Lock()
+	for i, mapping := range mappings {
+		clients[i] = &writeFaultClient{
+			readBlock: block, readStarted: started,
+			local: &localPlogClient{plog: s.plogs[mapping.PlogID]},
+		}
+	}
+	vlog, err := storage.NewVlog(vlogID, info.ProtectionScheme, int(info.DataShards), int(info.ParityShards), clients, info.Length)
+	if err == nil {
+		s.vlogs[vlogID] = vlog
+	}
+	s.vlogMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readHandle, err := s.Open(ctx, &pb.OpenRequest{Path: "/slow-repair-read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type readResult struct {
+		buffer []byte
+		err    error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		got, err := s.Read(ctx, &pb.ReadRequest{
+			Handle: readHandle.GetHandle(), Length: int64(len(payload)),
+		})
+		readDone <- readResult{buffer: got.GetBuffer(), err: err}
+	}()
+	<-started
+
+	res, err := s.ScrubAndRepair(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ShardsRepaired != 0 {
+		t.Fatalf("repair replaced %d shards during active read", res.ShardsRepaired)
+	}
+	close(block)
+	result := <-readDone
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if !bytes.Equal(result.buffer, payload) {
+		t.Fatal("slow file read changed across deferred repair")
+	}
+
+	res, err = s.ScrubAndRepair(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ShardsRepaired != 1 {
+		t.Fatalf("repair after read replaced %d shards, want 1", res.ShardsRepaired)
+	}
+}
+
 func TestCancelledPlacementFlipKeepsDrainSourceReadable(t *testing.T) {
 	s := newControlPlaneServer(t, 2)
 	vlogID := provision(t, s, "NONE", 1, 0)
