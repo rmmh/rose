@@ -220,6 +220,11 @@ func (s *Server) reopenPlogsLocked(ctx context.Context, owner string, matches fu
 			discardReopened()
 			return fmt.Errorf("reopen plog %d on returned %s: %w", info.ID, owner, err)
 		}
+		if err := s.validatePlogIdentity(ctx, info, p); err != nil {
+			_ = p.Close()
+			discardReopened()
+			return fmt.Errorf("reopen plog %d on returned %s: %w", info.ID, owner, err)
+		}
 		mappings, err := s.db.VlogsForPlog(ctx, info.ID)
 		if err != nil {
 			_ = p.Close()

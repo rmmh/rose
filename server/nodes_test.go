@@ -913,3 +913,44 @@ func TestNodeReturnRetryReopensEveryVlogAfterPartialReturn(t *testing.T) {
 		}
 	}
 }
+
+func TestNodeReturnRejectsSubstitutedPlogIdentity(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 1)
+	s.SetMaintenanceInterval(0)
+	first := provision(t, s, "NONE", 1, 0)
+	second := provision(t, s, "NONE", 1, 0)
+	writeVlog(t, s, first, []byte("first-vlog"))
+	writeVlog(t, s, second, []byte("other-vlog"))
+	firstMapping, err := s.db.ListVlogPlogs(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondMapping, err := s.db.ListVlogPlogs(ctx, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodeState(ctx, 1, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+
+	firstPath := s.plogPath(1, firstMapping[0].PlogID)
+	secondPath := s.plogPath(1, secondMapping[0].PlogID)
+	substitute, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(firstPath, substitute, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetNodeState(ctx, 1, meta.NodeWorking); err == nil {
+		t.Fatal("node return mounted a substituted plog")
+	}
+	if got := s.NodeStates()[1]; got != meta.NodeFailed {
+		t.Fatalf("node state after rejected return = %q, want failed", got)
+	}
+	if !s.offlinePlogs[firstMapping[0].PlogID] {
+		t.Fatal("substituted plog left the offline set")
+	}
+}
