@@ -54,6 +54,25 @@ func TestReadWaitingBehindCloseCannotUseRemovedHandle(t *testing.T) {
 	}
 }
 
+func TestSetMtimeWaitingBehindCloseCannotUseRemovedHandle(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/close-mtime-race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.handles[open.GetHandle()]
+
+	// `h` is the pointer SetHandleMtime captured from the handle map. Complete
+	// a concurrent Close before resuming at its post-lookup cut point.
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.setHandleMtime(ctx, open.GetHandle(), 123, h); err == nil || err.Error() != "invalid handle" {
+		t.Fatalf("SetHandleMtime after winning Close = %v, want invalid handle", err)
+	}
+}
+
 func TestPathTruncateFailureDoesNotLeakTransientHandle(t *testing.T) {
 	s := newControlPlaneServer(t, 1)
 	ctx := context.Background()

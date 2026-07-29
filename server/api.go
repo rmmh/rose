@@ -778,8 +778,17 @@ func (s *Server) SetHandleMtime(ctx context.Context, handle int64, mtime int64) 
 	if !ok {
 		return fmt.Errorf("invalid handle")
 	}
+	return s.setHandleMtime(ctx, handle, mtime, h)
+}
+
+// setHandleMtime is the post-lookup half of SetHandleMtime, split out so
+// deterministic concurrency tests can pause at the lookup-to-state-lock cut point.
+func (s *Server) setHandleMtime(ctx context.Context, handle int64, mtime int64, h *FileHandle) error {
 	h.stateMu.Lock()
 	defer h.stateMu.Unlock()
+	if !s.handleStillRegistered(handle, h) {
+		return fmt.Errorf("invalid handle")
+	}
 	if h.snapshotID != 0 {
 		return fmt.Errorf("snapshot handles are read-only")
 	}
