@@ -289,7 +289,8 @@ func (s *Server) hasOpenHandleAtOrBelow(path string) bool {
 	for _, h := range handles {
 		h.stateMu.Lock()
 		handlePath := h.path()
-		found := !h.unlinked && (handlePath == path || strings.HasPrefix(handlePath, path+"/"))
+		found := !h.unlinked && h.snapshotID == 0 &&
+			(handlePath == path || strings.HasPrefix(handlePath, path+"/"))
 		h.stateMu.Unlock()
 		if found {
 			return true

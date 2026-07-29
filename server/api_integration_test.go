@@ -373,6 +373,11 @@ func TestFileSnapshotNamespaceLifecycleOverGRPC(t *testing.T) {
 	if got := readHandle(t, client, retained.GetHandle()); !bytes.Equal(got, []byte("first version")) {
 		t.Fatalf("snapshot after unlink = %q, want first version", got)
 	}
+	if _, err := client.Rename(ctx, &pb.RenameRequest{
+		OldPath: "/alpha", NewPath: "/gamma",
+	}); err == nil {
+		t.Fatal("Rename treated an open snapshot handle as a live pending file")
+	}
 	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: retained.GetHandle(), Buffer: []byte("forbidden")}); err == nil {
 		t.Fatal("snapshot write unexpectedly succeeded")
 	}
