@@ -237,6 +237,11 @@ func (s *Server) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.RenameR
 		if !s.hasOpenHandleAtOrBelow(oldPath) {
 			return nil, err
 		}
+		if entry, exists, statErr := s.db.StatPath(ctx, newPath); statErr != nil {
+			return nil, statErr
+		} else if exists && entry.IsDir {
+			return nil, fmt.Errorf("cannot replace directory %q with a file", newPath)
+		}
 		if oldPath != newPath {
 			if err := s.markOpenHandlesUnlinked(ctx, newPath, false); err != nil {
 				return nil, err

@@ -206,6 +206,38 @@ func TestMkdirCannotOverlapPendingFile(t *testing.T) {
 	}
 }
 
+func TestPendingFileRenameCannotReplaceDirectory(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+	if _, err := client.Mkdir(ctx, &pb.MkdirRequest{Path: "/directory"}); err != nil {
+		t.Fatal(err)
+	}
+	open, err := client.Open(ctx, &pb.OpenRequest{Path: "/temporary", OperationKey: "pending-dir-target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte("payload")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Rename(ctx, &pb.RenameRequest{
+		OldPath: "/temporary", NewPath: "/directory",
+	}); err == nil {
+		t.Fatal("pending file rename replaced a directory")
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{
+		Handle: open.GetHandle(), IdempotencyKey: "pending-dir-target",
+	}); err != nil {
+		t.Fatalf("original pending path did not remain publishable: %v", err)
+	}
+	attr, err := client.Getattr(ctx, &pb.GetattrRequest{Path: "/temporary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attr.GetIsDir() || attr.GetSize() != int64(len("payload")) {
+		t.Fatalf("temporary entry = dir:%v size:%d", attr.GetIsDir(), attr.GetSize())
+	}
+}
+
 func TestFileSnapshotNamespaceLifecycleOverGRPC(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()
