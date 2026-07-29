@@ -198,6 +198,29 @@ func TestConflictingWriteOperationRetryIsRejected(t *testing.T) {
 			t.Fatalf("identical retry failed: %v", err)
 		}
 	}
+
+	committer, err := client.Open(ctx, &pb.OpenRequest{Path: "/post-commit-retry", OperationKey: "post-commit-op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lateRetry, err := client.Open(ctx, &pb.OpenRequest{Path: "/post-commit-retry", OperationKey: "post-commit-op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: committer.GetHandle(), Buffer: winner}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{
+		Handle: committer.GetHandle(), IdempotencyKey: "post-commit-op",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: lateRetry.GetHandle(), Buffer: loser}); err == nil {
+		t.Fatal("post-commit conflicting Write retry reported success")
+	}
+	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: lateRetry.GetHandle(), Buffer: winner}); err != nil {
+		t.Fatalf("post-commit identical Write retry failed: %v", err)
+	}
 }
 
 func TestCloseRejectsMismatchedOperationKey(t *testing.T) {

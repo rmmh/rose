@@ -490,6 +490,9 @@ func (s *Server) writeHandle(ctx context.Context, req *pb.WriteRequest, h *FileH
 		return nil, err
 	}
 	if op.State == meta.WriteOpCommitted {
+		if err := s.validateCommittedWriteRetry(ctx, op, req); err != nil {
+			return nil, err
+		}
 		return &pb.WriteResponse{AcknowledgedOffset: op.AcknowledgedOffset}, nil
 	}
 	if op.State != meta.WriteOpPrepared {
@@ -511,6 +514,28 @@ func (s *Server) writeHandle(ctx context.Context, req *pb.WriteRequest, h *FileH
 	// sequential writer the retry contract is built around. In-flight bytes are
 	// made durable at Close, not here, so a resume re-sends them (idempotently).
 	return &pb.WriteResponse{AcknowledgedOffset: h.cache.Length()}, nil
+}
+
+func (s *Server) validateCommittedWriteRetry(ctx context.Context, op meta.WriteOp, req *pb.WriteRequest) error {
+	end := req.GetOffset() + int64(len(req.GetBuffer()))
+	if end > op.AcknowledgedOffset {
+		return fmt.Errorf("conflicting retry for committed write operation %q", op.IdempotencyKey)
+	}
+	if len(req.GetBuffer()) == 0 {
+		return nil
+	}
+	placements, err := s.db.FileVersionChunks(ctx, op.FileID)
+	if err != nil {
+		return err
+	}
+	committed, err := s.readChunksAt(ctx, placements, req.GetOffset(), int64(len(req.GetBuffer())))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(committed, req.GetBuffer()) {
+		return fmt.Errorf("conflicting retry for committed write operation %q", op.IdempotencyKey)
+	}
+	return nil
 }
 
 func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
