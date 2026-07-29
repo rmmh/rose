@@ -396,11 +396,28 @@ func (s *Server) Recover(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if len(mappings) == 0 && info.Length == 0 {
-			// Provisioning records the vlog before its first shard. A process
-			// crash in that window leaves no bytes or mappings to recover.
+		requiredMappings := 1
+		if info.ProtectionScheme == "EC" {
+			requiredMappings = int(info.DataShards + info.ParityShards)
+		} else if info.IsStaging() {
+			requiredMappings = int(info.TargetParityShards) + 1
+		}
+		if info.Length == 0 && len(mappings) < requiredMappings {
+			// Provisioning records the vlog and each shard mapping in separate
+			// durable steps. A crash before the known geometry is complete leaves
+			// no committed bytes and is safe to discard.
 			if err := s.db.DiscardEmptyVlog(ctx, info.ID); err != nil {
 				return fmt.Errorf("discard incomplete vlog %d during recovery: %w", info.ID, err)
+			}
+			for _, mapping := range mappings {
+				if plog := s.plogs[mapping.PlogID]; plog != nil {
+					_ = plog.Close()
+					delete(s.plogs, mapping.PlogID)
+				}
+				delete(s.offlinePlogs, mapping.PlogID)
+				if err := s.db.DiscardUnassignedPlog(ctx, mapping.PlogID); err != nil {
+					return fmt.Errorf("discard incomplete plog %d during recovery: %w", mapping.PlogID, err)
+				}
 			}
 			continue
 		}

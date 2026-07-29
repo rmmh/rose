@@ -278,6 +278,57 @@ func TestRecoverDiscardsVlogLeftBeforeFirstShard(t *testing.T) {
 	}
 }
 
+func TestRecoverDiscardsECVlogLeftWithPartialShardMappings(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	roots := map[uint32]string{
+		1: filepath.Join(dir, "disk1"),
+		2: filepath.Join(dir, "disk2"),
+		3: filepath.Join(dir, "disk3"),
+	}
+	s1 := NewServerWithDiskRoots(db, roots)
+	s1.SetMaintenanceInterval(0)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	orphanVlog, err := db.MakeVlog(ctx, uid.New(), "EC", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanPlog, err := db.MakePlog(ctx, uid.New(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignPlogToVlog(ctx, orphanVlog, 0, orphanPlog); err != nil {
+		t.Fatal(err)
+	}
+	s1.CloseStorage()
+
+	s2 := NewServerWithDiskRoots(db, roots)
+	s2.SetMaintenanceInterval(0)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatalf("recover after crash during EC shard mapping: %v", err)
+	}
+	defer s2.CloseStorage()
+	if _, err := db.GetVlog(ctx, orphanVlog); err == nil {
+		t.Fatalf("partial EC vlog %d survived recovery", orphanVlog)
+	}
+	plogs, err := db.ListPlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plog := range plogs {
+		if plog.ID == orphanPlog {
+			t.Fatalf("partial EC plog %d survived recovery", orphanPlog)
+		}
+	}
+}
+
 // TestRecoverStubbedShardGetsRepaired closes the loop for the missing-file case:
 // a shard whose file vanished on an otherwise-active disk is stubbed offline at
 // recovery (the disk is NOT condemned), and the next maintenance pass regenerates
