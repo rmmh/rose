@@ -299,9 +299,22 @@ func (s *Server) reopenPlogsLocked(
 		s.plogs[id] = p
 		delete(s.offlinePlogs, id)
 	}
+	restoreOffline := func(cause error) error {
+		for id, p := range reopened {
+			delete(s.plogs, id)
+			s.offlinePlogs[id] = true
+			_ = p.Close()
+		}
+		for vlogID := range affected {
+			if remountErr := s.remountVlogLocked(ctx, vlogID); remountErr != nil {
+				return fmt.Errorf("%w (restore offline vlog %d: %v)", cause, vlogID, remountErr)
+			}
+		}
+		return cause
+	}
 	for vlogID := range affected {
 		if err := s.remountVlogLocked(ctx, vlogID); err != nil {
-			return err
+			return restoreOffline(err)
 		}
 	}
 	for id := range reopened {
@@ -315,17 +328,7 @@ func (s *Server) reopenPlogsLocked(
 		// The durable liveness transition failed. Restore offline clients before
 		// releasing vlogMu so no RPC can observe returned media as live while the
 		// catalog still says failed.
-		for id, p := range reopened {
-			delete(s.plogs, id)
-			s.offlinePlogs[id] = true
-			_ = p.Close()
-		}
-		for vlogID := range affected {
-			if remountErr := s.remountVlogLocked(ctx, vlogID); remountErr != nil {
-				return fmt.Errorf("%w (restore offline vlog %d: %v)", err, vlogID, remountErr)
-			}
-		}
-		return err
+		return restoreOffline(err)
 	}
 	return nil
 }

@@ -1336,6 +1336,44 @@ func TestNodeReturnRetryReopensEveryVlogAfterPartialReturn(t *testing.T) {
 	}
 }
 
+func TestNodeReturnRetryDoesNotPublishPlogRejectedDuringRemount(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 1)
+	s.SetMaintenanceInterval(0)
+	vlogID := provision(t, s, "NONE", 1, 0)
+	writeVlog(t, s, vlogID, bytes.Repeat([]byte("durable before media damage"), 300))
+	mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
+	if err != nil || len(mappings) != 1 {
+		t.Fatalf("vlog mappings = %v, err = %v", mappings, err)
+	}
+	plogID := mappings[0].PlogID
+	path := s.plogPath(1, plogID)
+
+	if err := s.SetNodeState(ctx, 1, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	// The node comes back, but its disk lost the committed body while offline.
+	// The header remains readable, so rejection happens during vlog remount
+	// rather than while opening the returned plog.
+	if err := os.Truncate(path, storage.SectorSize); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := s.SetNodeState(ctx, 1, meta.NodeWorking); err == nil {
+			t.Fatalf("damaged node return attempt %d succeeded", attempt)
+		}
+		if got := s.NodeStates()[1]; got != meta.NodeFailed {
+			t.Fatalf("node state after rejected return %d = %q, want failed", attempt, got)
+		}
+		if !s.offlinePlogs[plogID] {
+			t.Fatalf("rejected return %d removed plog %d from offline set", attempt, plogID)
+		}
+		if _, ok := s.plogs[plogID]; ok {
+			t.Fatalf("rejected return %d published plog %d", attempt, plogID)
+		}
+	}
+}
+
 func TestNodeReturnRejectsSubstitutedPlogIdentity(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 1)
