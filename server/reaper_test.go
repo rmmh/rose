@@ -191,7 +191,11 @@ func TestReapReleaseLeaseAndCompaction(t *testing.T) {
 	h3 := openResp.GetHandle()
 
 	// Claim vlog lease
-	err = s.db.ClaimVlogLease(ctx, vlogID, h3, 0)
+	op, err := s.db.WriteOpByKey(ctx, "op-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.db.ClaimVlogLease(ctx, vlogID, op.ID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
