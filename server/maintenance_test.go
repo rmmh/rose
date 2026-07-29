@@ -122,6 +122,38 @@ func TestDrainDiskRelocatesShardAndDetaches(t *testing.T) {
 	}
 }
 
+func TestDrainRelocationSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	before := newControlPlaneServer(t, 2)
+	before.SetMaintenanceInterval(0)
+	vlogID := provision(t, before, "NONE", 1, 0)
+	payload := bytes.Repeat([]byte("relocated-plog-survives-restart"), 300)
+	offset := writeVlog(t, before, vlogID, payload)
+	victim := diskOf(t, before, vlogID, 0)
+	if err := before.DrainDisk(ctx, victim); err != nil {
+		t.Fatal(err)
+	}
+	roots := make(map[uint32]string, len(before.diskRoots))
+	for id, root := range before.diskRoots {
+		roots[id] = root
+	}
+	before.CloseStorage()
+
+	after := NewServerWithDiskRoots(before.db, roots)
+	after.SetMaintenanceInterval(0)
+	if err := after.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer after.CloseStorage()
+	got, err := after.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("payload changed after relocation and restart")
+	}
+}
+
 func TestRemoveDiskFailureKeepsHealthySourceReadable(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 2)

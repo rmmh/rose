@@ -255,6 +255,25 @@ func openPlogFile(path string, id uint32, flag int, header *pb.PlogHeader) (*Plo
 // plog.
 func (p *Plog) Header() *pb.PlogHeader { return p.header }
 
+// RebindDiskUID updates the physical-disk identity in this plog's superblock and
+// makes it durable. Relocation calls this on the copied destination before
+// publishing the catalog move, so a crash leaves either the old authoritative
+// copy or a fully self-consistent new one.
+func (p *Plog) RebindDiskUID(diskUID []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	header := proto.Clone(p.header).(*pb.PlogHeader)
+	header.DiskUid = append([]byte(nil), diskUID...)
+	if err := writeSuperblock(p.file, header); err != nil {
+		return err
+	}
+	if err := p.file.Sync(); err != nil {
+		return fmt.Errorf("sync rebound plog %d superblock: %w", p.id, err)
+	}
+	p.header = header
+	return nil
+}
+
 // writeSuperblock marshals hdr into sector 0 with magic, version, length, and a
 // trailing HMAC, then writes it at offset 0.
 func writeSuperblock(f *os.File, hdr *pb.PlogHeader) error {
