@@ -251,6 +251,50 @@ func TestNodeFailureTakesMountedPlogsOffline(t *testing.T) {
 	}
 }
 
+func TestDiskFailureTakesMountedPlogsOffline(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 1)
+	made, err := s.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "NONE",
+		DataShards:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("failed disks must stop serving mounted storage")
+	written, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: made.GetVlogId(), TxnId: 1, Buffer: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetDiskState(ctx, 1, meta.DiskFailed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: made.GetVlogId(), Offset: written.GetOffset(), Length: uint32(len(payload)),
+	}); err == nil {
+		t.Fatal("ReadVlog served bytes from a failed disk's mounted plog")
+	}
+
+	if err := s.SetDiskState(ctx, 1, meta.DiskActive); err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: made.GetVlogId(), Offset: written.GetOffset(), Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload) {
+		t.Fatalf("read after disk return = %q, want %q", read.GetBuffer(), payload)
+	}
+}
+
 func TestDuplicateVlogWritesWithMinimumCopiesAfterNodeFailure(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 3)

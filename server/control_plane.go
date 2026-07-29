@@ -24,7 +24,23 @@ func (s *Server) SetDiskState(ctx context.Context, diskID uint32, state string) 
 	if _, ok := s.diskRoots[diskID]; !ok {
 		return fmt.Errorf("disk %d is not configured", diskID)
 	}
-	return s.setDiskStateLocked(ctx, diskID, state)
+	previous := s.diskState[diskID]
+	if err := s.setDiskStateLocked(ctx, diskID, state); err != nil {
+		return err
+	}
+	durableCtx := context.WithoutCancel(ctx)
+	if state == meta.DiskFailed {
+		return s.offlineDiskPlogsLocked(durableCtx, diskID)
+	}
+	if state == meta.DiskActive && previous == meta.DiskFailed &&
+		s.nodeState[s.nodeOf(diskID)] != meta.NodeFailed {
+		if err := s.reopenDiskPlogsLocked(durableCtx, diskID); err != nil {
+			_ = s.db.SetDiskState(durableCtx, diskID, meta.DiskFailed)
+			s.diskState[diskID] = meta.DiskFailed
+			return err
+		}
+	}
+	return nil
 }
 
 // DiskStates returns a snapshot of every configured disk's lifecycle state.
@@ -83,6 +99,18 @@ func (s *Server) SetNodeState(ctx context.Context, nodeID uint32, state string) 
 // disconnected node: its open plog clients stop serving immediately and every
 // affected vlog is rebuilt with offline clients. The caller must hold vlogMu.
 func (s *Server) offlineNodePlogsLocked(ctx context.Context, nodeID uint32) error {
+	return s.offlinePlogsLocked(ctx, func(info meta.PlogInfo) bool {
+		return s.nodeOf(info.DiskID) == nodeID
+	})
+}
+
+func (s *Server) offlineDiskPlogsLocked(ctx context.Context, diskID uint32) error {
+	return s.offlinePlogsLocked(ctx, func(info meta.PlogInfo) bool {
+		return info.DiskID == diskID
+	})
+}
+
+func (s *Server) offlinePlogsLocked(ctx context.Context, matches func(meta.PlogInfo) bool) error {
 	infos, err := s.db.ListPlogs(ctx)
 	if err != nil {
 		return err
@@ -90,7 +118,7 @@ func (s *Server) offlineNodePlogsLocked(ctx context.Context, nodeID uint32) erro
 	var offline []uint32
 	affected := make(map[uint32]bool)
 	for _, info := range infos {
-		if s.nodeOf(info.DiskID) != nodeID {
+		if !matches(info) {
 			continue
 		}
 		offline = append(offline, info.ID)
@@ -123,6 +151,18 @@ func (s *Server) offlineNodePlogsLocked(ctx context.Context, nodeID uint32) erro
 // supposedly returned disk still lacks a file: treating a genuinely lost file as
 // healthy would violate the durability gate. The caller must hold vlogMu.
 func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error {
+	return s.reopenPlogsLocked(ctx, fmt.Sprintf("node %d", nodeID), func(info meta.PlogInfo) bool {
+		return s.nodeOf(info.DiskID) == nodeID
+	})
+}
+
+func (s *Server) reopenDiskPlogsLocked(ctx context.Context, diskID uint32) error {
+	return s.reopenPlogsLocked(ctx, fmt.Sprintf("disk %d", diskID), func(info meta.PlogInfo) bool {
+		return info.DiskID == diskID
+	})
+}
+
+func (s *Server) reopenPlogsLocked(ctx context.Context, owner string, matches func(meta.PlogInfo) bool) error {
 	infos, err := s.db.ListPlogs(ctx)
 	if err != nil {
 		return err
@@ -135,7 +175,7 @@ func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error
 		}
 	}
 	for _, info := range infos {
-		if s.nodeOf(info.DiskID) != nodeID || !s.offlinePlogs[info.ID] {
+		if !matches(info) || !s.offlinePlogs[info.ID] {
 			continue
 		}
 		// OpenExistingPlog, not OpenPlog: a returned node whose file is genuinely
@@ -144,7 +184,7 @@ func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error
 		p, err := storage.OpenExistingPlog(s.plogPath(info.DiskID, info.ID), info.ID)
 		if err != nil {
 			discardReopened()
-			return fmt.Errorf("reopen plog %d on returned node %d: %w", info.ID, nodeID, err)
+			return fmt.Errorf("reopen plog %d on returned %s: %w", info.ID, owner, err)
 		}
 		mappings, err := s.db.VlogsForPlog(ctx, info.ID)
 		if err != nil {
