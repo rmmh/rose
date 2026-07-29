@@ -177,15 +177,24 @@ func (i *chaosInjector) bitrotAndRepair(ctx context.Context) error {
 		if closeErr != nil {
 			return closeErr
 		}
-		res, err := i.cluster.server().ScrubAndRepair(ctx)
-		if err != nil {
-			return err
-		}
-		if len(res.Unrepairable) != 0 {
-			return fmt.Errorf("bitrot left %d unrepaired shards: %v", len(res.Unrepairable), res.Unrepairable)
-		}
-		if res.ShardsRepaired != 0 {
-			return nil
+		// Repair deliberately defers a vlog with an active client operation.
+		// Race-enabled workers hold those references longer, so give that one
+		// vlog a few chances to quiesce before deciding scrub missed the damage.
+		for scrubAttempt := 0; scrubAttempt < 10; scrubAttempt++ {
+			res, err := i.cluster.server().ScrubAndRepair(ctx)
+			if err != nil {
+				return err
+			}
+			if len(res.Unrepairable) != 0 {
+				return fmt.Errorf("bitrot left %d unrepaired shards: %v", len(res.Unrepairable), res.Unrepairable)
+			}
+			if res.ShardsRepaired != 0 {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			time.Sleep(time.Millisecond)
 		}
 
 		// Explicit maintenance can move the chosen plog between selection and
