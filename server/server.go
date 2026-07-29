@@ -353,16 +353,20 @@ func (s *Server) Recover(ctx context.Context) error {
 	// otherwise-accessible directory is NOT a disk failure -- vlog files can be
 	// removed out-of-band (e.g. tearing down a bucket's vlogs) -- so those shards
 	// are stubbed offline in the open loop while the disk keeps serving the rest.
-	// Probing once per disk keeps the decision order-independent.
-	probed := make(map[uint32]bool)
-	for _, info := range plogInfos {
-		if probed[info.DiskID] || !s.diskReachableLocked(info.DiskID) {
-			continue // unconfigured-default aside, already probed/failed/detached/offline
+	// Probe every configured live disk, including empty ones. Iterating plogs here
+	// would miss a newly attached empty disk whose mount disappeared before the
+	// next restart, leaving it active and eligible for placement.
+	for diskID := range s.diskRoots {
+		state := s.diskState[diskID]
+		if state != meta.DiskActive && state != meta.DiskDraining {
+			continue
 		}
-		probed[info.DiskID] = true
-		if fi, err := os.Stat(s.diskRoot(info.DiskID)); err != nil || !fi.IsDir() {
-			if err := s.setDiskStateLocked(ctx, info.DiskID, meta.DiskFailed); err != nil {
-				return fmt.Errorf("fail disk %d with inaccessible root: %w", info.DiskID, err)
+		if s.nodeState[s.nodeOf(diskID)] == meta.NodeFailed {
+			continue
+		}
+		if fi, err := os.Stat(s.diskRoot(diskID)); err != nil || !fi.IsDir() {
+			if err := s.setDiskStateLocked(ctx, diskID, meta.DiskFailed); err != nil {
+				return fmt.Errorf("fail disk %d with inaccessible root: %w", diskID, err)
 			}
 		}
 	}

@@ -647,3 +647,37 @@ func TestRecoverFailedDiskGetsReprotected(t *testing.T) {
 		t.Fatal("payload changed after reprotect")
 	}
 }
+
+func TestRecoverMarksEmptyMissingDiskFailed(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	root := filepath.Join(dir, "empty-disk")
+	s1 := NewServerWithDiskRoots(db, map[uint32]string{1: root})
+	s1.SetMaintenanceInterval(0)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s1.CloseStorage()
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+
+	s2 := NewServerWithDiskRoots(db, map[uint32]string{1: root})
+	s2.SetMaintenanceInterval(0)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s2.CloseStorage()
+	if got := s2.DiskStates()[1]; got != meta.DiskFailed {
+		t.Fatalf("empty disk state after its root vanished = %q, want %q", got, meta.DiskFailed)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing empty disk root was recreated during recovery: %v", err)
+	}
+}
