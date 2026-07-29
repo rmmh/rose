@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/rmmh/rose/meta"
+	pb "github.com/rmmh/rose/proto"
 )
 
 // newNodeServer builds a recovered server whose disks are grouped onto nodes per
@@ -202,6 +204,50 @@ func TestNodeReturnCancelsReprotect(t *testing.T) {
 	}
 	if got := s.DiskStates()[1]; got != meta.DiskActive {
 		t.Fatalf("disk 1 state = %q, want active (restored when the node returned)", got)
+	}
+}
+
+func TestNodeFailureTakesMountedPlogsOffline(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 1)
+	made, err := s.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "NONE",
+		DataShards:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("node failure must cut off mounted storage")
+	written, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: made.GetVlogId(), TxnId: 1, Buffer: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetNodeState(ctx, 1, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: made.GetVlogId(), Offset: written.GetOffset(), Length: uint32(len(payload)),
+	}); err == nil {
+		t.Fatal("ReadVlog served bytes from a failed node's mounted plog")
+	}
+
+	if err := s.SetNodeState(ctx, 1, meta.NodeWorking); err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: made.GetVlogId(), Offset: written.GetOffset(), Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload) {
+		t.Fatalf("read after node return = %q, want %q", read.GetBuffer(), payload)
 	}
 }
 

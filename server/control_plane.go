@@ -58,23 +58,63 @@ func (s *Server) SetNodeState(ctx context.Context, nodeID uint32, state string) 
 	if err := s.db.SetNodeState(ctx, nodeID, state); err != nil {
 		return err
 	}
+	durableCtx := context.WithoutCancel(ctx)
 	if state == meta.NodeWorking {
 		delete(s.nodeState, nodeID)
 		// A recovered server intentionally leaves a failed node's plogs closed.
 		// Before cancelling its reprotect, reopen those original files and remount
 		// the affected vlogs.  Otherwise a cold restart followed by node return
 		// would mark the disk active while its vlog still contains offline clients.
-		if err := s.reopenNodePlogsLocked(ctx, nodeID); err != nil {
+		if err := s.reopenNodePlogsLocked(durableCtx, nodeID); err != nil {
 			// Do not leave the disk live if its promised return did not make the
 			// original bytes reachable. Keep the durable and cached liveness gates
 			// conservative so commits remain read-only until repair can proceed.
-			_ = s.db.SetNodeState(ctx, nodeID, meta.NodeFailed)
+			_ = s.db.SetNodeState(durableCtx, nodeID, meta.NodeFailed)
 			s.nodeState[nodeID] = meta.NodeFailed
 			return err
 		}
-		return s.cancelNodeReprotectsLocked(ctx, nodeID)
+		return s.cancelNodeReprotectsLocked(durableCtx, nodeID)
 	}
 	s.nodeState[nodeID] = state
+	return s.offlineNodePlogsLocked(durableCtx, nodeID)
+}
+
+// offlineNodePlogsLocked makes an in-process node failure behave like a real
+// disconnected node: its open plog clients stop serving immediately and every
+// affected vlog is rebuilt with offline clients. The caller must hold vlogMu.
+func (s *Server) offlineNodePlogsLocked(ctx context.Context, nodeID uint32) error {
+	infos, err := s.db.ListPlogs(ctx)
+	if err != nil {
+		return err
+	}
+	var offline []uint32
+	affected := make(map[uint32]bool)
+	for _, info := range infos {
+		if s.nodeOf(info.DiskID) != nodeID {
+			continue
+		}
+		offline = append(offline, info.ID)
+		vlogIDs, err := s.db.VlogsForPlog(ctx, info.ID)
+		if err != nil {
+			return err
+		}
+		for _, vlogID := range vlogIDs {
+			affected[vlogID] = true
+		}
+	}
+	for _, plogID := range offline {
+		if p, ok := s.plogs[plogID]; ok {
+			_ = p.Close()
+			delete(s.plogs, plogID)
+		}
+		s.offlinePlogs[plogID] = true
+	}
+	for vlogID := range affected {
+		s.clearActiveVlogLocked(vlogID)
+		if err := s.remountVlogLocked(ctx, vlogID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
