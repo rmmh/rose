@@ -657,6 +657,7 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 				_ = p.Close()
 				delete(s.plogs, sp.plogID)
 			}
+			_ = os.Remove(s.plogPath(sp.diskID, sp.plogID))
 		}
 		if cleanupErr := s.db.DiscardEmptyVlog(ctx, id); cleanupErr != nil {
 			retErr = errors.Join(retErr, cleanupErr)

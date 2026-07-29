@@ -350,6 +350,13 @@ func TestVlogProvisioningRollsBackPartialFailure(t *testing.T) {
 	if len(s.vlogs) != 0 || len(s.plogs) != 0 {
 		t.Fatalf("failed MakeVlog left memory state: %d vlogs, %d plogs", len(s.vlogs), len(s.plogs))
 	}
+	files, err := filepath.Glob(filepath.Join(s.diskRoots[1], "plog-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("failed MakeVlog left %d physical plog files: %v", len(files), files)
+	}
 }
 
 func TestDiskStatePersistsAcrossRecover(t *testing.T) {
