@@ -619,6 +619,14 @@ func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
 
 func (v *Vlog) Length() int64 { return atomic.LoadInt64(&v.length) }
 
+// WaitForWrites waits for the append/commit currently owning this vlog to
+// finish. A topology caller invokes it only while preventing new RPCs from
+// resolving the vlog, making the mounted cursor stable before remount.
+func (v *Vlog) WaitForWrites() {
+	v.writeMu.Lock()
+	v.writeMu.Unlock()
+}
+
 // ReconcileShardLengths discards any uncommitted tail a backing plog grew past
 // the committed vlog length, restoring the invariant that each shard's plog
 // cursor matches where the vlog -- whose length is restored authoritatively from

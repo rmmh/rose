@@ -150,6 +150,16 @@ func (s *Server) offlinePlogsLocked(ctx context.Context, matches func(meta.PlogI
 	for _, plogID := range offline {
 		offlineSet[plogID] = true
 	}
+	// An RPC that already resolved a vlog can still be appending after this
+	// topology transition acquired vlogMu. Let writes on affected vlogs finish
+	// before snapshotting their cursor; vlogMu prevents a new RPC from starting
+	// meanwhile. Otherwise the old vlog can advance after we remount its
+	// replacement, and a successful client write disappears at CommitVlog.
+	for vlogID := range affected {
+		if vlog := s.vlogs[vlogID]; vlog != nil {
+			vlog.WaitForWrites()
+		}
+	}
 	// A mirrored quorum write can return before every extra copy catches up.
 	// Before taking the selected copies away, bring each survivor to the mounted
 	// vlog cursor while every possible source is still open.

@@ -561,6 +561,77 @@ func TestNodeReturnRepairsReplicaBeforePublishingWorkingState(t *testing.T) {
 	}
 }
 
+func TestNodeFailurePreservesConcurrentSuccessfulWrite(t *testing.T) {
+	s := newControlPlaneServer(t, 3)
+	ctx := context.Background()
+	vlogID := provision(t, s, "DUPLICATE", 1, 0)
+	mappings, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := make(chan struct{})
+	started := make(chan struct{}, 2)
+	clients := make([]storage.PlogClient, len(mappings))
+	for i, mapping := range mappings {
+		local := &localPlogClient{plog: s.plogs[mapping.PlogID]}
+		if mapping.DiskID == 3 {
+			clients[i] = local
+		} else {
+			clients[i] = &writeFaultClient{block: block, started: started, local: local}
+		}
+	}
+	vlog, err := storage.NewVlog(vlogID, "DUPLICATE", 1, 0, clients, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vlog.SetWriteQuorum(2); err != nil {
+		t.Fatal(err)
+	}
+	s.vlogMu.Lock()
+	s.vlogs[vlogID] = vlog
+	s.vlogMu.Unlock()
+
+	payload := bytes.Repeat([]byte{0x75}, 2*storage.SectorSize)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+			VlogId: vlogID, TxnId: 75, Buffer: payload,
+		})
+		writeDone <- err
+	}()
+	<-started
+	<-started
+
+	stateDone := make(chan error, 1)
+	go func() {
+		stateDone <- s.SetNodeState(ctx, 3, meta.NodeFailed)
+	}()
+	select {
+	case err := <-stateDone:
+		t.Fatalf("node failure remounted during the affected write: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(block)
+	if err := <-stateDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 75}); err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: vlogID, Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload) {
+		t.Fatal("node failure lost the concurrent successful write")
+	}
+}
+
 type readFaultClient struct {
 	data    []byte
 	slow    bool
