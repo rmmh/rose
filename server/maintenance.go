@@ -1169,14 +1169,23 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 	}
 	if info.ProtectionScheme == "DUPLICATE" {
 		source := s.vlogs[vlogID]
-		plog := s.plogs[plogID]
-		if source == nil || plog == nil {
-			return fmt.Errorf("drain: duplicate vlog %d or plog %d is not mounted", vlogID, plogID)
+		if source == nil {
+			return fmt.Errorf("drain: duplicate vlog %d is not mounted", vlogID)
 		}
-		if err := s.catchUpDuplicatePlogLocked(
-			ctx, source, vlogID, plogID, plog, info.Length, info.Length,
-		); err != nil {
-			return fmt.Errorf("drain: catch up plog %d: %w", plogID, err)
+		mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
+		if err != nil {
+			return fmt.Errorf("drain: list duplicate vlog %d copies: %w", vlogID, err)
+		}
+		for _, mapping := range mappings {
+			plog := s.plogs[mapping.PlogID]
+			if plog == nil {
+				continue
+			}
+			if err := s.catchUpDuplicatePlogLocked(
+				ctx, source, vlogID, mapping.PlogID, plog, info.Length, info.Length,
+			); err != nil {
+				return fmt.Errorf("drain: catch up plog %d: %w", mapping.PlogID, err)
+			}
 		}
 	}
 
@@ -1272,7 +1281,8 @@ func (s *Server) remountVlogLocked(ctx context.Context, vlogID uint32) error {
 	}
 	vlog, err := s.mountVlogLocked(ctx, info)
 	if err != nil {
-		return fmt.Errorf("remount vlog %d: %w", vlogID, err)
+		return fmt.Errorf("remount vlog %d (%s catalog length %d): %w",
+			vlogID, info.ProtectionScheme, info.Length, err)
 	}
 	s.vlogs[vlogID] = vlog
 	return nil

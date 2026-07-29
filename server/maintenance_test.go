@@ -479,23 +479,27 @@ func TestReplaceDiskDefersInFlightRawVlogRead(t *testing.T) {
 	}
 }
 
-func TestReplaceDiskCatchesUpSlowCommittedMirror(t *testing.T) {
-	s := newControlPlaneServer(t, 3)
+func TestReplaceDiskCatchesUpAllSlowCommittedMirrors(t *testing.T) {
+	s := newControlPlaneServer(t, 4)
 	ctx := context.Background()
 	vlogID := provision(t, s, "DUPLICATE", 1, 0)
 	mappings, err := s.db.VlogShardDisks(ctx, vlogID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(mappings) != 3 {
-		t.Fatalf("duplicate mappings = %d, want 3", len(mappings))
+	if len(mappings) != 4 {
+		t.Fatalf("duplicate mappings = %d, want 4", len(mappings))
 	}
 
-	slow := mappings[2]
+	slow := mappings[2:]
+	slowPlogs := map[uint32]bool{
+		slow[0].PlogID: true,
+		slow[1].PlogID: true,
+	}
 	clients := make([]storage.PlogClient, len(mappings))
 	for i, mapping := range mappings {
 		local := &localPlogClient{plog: s.plogs[mapping.PlogID]}
-		if mapping.PlogID == slow.PlogID {
+		if slowPlogs[mapping.PlogID] {
 			clients[i] = &writeFaultClient{slow: true, local: local}
 		} else {
 			clients[i] = local
@@ -521,18 +525,20 @@ func TestReplaceDiskCatchesUpSlowCommittedMirror(t *testing.T) {
 	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 73}); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.plogs[slow.PlogID].LogicalLength(); got != 0 {
-		t.Fatalf("slow mirror length = %d, want 0 before relocation", got)
+	for _, mapping := range slow {
+		if got := s.plogs[mapping.PlogID].LogicalLength(); got != 0 {
+			t.Fatalf("slow mirror %d length = %d, want 0 before relocation", mapping.PlogID, got)
+		}
 	}
 
 	newRoot := filepath.Join(t.TempDir(), "replacement")
 	if err := os.MkdirAll(newRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AttachDiskOnNode(ctx, 4, 4, newRoot, 0); err != nil {
+	if err := s.AttachDiskOnNode(ctx, 5, 5, newRoot, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplaceDiskWith(ctx, slow.DiskID, 4); err != nil {
+	if err := s.ReplaceDiskWith(ctx, slow[0].DiskID, 5); err != nil {
 		t.Fatal(err)
 	}
 	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
