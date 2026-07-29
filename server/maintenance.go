@@ -327,17 +327,29 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	}
 	s.plogs[newPlogID] = np
 
-	if err := s.db.ReplaceShardPlog(ctx, vlogID, shardIdx, lostPlogID, newPlogID); err != nil {
+	if err := ctx.Err(); err != nil {
+		return discard(err)
+	}
+	// The regenerated file is complete and durable. Finish the authoritative
+	// repoint and remount even if the initiating RPC is canceled after this
+	// admission point, so an ambiguous response cannot strand the live vlog on
+	// the deleted old catalog row.
+	durableCtx := context.WithoutCancel(ctx)
+	if err := s.db.ReplaceShardPlog(durableCtx, vlogID, shardIdx, lostPlogID, newPlogID); err != nil {
 		return discard(err)
 	}
 	delete(s.plogs, lostPlogID)
 	delete(s.offlinePlogs, lostPlogID)
+	s.clearActiveVlogLocked(vlogID)
+	if err := s.remountVlogLocked(durableCtx, vlogID); err != nil {
+		return err
+	}
 
 	if info.ProtectionScheme == "DUPLICATE" {
 		// Quorum writes may leave a non-quorum mirror behind. Reprotection is
 		// about to remount every reachable copy at the committed vlog length, so
 		// heal any lagging survivors from the still-mounted readable vlog first.
-		mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
+		mappings, err := s.db.ListVlogPlogs(durableCtx, vlogID)
 		if err != nil {
 			return err
 		}
@@ -347,14 +359,13 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 			if plog == nil {
 				continue
 			}
-			if err := s.catchUpDuplicatePlogLocked(ctx, source, vlogID, mapping.PlogID, plog, info.Length); err != nil {
+			if err := s.catchUpDuplicatePlogLocked(durableCtx, source, vlogID, mapping.PlogID, plog, info.Length); err != nil {
 				return err
 			}
 		}
 	}
 
-	s.clearActiveVlogLocked(vlogID)
-	return s.remountVlogLocked(ctx, vlogID)
+	return nil
 }
 
 // readSurvivingCopyLocked returns the full logical bytes of any surviving mirror
