@@ -58,6 +58,12 @@ type FileHandle struct {
 	writeTouched bool
 }
 
+// Every Read variant is a unary RPC, so its complete result must fit in memory.
+// This is deliberately a result bound rather than a request bound: callers may
+// ask for an enormous range on a small object and still receive the short bytes
+// before EOF, but must chunk a genuinely large response.
+const maxUnaryReadBytes = int64(64 << 20)
+
 func (h *FileHandle) path() string {
 	if p := h.pathPtr.Load(); p != nil {
 		return *p
@@ -636,10 +642,21 @@ func (s *Server) readChunksAt(ctx context.Context, chunks []meta.ChunkPlacement,
 	if length <= 0 {
 		return nil, nil
 	}
+	var total int64
+	for _, chunk := range chunks {
+		total += int64(chunk.LogicalLen)
+	}
+	if off >= total {
+		return nil, nil
+	}
+	resultLen := min(length, total-off)
+	if resultLen > maxUnaryReadBytes {
+		return nil, fmt.Errorf("read result length %d exceeds unary limit %d", resultLen, maxUnaryReadBytes)
+	}
 	// The requested length may be much larger than the bytes available before
 	// EOF. Never use the untrusted request directly as an allocation capacity.
 	const readPreallocLimit = int64(1 << 20)
-	capacity := min(length, readPreallocLimit)
+	capacity := min(resultLen, readPreallocLimit)
 	out := make([]byte, 0, int(capacity))
 	var cur int64
 	for _, chunk := range chunks {
@@ -1803,6 +1820,10 @@ func (s *Server) ReadPlog(ctx context.Context, req *pb.ReadPlogRequest) (*pb.Rea
 	if !ok {
 		return nil, fmt.Errorf("plog not found")
 	}
+	available := plog.LogicalLength() - int64(req.GetOffset())
+	if available > 0 && min(int64(req.GetLength()), available) > maxUnaryReadBytes {
+		return nil, fmt.Errorf("plog read result exceeds unary limit %d", maxUnaryReadBytes)
+	}
 	data, err := plog.Read(int64(req.GetOffset()), int(req.GetLength()))
 	if err != nil {
 		return nil, err
@@ -1833,6 +1854,10 @@ func (s *Server) ReadVlog(ctx context.Context, req *pb.ReadVlogRequest) (*pb.Rea
 	}
 	defer s.endVlogOp(req.GetVlogId())
 
+	available := v.Length() - int64(req.GetOffset())
+	if available > 0 && min(int64(req.GetLength()), available) > maxUnaryReadBytes {
+		return nil, fmt.Errorf("vlog read result exceeds unary limit %d", maxUnaryReadBytes)
+	}
 	data, err := v.Read(ctx, int64(req.GetOffset()), int(req.GetLength()))
 	if err != nil {
 		return nil, err

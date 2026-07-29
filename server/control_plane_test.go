@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/rmmh/rose/meta"
 	pb "github.com/rmmh/rose/proto"
+	"github.com/rmmh/rose/storage"
 )
 
 // newControlPlaneServer builds a recovered server with diskCount independent
@@ -89,6 +91,32 @@ func TestMakeVlogRejectsInvalidShardGeometryWithoutPanicking(t *testing.T) {
 		if _, err := s.MakeVlog(ctx, &req); err == nil {
 			t.Errorf("MakeVlog(%+v) succeeded", req)
 		}
+	}
+}
+
+type unexpectedReadClient struct{}
+
+func (unexpectedReadClient) Write(context.Context, int64, []byte) (int64, error) {
+	return 0, fmt.Errorf("unexpected write")
+}
+
+func (unexpectedReadClient) Read(context.Context, int64, int) ([]byte, error) {
+	return nil, fmt.Errorf("read client reached")
+}
+
+func TestReadVlogRejectsUnboundedUnaryResultBeforeStorage(t *testing.T) {
+	vlog, err := storage.NewVlog(99, "NONE", 1, 0, []storage.PlogClient{
+		unexpectedReadClient{},
+	}, maxUnaryReadBytes+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{vlogs: map[uint32]*storage.Vlog{99: vlog}}
+	if _, err := s.ReadVlog(context.Background(), &pb.ReadVlogRequest{
+		VlogId: 99,
+		Length: uint32(maxUnaryReadBytes + 1),
+	}); err == nil || !strings.Contains(err.Error(), "exceeds unary limit") {
+		t.Fatalf("unbounded vlog read error = %v, want unary limit rejection", err)
 	}
 }
 

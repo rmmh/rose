@@ -630,6 +630,38 @@ func TestHugeReadLengthStopsAtCommittedEOF(t *testing.T) {
 	}
 }
 
+func TestSparseWritableHandleRejectsUnboundedReadAllocation(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	open, err := s.Open(ctx, &pb.OpenRequest{
+		Path:         "/sparse-read-allocation",
+		OperationKey: "sparse-read-allocation",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, &pb.WriteRequest{
+		Handle: open.GetHandle(),
+		Offset: math.MaxInt64 - 1,
+		Buffer: []byte{1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The sparse cache now has logical length MaxInt64. Before the cache bound,
+	// this request reached make([]byte, MaxInt64) and panicked the process.
+	if _, err := s.Read(ctx, &pb.ReadRequest{
+		Handle: open.GetHandle(),
+		Length: math.MaxInt64,
+	}); err == nil || !strings.Contains(err.Error(), "exceeds unary limit") {
+		t.Fatalf("unbounded sparse read error = %v, want unary limit rejection", err)
+	}
+
+	if err := s.AbortHandle(ctx, open.GetHandle()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestZeroLengthWriteDoesNotExtendFile(t *testing.T) {
 	ctx := context.Background()
 	s := newServer(t)

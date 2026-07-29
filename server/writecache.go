@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 
@@ -186,6 +187,14 @@ func (c *writeCache) readLocked(ctx context.Context, off, length int64) ([]byte,
 	}
 	if end <= off {
 		return nil, nil
+	}
+	// A writable sparse handle can have a logical size near MaxInt64 after a
+	// tiny write at a huge offset. Read is a unary RPC, so materializing that
+	// zero-filled hole in one response would panic or exhaust the server. Large
+	// files remain readable through bounded requests, while committed reads can
+	// still accept an enormous requested length and stop cheaply at a small EOF.
+	if end-off > maxUnaryReadBytes {
+		return nil, fmt.Errorf("read result length %d exceeds unary limit %d", end-off, maxUnaryReadBytes)
 	}
 	out := make([]byte, end-off) // zero-filled: holes within length read as zero
 
