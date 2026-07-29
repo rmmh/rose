@@ -14,11 +14,8 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
+	"github.com/rmmh/rose/uid"
 )
-
-// opSeq makes each Create's write-operation key unique within a process so a
-// fresh file always gets its own idempotent write operation.
-var opSeq atomic.Uint64
 
 // mountOwner attributes every node to the process that mounted the filesystem,
 // so the mounting user can read and write it (FUSE nodes default to uid/gid 0).
@@ -172,7 +169,7 @@ func (d *RoseDir) Create(ctx context.Context, name string, flags uint32, mode ui
 	// Bind a write operation up front so the file is published on Close even if
 	// nothing is written (e.g. `touch`); otherwise a zero-write handle closes
 	// without ever creating a file head.
-	key := fmt.Sprintf("fuse-create-%s-%d-%d", childPath, time.Now().UnixNano(), opSeq.Add(1))
+	key := fmt.Sprintf("fuse-create-%s-%s", childPath, uid.New())
 	resp, err := d.srv.Open(ctx, &pb.OpenRequest{Path: childPath, OperationKey: key})
 	if err != nil {
 		return nil, nil, 0, opErrno(ctx, err)
@@ -223,7 +220,7 @@ func (f *RoseFile) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 		if h, isRose := fh.(*roseHandle); isRose {
 			req.Handle = h.handle
 		} else {
-			req.OperationKey = fmt.Sprintf("fuse-truncate-%s-%d-%d", f.path, time.Now().UnixNano(), opSeq.Add(1))
+			req.OperationKey = fmt.Sprintf("fuse-truncate-%s-%s", f.path, uid.New())
 		}
 		if _, err := f.srv.Truncate(ctx, req); err != nil {
 			return opErrno(ctx, err)
