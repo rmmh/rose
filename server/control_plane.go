@@ -197,6 +197,10 @@ func (s *Server) reopenPlogsLocked(ctx context.Context, owner string, matches fu
 			affected[vlogID] = true
 		}
 	}
+	if err := s.catchUpReturnedDuplicatesLocked(ctx, reopened); err != nil {
+		discardReopened()
+		return err
+	}
 	// Publish the reopened handles only after every expected file was reachable.
 	// A partial node return must leave the whole node offline so the next retry
 	// revisits every plog and remounts every affected vlog.
@@ -213,6 +217,47 @@ func (s *Server) reopenPlogsLocked(ctx context.Context, owner string, matches fu
 		if p, ok := s.plogs[id]; ok {
 			if err := p.RecoverHashes(ctx, s); err != nil {
 				slog.Warn("failed to recover hashes for reopened plog, continuing", "plogID", id, "error", err)
+			}
+		}
+	}
+	return nil
+}
+
+// catchUpReturnedDuplicatesLocked copies the committed tail a mirror missed
+// while its node or disk was offline. The existing mounted vlog still contains
+// offline stubs for the returned plogs, so its reads come from surviving copies.
+func (s *Server) catchUpReturnedDuplicatesLocked(ctx context.Context, reopened map[uint32]*storage.Plog) error {
+	const copyChunk = 1 << 20
+	for plogID, plog := range reopened {
+		vlogIDs, err := s.db.VlogsForPlog(ctx, plogID)
+		if err != nil {
+			return err
+		}
+		for _, vlogID := range vlogIDs {
+			info, err := s.db.GetVlog(ctx, vlogID)
+			if err != nil {
+				return err
+			}
+			if info.ProtectionScheme != "DUPLICATE" || plog.LogicalLength() >= info.Length {
+				continue
+			}
+			source := s.vlogs[vlogID]
+			if source == nil {
+				return fmt.Errorf("catch up returned plog %d: vlog %d is not mounted", plogID, vlogID)
+			}
+			for offset := plog.LogicalLength(); offset < info.Length; {
+				length := min(int64(copyChunk), info.Length-offset)
+				data, err := source.Read(ctx, offset, int(length))
+				if err != nil {
+					return fmt.Errorf("read vlog %d to catch up returned plog %d: %w", vlogID, plogID, err)
+				}
+				if err := plog.EnsureAppend(offset, data); err != nil {
+					return fmt.Errorf("catch up returned plog %d at %d: %w", plogID, offset, err)
+				}
+				offset += length
+			}
+			if err := plog.Commit(); err != nil {
+				return fmt.Errorf("commit caught-up plog %d: %w", plogID, err)
 			}
 		}
 	}

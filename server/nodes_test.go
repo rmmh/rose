@@ -340,6 +340,52 @@ func TestDuplicateVlogWritesWithMinimumCopiesAfterNodeFailure(t *testing.T) {
 	}
 }
 
+func TestNodeReturnCatchesUpDuplicateWritesCommittedDuringOutage(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 3)
+	made, err := s.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "DUPLICATE",
+		DataShards:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodeState(ctx, 1, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("committed while node one was offline")
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: made.GetVlogId(), TxnId: 7, Buffer: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 7}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetNodeState(ctx, 1, meta.NodeWorking); err != nil {
+		t.Fatalf("node could not return after degraded writes: %v", err)
+	}
+	if got := s.NodeStates()[1]; got != meta.NodeWorking {
+		t.Fatalf("returned node state = %q, want working", got)
+	}
+	if err := s.SetNodeState(ctx, 2, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodeState(ctx, 3, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: made.GetVlogId(), Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload) {
+		t.Fatalf("read after node catch-up = %q, want %q", read.GetBuffer(), payload)
+	}
+}
+
 type readFaultClient struct {
 	data    []byte
 	slow    bool
