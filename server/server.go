@@ -722,6 +722,11 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 	if err != nil {
 		return 0, nil, fmt.Errorf("create vlog in memory: %w", err)
 	}
+	if scheme == "DUPLICATE" {
+		if err := vlog.SetWriteQuorum(min(s.minCopies, clientCount)); err != nil {
+			return 0, nil, err
+		}
+	}
 	s.vlogs[id] = vlog
 	s.setVlogKey(id, storage.DeriveVlogKey(s.clusterKey, vlogUID))
 	cleanup = false
@@ -848,6 +853,11 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 	vlog, err := storage.NewVlog(info.ID, info.ProtectionScheme, int(info.DataShards), int(info.ParityShards), clients, info.Length)
 	if err != nil {
 		return nil, fmt.Errorf("mount vlog %d: %w", info.ID, err)
+	}
+	if info.ProtectionScheme == "DUPLICATE" {
+		if err := vlog.SetWriteQuorum(min(s.minCopies, len(clients))); err != nil {
+			return nil, err
+		}
 	}
 	s.setVlogKey(info.ID, storage.DeriveVlogKey(s.clusterKey, info.UID))
 	// The vlog length is restored authoritatively from the DB; reconcile each

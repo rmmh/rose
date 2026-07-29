@@ -61,6 +61,7 @@ type Vlog struct {
 	dataShards   int
 	parityShards int
 	clients      []PlogClient // Index corresponds to shard index (0 for duplicate)
+	writeQuorum  int
 
 	encoder reedsolomon.Encoder // Only initialized if scheme == "EC"
 }
@@ -109,6 +110,7 @@ func NewVlog(id uint32, scheme string, data, parity int, clients []PlogClient, i
 		dataShards:   data,
 		parityShards: parity,
 		clients:      clients,
+		writeQuorum:  len(clients),
 	}
 
 	if scheme == "EC" {
@@ -123,6 +125,17 @@ func NewVlog(id uint32, scheme string, data, parity int, clients []PlogClient, i
 	}
 
 	return v, nil
+}
+
+// SetWriteQuorum configures how many backing clients must successfully write
+// and commit mirrored data. EC and unprotected vlogs leave this at all clients;
+// a DUPLICATE server sets it to its durability threshold.
+func (v *Vlog) SetWriteQuorum(quorum int) error {
+	if quorum <= 0 || quorum > len(v.clients) {
+		return fmt.Errorf("vlog %d invalid write quorum %d for %d clients", v.id, quorum, len(v.clients))
+	}
+	v.writeQuorum = quorum
+	return nil
 }
 
 // Write appends data to the virtual log and returns the assigned virtual offset.
@@ -141,7 +154,7 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
 		offset := atomic.LoadInt64(&v.length)
-		if err := v.fanout(func(_ int, client PlogClient) error {
+		if err := v.fanoutQuorum(v.writeQuorum, func(_ int, client PlogClient) error {
 			if positioned, ok := client.(positionedPlogClient); ok {
 				return positioned.EnsureAppend(ctx, offset, data)
 			}
@@ -216,20 +229,33 @@ func (v *Vlog) encodeRow(rowData []byte) ([][]byte, error) {
 // fanout runs op against every backing plog client concurrently and returns the
 // first error. Each EC stripe row appends its data and parity columns this way.
 func (v *Vlog) fanout(op func(idx int, client PlogClient) error) error {
+	return v.fanoutQuorum(len(v.clients), op)
+}
+
+func (v *Vlog) fanoutQuorum(quorum int, op func(idx int, client PlogClient) error) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(v.clients))
+	var succeeded atomic.Int64
 	for i, c := range v.clients {
 		wg.Add(1)
 		go func(idx int, client PlogClient) {
 			defer wg.Done()
 			if err := op(idx, client); err != nil {
 				errs <- err
+				return
 			}
+			succeeded.Add(1)
 		}(i, c)
 	}
 	wg.Wait()
 	close(errs)
-	return <-errs
+	if int(succeeded.Load()) >= quorum {
+		return nil
+	}
+	if err := <-errs; err != nil {
+		return err
+	}
+	return fmt.Errorf("vlog %d write quorum %d not met", v.id, quorum)
 }
 
 func totalPartsLen(parts [][]byte) int {
@@ -299,7 +325,7 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) er
 		return fmt.Errorf("unknown protection scheme: %s", v.scheme)
 	}
 	// Mirror schemes write the same bytes at the same logical offset to every copy.
-	if err := v.fanout(func(_ int, client PlogClient) error {
+	if err := v.fanoutQuorum(v.writeQuorum, func(_ int, client PlogClient) error {
 		positioned, ok := client.(positionedPlogClient)
 		if !ok {
 			return fmt.Errorf("vlog %d plog client does not support positioned writes", v.id)
@@ -445,24 +471,13 @@ func ReconstructECShard(dataShards, parityShards int, shards [][]byte) error {
 
 // Commit makes all physical writes issued through this virtual log durable.
 func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
-	var wg sync.WaitGroup
-	errs := make(chan error, len(v.clients))
-	for _, client := range v.clients {
+	return v.fanoutQuorum(v.writeQuorum, func(_ int, client PlogClient) error {
 		committer, ok := client.(committingPlogClient)
 		if !ok {
 			return fmt.Errorf("plog client does not support commit")
 		}
-		wg.Add(1)
-		go func(committer committingPlogClient) {
-			defer wg.Done()
-			if err := committer.Commit(ctx, txnID); err != nil {
-				errs <- err
-			}
-		}(committer)
-	}
-	wg.Wait()
-	close(errs)
-	return <-errs
+		return committer.Commit(ctx, txnID)
+	})
 }
 
 func (v *Vlog) Length() int64 { return atomic.LoadInt64(&v.length) }

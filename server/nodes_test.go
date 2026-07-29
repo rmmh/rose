@@ -251,6 +251,48 @@ func TestNodeFailureTakesMountedPlogsOffline(t *testing.T) {
 	}
 }
 
+func TestDuplicateVlogWritesWithMinimumCopiesAfterNodeFailure(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 3)
+	made, err := s.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "DUPLICATE",
+		DataShards:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodeState(ctx, 1, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := s.CommitReady(ctx, made.GetVlogId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready {
+		t.Fatal("two surviving mirrors should meet the configured commit threshold")
+	}
+
+	payload := []byte("write through the surviving mirrors")
+	written, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: made.GetVlogId(), TxnId: 2, Buffer: payload,
+	})
+	if err != nil {
+		t.Fatalf("commit-ready DUPLICATE write failed with one node down: %v", err)
+	}
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 2}); err != nil {
+		t.Fatalf("commit-ready DUPLICATE commit failed with one node down: %v", err)
+	}
+	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: made.GetVlogId(), Offset: written.GetOffset(), Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload) {
+		t.Fatalf("degraded read = %q, want %q", read.GetBuffer(), payload)
+	}
+}
+
 // TestNodeStatePersistsAcrossRecover checks node liveness survives a restart, so
 // a node failed before a crash keeps its disks out of the live set afterward.
 func TestNodeStatePersistsAcrossRecover(t *testing.T) {
