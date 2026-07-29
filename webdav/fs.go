@@ -18,6 +18,7 @@ import (
 
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
+	"github.com/rmmh/rose/uid"
 	"golang.org/x/net/webdav"
 )
 
@@ -148,7 +149,7 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 		}
 		// Bind a fresh write operation so even a zero-byte PUT publishes a file
 		// head on Close.
-		key := fmt.Sprintf("webdav-%s-%d", path, time.Now().UnixNano())
+		key := fmt.Sprintf("webdav-%s-%s", path, uid.New())
 		resp, err := f.srv.Open(ctx, &pb.OpenRequest{Path: path, OperationKey: key})
 		if err != nil {
 			return nil, err
