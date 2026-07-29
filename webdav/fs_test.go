@@ -15,7 +15,6 @@ import (
 	pb "github.com/rmmh/rose/proto"
 	"github.com/rmmh/rose/server"
 	rosewebdav "github.com/rmmh/rose/webdav"
-	"golang.org/x/net/webdav"
 )
 
 // newDAV stands up a Rose server behind a WebDAV HTTP handler and returns its
@@ -30,14 +29,24 @@ func newDAV(t *testing.T) string {
 	t.Cleanup(func() { _ = db.Close() })
 	srv := server.NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
 
-	h := &webdav.Handler{
-		FileSystem: rosewebdav.New(srv),
-		LockSystem: webdav.NewMemLS(),
-	}
-	ts := httptest.NewServer(h)
+	ts := httptest.NewServer(rosewebdav.NewHandler(srv))
 	t.Cleanup(ts.Close)
 	return ts.URL
 }
+
+type failingRequestBody struct {
+	sent bool
+}
+
+func (b *failingRequestBody) Read(p []byte) (int, error) {
+	if b.sent {
+		return 0, errors.New("client body failed")
+	}
+	b.sent = true
+	return copy(p, "partial upload"), nil
+}
+
+func (*failingRequestBody) Close() error { return nil }
 
 func do(t *testing.T, method, url string, body io.Reader, headers map[string]string) *http.Response {
 	t.Helper()
@@ -233,6 +242,34 @@ func TestWebDAVCancelledPutAbortsHandleAndLease(t *testing.T) {
 	}
 	if _, err := srv.Getattr(context.Background(), &pb.GetattrRequest{Path: "/cancelled"}); err == nil {
 		t.Fatal("cancelled PUT published a partial file")
+	}
+}
+
+func TestWebDAVBodyFailureDoesNotPublishPartialPut(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	srv := server.NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
+	handler := rosewebdav.NewHandler(srv)
+
+	req := httptest.NewRequest(http.MethodPut, "/broken", &failingRequestBody{})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code < 400 {
+		t.Fatalf("failed PUT status = %d, want an error", rec.Code)
+	}
+	if _, err := srv.Getattr(context.Background(), &pb.GetattrRequest{Path: "/broken"}); err == nil {
+		t.Fatal("failed PUT published its partial request body")
+	}
+	var state string
+	if err := db.GetDB().QueryRow("SELECT state FROM write_op").Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != meta.WriteOpCancelled {
+		t.Fatalf("failed PUT write operation state = %q, want %q", state, meta.WriteOpCancelled)
 	}
 }
 

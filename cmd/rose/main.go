@@ -18,7 +18,6 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"golang.org/x/net/webdav"
 	"google.golang.org/grpc"
 
 	rosefuse "github.com/rmmh/rose/fuse"
@@ -148,11 +147,7 @@ func main() {
 	// needs no kernel extension (mount_webdav on macOS, davfs/Explorer elsewhere).
 	var webdavServer *http.Server
 	if *webdavAddr != "" {
-		handler := &webdav.Handler{
-			FileSystem: rosewebdav.New(roseServer),
-			LockSystem: webdav.NewMemLS(),
-		}
-		webdavServer = &http.Server{Addr: *webdavAddr, Handler: handler}
+		webdavServer = &http.Server{Addr: *webdavAddr, Handler: rosewebdav.NewHandler(roseServer)}
 		go func() {
 			log.Printf("Starting WebDAV server on %s", *webdavAddr)
 			if err := webdavServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

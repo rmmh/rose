@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -29,6 +30,45 @@ type FS struct {
 
 // New returns a webdav.FileSystem backed by srv.
 func New(srv *server.Server) *FS { return &FS{srv: srv} }
+
+// NewHandler returns the WebDAV HTTP boundary for Rose. The upstream handler
+// closes the destination even after a request-body read error; wrapping the body
+// lets that failure cancel the file context first, so roseFile.Close aborts the
+// unpublished partial PUT instead of committing it.
+func NewHandler(srv *server.Server) http.Handler {
+	return &cancelBodyErrorHandler{
+		next: &webdav.Handler{
+			FileSystem: New(srv),
+			LockSystem: webdav.NewMemLS(),
+		},
+	}
+}
+
+type cancelBodyErrorHandler struct {
+	next http.Handler
+}
+
+func (h *cancelBodyErrorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	if r.Body != nil {
+		r.Body = &cancelOnReadErrorBody{ReadCloser: r.Body, cancel: cancel}
+	}
+	h.next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+type cancelOnReadErrorBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnReadErrorBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && err != io.EOF {
+		b.cancel()
+	}
+	return n, err
+}
 
 var _ webdav.FileSystem = (*FS)(nil)
 
