@@ -298,6 +298,9 @@ func TestPlogRaggedEdgeVerifiableAcrossRestart(t *testing.T) {
 			if _, err := reopened.Write(0, []byte("append")); !errors.Is(err, ErrBitrot) {
 				t.Fatalf("append after rotted ragged edge = %v, want ErrBitrot", err)
 			}
+			if err := reopened.Commit(); !errors.Is(err, ErrBitrot) {
+				t.Fatalf("commit after rotted ragged edge = %v, want ErrBitrot", err)
+			}
 		})
 	}
 }

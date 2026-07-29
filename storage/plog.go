@@ -812,6 +812,9 @@ func (p *Plog) Scrub() (ScrubResult, error) {
 func (p *Plog) Commit() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.bufCorrupt {
+		return fmt.Errorf("commit plog %d open sector: %w", p.id, ErrBitrot)
+	}
 	raggedLen := len(p.buf)
 	sealed := p.logicalLength - int64(raggedLen)
 	if raggedLen > 0 {
