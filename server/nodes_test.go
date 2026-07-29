@@ -242,3 +242,67 @@ func TestNodeStatePersistsAcrossRecover(t *testing.T) {
 		t.Fatalf("recovered node 1 state = %q, want %q", got, meta.NodeWorking)
 	}
 }
+
+func TestNodeReturnRetryReopensEveryVlogAfterPartialReturn(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := filepath.Join(dir, "disk-1")
+	s1 := NewServerWithDiskRoots(db, map[uint32]string{1: root})
+	s1.SetMaintenanceInterval(0)
+	if err := s1.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s1.StopMaintenanceDriver()
+	first := provision(t, s1, "NONE", 1, 0)
+	second := provision(t, s1, "NONE", 1, 0)
+	firstData := []byte("first vlog must be remounted after the retry")
+	secondData := []byte("second vlog returns later")
+	firstOff := writeVlog(t, s1, first, firstData)
+	secondOff := writeVlog(t, s1, second, secondData)
+	if err := s1.SetNodeState(ctx, 1, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	plogs, err := db.ListPlogs(ctx)
+	if err != nil || len(plogs) != 2 {
+		t.Fatalf("plogs = %v, err = %v", plogs, err)
+	}
+	missing := filepath.Join(root, fmt.Sprintf("plog-%05d", plogs[1].ID))
+	offline := missing + ".offline"
+	if err := os.Rename(missing, offline); err != nil {
+		t.Fatal(err)
+	}
+
+	s2 := NewServerWithDiskRoots(db, map[uint32]string{1: root})
+	s2.SetMaintenanceInterval(0)
+	if err := s2.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s2.StopMaintenanceDriver()
+	if err := s2.SetNodeState(ctx, 1, meta.NodeWorking); err == nil {
+		t.Fatal("partial node return succeeded with a missing plog")
+	}
+	if err := os.Rename(offline, missing); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.SetNodeState(ctx, 1, meta.NodeWorking); err != nil {
+		t.Fatalf("node return retry: %v", err)
+	}
+	for _, tc := range []struct {
+		vlog uint32
+		off  int64
+		data []byte
+	}{{first, firstOff, firstData}, {second, secondOff, secondData}} {
+		got, err := s2.vlogs[tc.vlog].Read(ctx, tc.off, len(tc.data))
+		if err != nil {
+			t.Fatalf("read vlog %d after node return: %v", tc.vlog, err)
+		}
+		if string(got) != string(tc.data) {
+			t.Fatalf("vlog %d data = %q, want %q", tc.vlog, got, tc.data)
+		}
+	}
+}

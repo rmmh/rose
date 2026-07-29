@@ -88,7 +88,12 @@ func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error
 		return err
 	}
 	affected := make(map[uint32]bool)
-	var reopenedIDs []uint32
+	reopened := make(map[uint32]*storage.Plog)
+	discardReopened := func() {
+		for _, p := range reopened {
+			_ = p.Close()
+		}
+	}
 	for _, info := range infos {
 		if s.nodeOf(info.DiskID) != nodeID || !s.offlinePlogs[info.ID] {
 			continue
@@ -98,25 +103,33 @@ func (s *Server) reopenNodePlogsLocked(ctx context.Context, nodeID uint32) error
 		// shard and pass it off as healthy, which would violate the durability gate.
 		p, err := storage.OpenExistingPlog(s.plogPath(info.DiskID, info.ID), info.ID)
 		if err != nil {
+			discardReopened()
 			return fmt.Errorf("reopen plog %d on returned node %d: %w", info.ID, nodeID, err)
 		}
-		s.plogs[info.ID] = p
-		reopenedIDs = append(reopenedIDs, info.ID)
-		delete(s.offlinePlogs, info.ID)
 		mappings, err := s.db.VlogsForPlog(ctx, info.ID)
 		if err != nil {
+			_ = p.Close()
+			discardReopened()
 			return err
 		}
+		reopened[info.ID] = p
 		for _, vlogID := range mappings {
 			affected[vlogID] = true
 		}
+	}
+	// Publish the reopened handles only after every expected file was reachable.
+	// A partial node return must leave the whole node offline so the next retry
+	// revisits every plog and remounts every affected vlog.
+	for id, p := range reopened {
+		s.plogs[id] = p
+		delete(s.offlinePlogs, id)
 	}
 	for vlogID := range affected {
 		if err := s.remountVlogLocked(ctx, vlogID); err != nil {
 			return err
 		}
 	}
-	for _, id := range reopenedIDs {
+	for id := range reopened {
 		if p, ok := s.plogs[id]; ok {
 			if err := p.RecoverHashes(ctx, s); err != nil {
 				slog.Warn("failed to recover hashes for reopened plog, continuing", "plogID", id, "error", err)
