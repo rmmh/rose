@@ -1027,7 +1027,22 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 		delete(s.plogs, plogID)
 	}
 	if err := copyFile(oldPath, newPath); err != nil {
-		return fmt.Errorf("drain: copy plog %d to disk %d: %w", plogID, toDisk, err)
+		copyErr := fmt.Errorf("drain: copy plog %d to disk %d: %w", plogID, toDisk, err)
+		// The source remains authoritative until MovePlogToDisk commits. If only
+		// the destination failed, reopen and remount the source so a failed
+		// maintenance request does not take healthy data offline.
+		reopened, reopenErr := storage.OpenExistingPlog(oldPath, plogID)
+		if reopenErr != nil {
+			return errors.Join(copyErr, fmt.Errorf("drain: restore source plog %d: %w", plogID, reopenErr))
+		}
+		s.plogs[plogID] = reopened
+		s.clearActiveVlogLocked(vlogID)
+		if remountErr := s.remountVlogLocked(context.WithoutCancel(ctx), vlogID); remountErr != nil {
+			_ = reopened.Close()
+			delete(s.plogs, plogID)
+			return errors.Join(copyErr, fmt.Errorf("drain: remount source vlog %d: %w", vlogID, remountErr))
+		}
+		return copyErr
 	}
 	// Until this commits, the source copy remains authoritative.
 	if err := s.db.MovePlogToDisk(ctx, plogID, toDisk); err != nil {

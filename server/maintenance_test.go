@@ -122,6 +122,44 @@ func TestDrainDiskRelocatesShardAndDetaches(t *testing.T) {
 	}
 }
 
+func TestRemoveDiskFailureKeepsHealthySourceReadable(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 2)
+	vlogID := provision(t, s, "NONE", 1, 0)
+	payload := bytes.Repeat([]byte("source remains authoritative"), 300)
+	offset := writeVlog(t, s, vlogID, payload)
+
+	destinationRoot := s.diskRoots[2]
+	blockedRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedRoot, []byte("destination offline"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.diskRoots[2] = blockedRoot
+	req := &pb.RemoveDiskRequest{DiskId: 1}
+	if _, err := s.RemoveDisk(ctx, req); err == nil {
+		t.Fatal("drain onto an unavailable destination succeeded")
+	}
+	got, err := s.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatalf("healthy source became unreadable after failed drain: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("source payload changed after failed drain")
+	}
+
+	s.diskRoots[2] = destinationRoot
+	if _, err := s.RemoveDisk(ctx, req); err != nil {
+		t.Fatalf("drain retry after destination returned: %v", err)
+	}
+	got, err = s.vlogs[vlogID].Read(ctx, offset, len(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("payload changed after retried drain")
+	}
+}
+
 func TestDrainWithoutPlacementRoomFails(t *testing.T) {
 	ctx := context.Background()
 	s := newControlPlaneServer(t, 3) // EC 2+1 occupies all three disks
