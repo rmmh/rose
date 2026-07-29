@@ -631,6 +631,7 @@ func TestScrubRepairDefersInFlightFileRead(t *testing.T) {
 	if scrub.Healthy() {
 		t.Fatal("injected corruption was not detectable")
 	}
+	corruptPlog := s.plogs[mappings[0].PlogID]
 
 	block := make(chan struct{})
 	started := make(chan struct{}, len(mappings))
@@ -690,6 +691,9 @@ func TestScrubRepairDefersInFlightFileRead(t *testing.T) {
 	}
 	if res.ShardsRepaired != 1 {
 		t.Fatalf("repair after read replaced %d shards, want 1", res.ShardsRepaired)
+	}
+	if err := corruptPlog.Commit(); err == nil {
+		t.Fatal("repaired corrupt plog handle remained open")
 	}
 }
 

@@ -338,11 +338,15 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	if err := s.db.ReplaceShardPlog(durableCtx, vlogID, shardIdx, lostPlogID, newPlogID); err != nil {
 		return discard(err)
 	}
+	old := s.plogs[lostPlogID]
 	delete(s.plogs, lostPlogID)
 	delete(s.offlinePlogs, lostPlogID)
 	s.clearActiveVlogLocked(vlogID)
 	if err := s.remountVlogLocked(durableCtx, vlogID); err != nil {
 		return err
+	}
+	if old != nil {
+		_ = old.Close()
 	}
 
 	if info.ProtectionScheme == "DUPLICATE" {
