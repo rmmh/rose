@@ -378,6 +378,9 @@ func readFile(t *testing.T, client pb.RoseClient, path string, n int) []byte {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatalf("close %s: %v", path, err)
+	}
 	return read.GetBuffer()
 }
 

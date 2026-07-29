@@ -96,16 +96,25 @@ func (i *chaosInjector) failAndReprotect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// DUPLICATE vlogs occupy every active disk, so losing one leaves no legal
+	// reprotection destination unless replacement capacity is added first.
+	// Provision a same-node spare, then leave the failed disk failed: the spare
+	// replaces its active capacity after reprotection.
+	node := i.cluster.nodeFor(disk)
+	spare := i.cluster.nextDiskID()
+	root := filepath.Join(filepath.Dir(i.cluster.rootFor(disk)), fmt.Sprintf("disk-%d", spare))
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
+	}
 	s := i.cluster.server()
+	if err := s.AttachDiskOnNode(ctx, spare, node, root, 0); err != nil {
+		return err
+	}
+	i.cluster.addDisk(spare, node, root)
 	if err := s.SetDiskState(ctx, disk, meta.DiskFailed); err != nil {
 		return err
 	}
-	if err := s.ReprotectDisk(ctx, disk); err != nil {
-		return err
-	}
-	// The old disk no longer owns any shard after reprotect. Returning it to the
-	// active pool supplies capacity for later faults without weakening placement.
-	return s.SetDiskState(ctx, disk, meta.DiskActive)
+	return s.ReprotectDisk(ctx, disk)
 }
 
 func (i *chaosInjector) drainAndReplace(ctx context.Context) error {
