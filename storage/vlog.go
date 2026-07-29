@@ -154,11 +154,15 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
 		offset := atomic.LoadInt64(&v.length)
+		// Quorum fanout may return while a canceled slow copy is still unwinding.
+		// Keep an immutable owned payload alive for those loser goroutines rather
+		// than letting them retain the caller's RPC buffer after Write returns.
+		payload := append([]byte(nil), data...)
 		if err := v.fanoutQuorum(ctx, v.writeQuorum, func(opCtx context.Context, _ int, client PlogClient) error {
 			if positioned, ok := client.(positionedPlogClient); ok {
-				return positioned.EnsureAppend(opCtx, offset, data)
+				return positioned.EnsureAppend(opCtx, offset, payload)
 			}
-			got, err := client.Write(opCtx, txnID, data)
+			got, err := client.Write(opCtx, txnID, payload)
 			if err == nil && got != offset {
 				return fmt.Errorf("vlog %d plog append offset %d, want %d", v.id, got, offset)
 			}
@@ -334,13 +338,19 @@ func (v *Vlog) EnsureWrite(ctx context.Context, offset int64, parts [][]byte) er
 		return fmt.Errorf("unknown protection scheme: %s", v.scheme)
 	}
 	// Mirror schemes write the same bytes at the same logical offset to every copy.
+	// Own the part slices because quorum fanout can return before a canceled slow
+	// copy exits, while the caller is then free to reuse its buffers.
+	ownedParts := make([][]byte, len(parts))
+	for i, part := range parts {
+		ownedParts[i] = append([]byte(nil), part...)
+	}
 	if err := v.fanoutQuorum(ctx, v.writeQuorum, func(opCtx context.Context, _ int, client PlogClient) error {
 		positioned, ok := client.(positionedPlogClient)
 		if !ok {
 			return fmt.Errorf("vlog %d plog client does not support positioned writes", v.id)
 		}
 		partOffset := offset
-		for _, part := range parts {
+		for _, part := range ownedParts {
 			if len(part) == 0 {
 				continue
 			}
