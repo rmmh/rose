@@ -11,6 +11,12 @@ import (
 	"testing"
 )
 
+type noRecoveredChunks struct{}
+
+func (noRecoveredChunks) RecoverChunks(context.Context, uint32, int64, int64) ([]RecoveredChunk, error) {
+	return nil, nil
+}
+
 func tempPlog(t *testing.T, name string) (*Plog, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
@@ -256,6 +262,45 @@ func TestPlogTrailingBlockVerifiableAcrossRestart(t *testing.T) {
 	defer blind.Close()
 	if _, err := blind.Read(0, 3*SectorSize); err != nil {
 		t.Fatalf("with the trailer gone the corruption should be undetected, got %v", err)
+	}
+}
+
+func TestPlogLostTrailerWithoutCatalogProofStaysCorrupt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plog")
+	p, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 3*SectorSize)
+	rand.New(rand.NewSource(17)).Read(payload)
+	if _, err := p.Write(0, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model a torn trailer plus media corruption while the node is down.
+	corruptByte(t, path, info.Size()-SectorSize)
+	corruptByte(t, path, CalcPhysical(100))
+
+	reopened, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.RecoverHashes(context.Background(), noRecoveredChunks{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.Read(0, SectorSize); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("read after unverifiable trailer loss = %v, want ErrBitrot", err)
 	}
 }
 

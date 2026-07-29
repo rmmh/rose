@@ -945,16 +945,23 @@ func (p *Plog) RecoverHashes(ctx context.Context, recoverer ChunkRecoverer) erro
 
 	blockStartPhys := CalcPhysical(blockStart)
 	sealedPhys := CalcPhysical(sealed)
+	numSectors := int((sealed - blockStart) / SectorSize)
 
 	chunks, err := recoverer.RecoverChunks(ctx, p.id, blockStartPhys, sealedPhys)
 	if err != nil {
 		return err
 	}
 	if len(chunks) == 0 {
+		// The trailer was unavailable and the catalog cannot authenticate this
+		// open block (notably an EC parity shard has no direct chunk rows).
+		// Never bless the current disk bytes by hashing them: a torn/corrupt disk
+		// could then become the new source of truth. Deliberately nonmatching
+		// hashes make reads and scrub report the shard corrupt so redundancy can
+		// rebuild it.
+		p.hashes = make([]byte, numSectors*HashSize)
 		return nil
 	}
 
-	numSectors := int((sealed - blockStart) / SectorSize)
 	newHashes := make([]byte, 0, numSectors*HashSize)
 
 	// Cache read chunks by their Hash to avoid redundant physical reads and validation
