@@ -758,3 +758,27 @@ func TestDrainResumesAfterRestart(t *testing.T) {
 		t.Fatal("payload changed across resumed drain")
 	}
 }
+
+func TestStopMaintenanceDriverJoinsWorker(t *testing.T) {
+	db, err := meta.OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := NewServer(db)
+	s.SetMaintenanceInterval(time.Hour)
+	s.startMaintenanceDriver()
+
+	s.maintenanceMu.Lock()
+	done := s.maintenanceDone
+	s.maintenanceMu.Unlock()
+	if done == nil {
+		t.Fatal("maintenance driver did not publish its completion signal")
+	}
+	s.StopMaintenanceDriver()
+	select {
+	case <-done:
+	default:
+		t.Fatal("StopMaintenanceDriver returned before its worker exited")
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rmmh/rose/meta"
+	"github.com/rmmh/rose/storage"
 )
 
 type chaosInjector struct {
@@ -56,7 +57,10 @@ func (i *chaosInjector) inject(ctx context.Context) {
 	// All of these faults retain at least an EC read quorum: node outages are
 	// one at a time; disk maintenance is completed before the next injection.
 	var err error
-	switch i.rng.Intn(5) {
+	choice := i.rng.Intn(5)
+	names := [...]string{"node-outage", "fail-reprotect", "drain-replace", "bitrot-repair", "restart"}
+	i.t.Logf("chaos fault %d: %s", i.faults.Load()+1, names[choice])
+	switch choice {
 	case 0:
 		err = i.nodeOutage(ctx)
 	case 1:
@@ -66,7 +70,9 @@ func (i *chaosInjector) inject(ctx context.Context) {
 	case 3:
 		err = i.bitrotAndRepair(ctx)
 	case 4:
+		i.work.restartMu.Lock()
 		i.cluster.restart()
+		i.work.restartMu.Unlock()
 	}
 	if ctx.Err() != nil {
 		return // run deadline interrupted a maintenance pass; final sweep is strict
@@ -147,14 +153,16 @@ func (i *chaosInjector) bitrotAndRepair(ctx context.Context) error {
 		return err
 	}
 	defer f.Close()
-	// Offset 100 is inside the first hash-protected data sector for every plog
-	// created by this workload (writes are at least 1 KiB).
+	// Logical offset 100 is inside the first hash-protected data sector for every
+	// plog created by this workload (writes are at least 1 KiB). Convert it to a
+	// physical offset so the leading superblock is not corrupted instead.
 	b := []byte{0}
-	if _, err = f.ReadAt(b, 100); err != nil {
+	offset := storage.CalcPhysical(100)
+	if _, err = f.ReadAt(b, offset); err != nil {
 		return err
 	}
 	b[0] ^= 0xff
-	if _, err = f.WriteAt(b, 100); err != nil {
+	if _, err = f.WriteAt(b, offset); err != nil {
 		return err
 	}
 	if err = f.Sync(); err != nil {

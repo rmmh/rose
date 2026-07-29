@@ -37,6 +37,7 @@ import (
 	"github.com/rmmh/rose/server"
 	"github.com/rmmh/rose/storage"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -253,6 +254,15 @@ func (c *chaosCluster) client() pb.RoseClient {
 	c.t.Helper()
 	conn, err := grpc.NewClient("passthrough:///rose",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  5 * time.Millisecond,
+				Multiplier: 1.2,
+				Jitter:     0,
+				MaxDelay:   25 * time.Millisecond,
+			},
+			MinConnectTimeout: 100 * time.Millisecond,
+		}),
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
 			c.mu.Lock()
 			lis := c.lis

@@ -199,7 +199,12 @@ type workload struct {
 
 	snapMu  sync.RWMutex // RLock: a commit is in flight; Lock: taking a snapshot
 	maintMu sync.Mutex   // at most one GC+compaction pass at a time
-	snaps   struct {
+	// restartMu lets the single-process restart model wait until no old-server
+	// RPC is in flight before closing its DB and storage. A real process exit
+	// terminates those goroutines; letting them continue against closed shared
+	// objects would be a harness artifact rather than a crash simulation.
+	restartMu sync.RWMutex
+	snaps     struct {
 		mu  sync.Mutex
 		ids []uint64
 	}
@@ -238,7 +243,9 @@ func (w *workload) run(ctx context.Context, workers int, seed int64) {
 			client := w.cluster.client()
 			rng := rand.New(rand.NewSource(seed + int64(workerID)*1_000_003))
 			for ctx.Err() == nil {
+				w.restartMu.RLock()
 				w.step(ctx, client, workerID, rng)
+				w.restartMu.RUnlock()
 			}
 		}(id)
 	}
@@ -287,14 +294,14 @@ func (w *workload) doMaintenance(ctx context.Context) {
 	defer cancel()
 	srv := w.cluster.server()
 	if _, err := srv.GC(mctx); err != nil {
-		w.recordOpErr(ctx, err)
+		w.recordOpErr(ctx, fmt.Errorf("maintenance GC: %w", err))
 		return
 	}
 	// A low dead-bytes floor so the modest writes of this workload still trigger
 	// reclamation on the RAM disk.
 	policy := server.CompactionPolicy{MinWasteRatio: 0.25, MinDeadBytes: 1 << 20, MaxJobs: 4}
 	if _, err := srv.Compact(mctx, policy); err != nil {
-		w.recordOpErr(ctx, err)
+		w.recordOpErr(ctx, fmt.Errorf("maintenance compact: %w", err))
 	}
 }
 
@@ -321,17 +328,17 @@ func (w *workload) doWrite(ctx context.Context, client pb.RoseClient, workerID i
 
 	open, err := client.Open(ctx, &pb.OpenRequest{Path: path})
 	if err != nil {
-		w.recordOpErr(ctx, err)
+		w.recordOpErr(ctx, fmt.Errorf("write open %s: %w", path, err))
 		return
 	}
 	// A whole-file overwrite replaces the resource: truncate any prior (possibly
 	// longer) content to zero so the committed version is exactly `data`.
 	if _, err := client.Truncate(ctx, &pb.TruncateRequest{Handle: open.GetHandle(), Size: 0}); err != nil {
-		w.recordOpErr(ctx, err)
+		w.recordOpErr(ctx, fmt.Errorf("write truncate %s: %w", path, err))
 		return
 	}
 	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: data}); err != nil {
-		w.recordOpErr(ctx, err)
+		w.recordOpErr(ctx, fmt.Errorf("write data %s: %w", path, err))
 		return
 	}
 	_, err = client.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()})
@@ -346,7 +353,7 @@ func (w *workload) doWrite(ctx context.Context, client pb.RoseClient, workerID i
 			}
 			return
 		}
-		w.recordOpErr(ctx, err)
+		w.recordOpErr(ctx, fmt.Errorf("write close %s: %w", path, err))
 		return
 	}
 	w.oracle.put(path, digestOf(data))
@@ -450,10 +457,12 @@ func (w *workload) doSnapshotCreate(ctx context.Context, client pb.RoseClient, w
 }
 
 func (w *workload) doSnapshotVerify(ctx context.Context, client pb.RoseClient, rng *rand.Rand) {
-	id, ok := w.randomSnapshot(rng)
-	if !ok {
+	w.snaps.mu.Lock()
+	defer w.snaps.mu.Unlock()
+	if len(w.snaps.ids) == 0 {
 		return
 	}
+	id := w.snaps.ids[rng.Intn(len(w.snaps.ids))]
 	frozen, ok := w.oracle.snapshotState(id)
 	if !ok {
 		return
@@ -500,29 +509,19 @@ func (w *workload) doSnapshotVerify(ctx context.Context, client pb.RoseClient, r
 
 func (w *workload) doSnapshotDelete(ctx context.Context, client pb.RoseClient) {
 	w.snaps.mu.Lock()
+	defer w.snaps.mu.Unlock()
 	if len(w.snaps.ids) <= 1 { // keep at least one around for verification
-		w.snaps.mu.Unlock()
 		return
 	}
 	id := w.snaps.ids[0]
-	w.snaps.ids = w.snaps.ids[1:]
-	w.snaps.mu.Unlock()
 
 	if _, err := client.DeleteSnapshot(ctx, &pb.DeleteSnapshotRequest{SnapshotId: id}); err != nil {
 		w.recordOpErr(ctx, err)
 		return
 	}
+	w.snaps.ids = w.snaps.ids[1:]
 	w.oracle.dropSnapshot(id)
 	w.stats.snapDeletes.Add(1)
-}
-
-func (w *workload) randomSnapshot(rng *rand.Rand) (uint64, bool) {
-	w.snaps.mu.Lock()
-	defer w.snaps.mu.Unlock()
-	if len(w.snaps.ids) == 0 {
-		return 0, false
-	}
-	return w.snaps.ids[rng.Intn(len(w.snaps.ids))], true
 }
 
 // recordOpErr flags an unexpected op error, unless the run context is already

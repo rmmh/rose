@@ -88,6 +88,7 @@ type Server struct {
 	maintenanceMu     sync.Mutex
 	maintenanceEvery  time.Duration
 	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
 	// maintRunMu serializes control-plane reclamation so two callers never plan
 	// against the same catalog snapshot and then race to retire the same vlog.
 	// The background driver's pass and any explicit GC/Compact invocation all

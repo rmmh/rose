@@ -33,8 +33,11 @@ func (s *Server) startMaintenanceDriver() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.maintenanceCancel = cancel
+	done := make(chan struct{})
+	s.maintenanceDone = done
 	interval := s.maintenanceEvery
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -56,10 +59,15 @@ func (s *Server) startMaintenanceDriver() {
 func (s *Server) StopMaintenanceDriver() {
 	s.maintenanceMu.Lock()
 	cancel := s.maintenanceCancel
+	done := s.maintenanceDone
 	s.maintenanceCancel = nil
+	s.maintenanceDone = nil
 	s.maintenanceMu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if done != nil {
+		<-done
 	}
 }
 
