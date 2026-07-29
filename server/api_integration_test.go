@@ -1979,9 +1979,8 @@ func TestScrubAndRepairHealsBitrot(t *testing.T) {
 	}
 }
 
-// TestScrubAndRepairHealsDuplicate confirms the repair path for DUPLICATE vlogs:
-// a corrupt mirror is rebuilt from a surviving copy (readSurvivingCopyLocked),
-// not EC reconstruct.
+// TestScrubAndRepairHealsDuplicate confirms multiple corrupt mirrors are rebuilt
+// from a surviving copy (readSurvivingCopyLocked), not EC reconstruct.
 func TestScrubAndRepairHealsDuplicate(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))
@@ -1993,14 +1992,16 @@ func TestScrubAndRepairHealsDuplicate(t *testing.T) {
 
 	disk1 := filepath.Join(dir, "disk1")
 	disk2 := filepath.Join(dir, "disk2")
-	srv := server.NewServerWithDiskRoots(db, map[uint32]string{1: disk1, 2: disk2})
+	disk3 := filepath.Join(dir, "disk3")
+	srv := server.NewServerWithDiskRoots(db, map[uint32]string{1: disk1, 2: disk2, 3: disk3})
 	srv.SetMaintenanceInterval(0)
 	if err := srv.Recover(ctx); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(srv.StopMaintenanceDriver)
 
-	// Default policy is 2-copy DUPLICATE across the two nodes.
+	// Default policy mirrors across all three disks, leaving one healthy source
+	// after two copies suffer bitrot.
 	data := make([]byte, 3<<20)
 	if _, err := rand.New(rand.NewSource(13)).Read(data); err != nil {
 		t.Fatal(err)
@@ -2021,13 +2022,18 @@ func TestScrubAndRepairHealsDuplicate(t *testing.T) {
 		t.Fatalf("read disk1: %v", err)
 	}
 	corruptFileByte(t, filepath.Join(disk1, entries[0].Name()), 4096+100)
+	entries, err = os.ReadDir(disk2)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("read disk2: %v", err)
+	}
+	corruptFileByte(t, filepath.Join(disk2, entries[0].Name()), 4096+100)
 
 	res, err := srv.ScrubAndRepair(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.ShardsRepaired != 1 || len(res.Unrepairable) != 0 {
-		t.Fatalf("DUPLICATE repair = %+v, want 1 healed, 0 unrepairable", res)
+	if res.ShardsRepaired != 2 || len(res.Unrepairable) != 0 {
+		t.Fatalf("DUPLICATE repair = %+v, want 2 healed, 0 unrepairable", res)
 	}
 
 	clean, err := srv.Scrub()
@@ -2040,6 +2046,17 @@ func TestScrubAndRepairHealsDuplicate(t *testing.T) {
 				t.Fatalf("DUPLICATE scrub unhealthy after repair: vlog %d shard %d", v.VlogID, sh.Shard)
 			}
 		}
+	}
+	reopen, err := srv.Open(ctx, &pb.OpenRequest{Path: "/big"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := srv.Read(ctx, &pb.ReadRequest{Handle: reopen.GetHandle(), Length: int64(len(data))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), data) {
+		t.Fatal("DUPLICATE file mismatch after repairing multiple mirrors")
 	}
 }
 

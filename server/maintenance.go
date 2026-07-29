@@ -321,6 +321,7 @@ func (s *Server) readSurvivingCopyLocked(vlogID, lostPlogID uint32) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
+	var lastErr error
 	for _, m := range mappings {
 		if m.PlogID == lostPlogID {
 			continue
@@ -329,7 +330,14 @@ func (s *Server) readSurvivingCopyLocked(vlogID, lostPlogID uint32) ([]byte, err
 		if !ok {
 			continue
 		}
-		return p.Read(0, int(p.LogicalLength()))
+		data, err := p.Read(0, int(p.LogicalLength()))
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("reprotect: vlog %d has no readable surviving copy: %w", vlogID, lastErr)
 	}
 	return nil, fmt.Errorf("reprotect: vlog %d has no surviving copy to regenerate from (data lost)", vlogID)
 }
