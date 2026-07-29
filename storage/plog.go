@@ -489,7 +489,11 @@ func (p *Plog) recoverFromTrailer(size int64) bool {
 		if authenticatesRagged {
 			// Preserve the trailer's bounded geometry so reads report the
 			// corruption instead of trusting and re-hashing the damaged tail.
+			// None of the sealed-sector hashes are authenticated either, so
+			// poison them as well rather than accepting data that still matches
+			// an integrity slot from the invalid trailer.
 			p.bufCorrupt = true
+			clear(p.hashes)
 			return true
 		}
 		return false

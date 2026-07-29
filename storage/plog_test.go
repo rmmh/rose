@@ -223,6 +223,40 @@ func TestPlogReadRejectsRelocatedCompletedBlock(t *testing.T) {
 	}
 }
 
+func TestPlogInvalidOpenTrailerPoisonsSealedSectorHashes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plog")
+	p, err := OpenPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{0x5c}, 3*SectorSize+123)
+	if _, err := p.Write(0, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Damage only the trailer HMAC. The sector hashes and data still agree, but
+	// neither is trustworthy once their authenticator is invalid.
+	corruptByte(t, path, info.Size()-SectorSize+openTrailerHeader+3*HashSize)
+
+	reopened, err := OpenExistingPlog(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Read(0, SectorSize); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("sealed-sector read under invalid open trailer = %v, want ErrBitrot", err)
+	}
+}
+
 func TestPlogScrubReportsCorruption(t *testing.T) {
 	p, path := tempPlog(t, "plog")
 	data := twoBlockPayload()
