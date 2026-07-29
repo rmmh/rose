@@ -499,6 +499,12 @@ func TestUnlinkOpenWriterDoesNotRepublishPathOnClose(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.Close(ctx, &pb.CloseRequest{
+		Handle:         open.GetHandle(),
+		IdempotencyKey: "unlink-open-writer",
+	}); err != nil {
+		t.Fatalf("idempotent Close retry after unlink: %v", err)
+	}
 	if _, ok, err := statPath(t, s, path); err == nil && ok {
 		t.Fatal("Close republished a path unlinked while its writer was open")
 	}

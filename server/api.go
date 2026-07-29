@@ -118,6 +118,9 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 		if op.Path != path && !(op.State == meta.WriteOpCommitted && op.FileID == id) {
 			return nil, fmt.Errorf("write operation key is already bound to %q", op.Path)
 		}
+		if op.State == meta.WriteOpCancelled {
+			return nil, fmt.Errorf("write operation key was cancelled")
+		}
 		h.writeOpID, h.writeKey = op.ID, op.IdempotencyKey
 		if err := s.ensureRecoveryFileID(ctx, h, op); err != nil {
 			return nil, err
@@ -877,7 +880,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		if err != nil {
 			return err
 		}
-		if op.State == meta.WriteOpCommitted {
+		if op.State == meta.WriteOpCommitted || op.State == meta.WriteOpCancelled {
 			return nil
 		}
 		return fmt.Errorf("write operation %q has no active handle", idempotencyKey)
@@ -891,7 +894,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		if !remove {
 			return nil
 		}
-		if err := s.db.AbandonWriteOp(ctx, h.writeOpID); err != nil {
+		if err := s.db.CancelWriteOp(ctx, h.writeOpID); err != nil {
 			return err
 		}
 		s.releasePins(h.writeOpID)

@@ -11,6 +11,7 @@ const (
 	WriteOpPrepared  = "prepared"
 	WriteOpCommitted = "committed"
 	WriteOpAbandoned = "abandoned"
+	WriteOpCancelled = "cancelled"
 )
 
 type WriteOp struct {
@@ -126,12 +127,23 @@ func (d *DB) VlogLeased(ctx context.Context, vlogID uint32) (bool, error) {
 }
 
 func (d *DB) AbandonWriteOp(ctx context.Context, id int64) error {
+	return d.finishPreparedWriteOp(ctx, id, WriteOpAbandoned)
+}
+
+// CancelWriteOp records that an explicit namespace operation removed the
+// pending write's name. Unlike expiry abandonment, cancellation is a successful
+// terminal outcome for idempotent Close retries.
+func (d *DB) CancelWriteOp(ctx context.Context, id int64) error {
+	return d.finishPreparedWriteOp(ctx, id, WriteOpCancelled)
+}
+
+func (d *DB) finishPreparedWriteOp(ctx context.Context, id int64, state string) error {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, "UPDATE write_op SET state = ? WHERE id = ? AND state = ?", WriteOpAbandoned, id, WriteOpPrepared); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE write_op SET state = ? WHERE id = ? AND state = ?", state, id, WriteOpPrepared); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM vlog_lease WHERE write_op_id = ?", id); err != nil {
