@@ -807,6 +807,9 @@ func (s *Server) setHandleMtime(ctx context.Context, handle int64, mtime int64, 
 	if !ok {
 		return fmt.Errorf("path not found: %q", h.path())
 	}
+	h.openedMtime = mtime
+	h.mtimeNs.Store(mtime)
+	h.mtimeSet.Store(true)
 	return nil
 }
 

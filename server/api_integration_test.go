@@ -2373,6 +2373,30 @@ func TestOpenHandlePreservesEpochMtime(t *testing.T) {
 	assert.Zero(t, attr.GetMtime())
 }
 
+func TestLegacyHandlePreservesExplicitMtimeAcrossWrite(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	writeAt(t, s, "/legacy-handle-mtime", -1, [][2]any{{0, []byte("old")}})
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/legacy-handle-mtime"})
+	require.NoError(t, err)
+
+	const explicitMtime = int64(321)
+	require.NoError(t, s.SetHandleMtime(ctx, open.GetHandle(), explicitMtime))
+	handleAttr, err := s.Getattr(ctx, &pb.GetattrRequest{
+		Path: "/legacy-handle-mtime", Handle: open.GetHandle(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, explicitMtime, handleAttr.GetMtime())
+
+	_, err = s.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte("new")})
+	require.NoError(t, err)
+	_, err = s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()})
+	require.NoError(t, err)
+	attr, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/legacy-handle-mtime"})
+	require.NoError(t, err)
+	assert.Equal(t, explicitMtime, attr.GetMtime())
+}
+
 func TestRenamePreservesSourceMtime(t *testing.T) {
 	s := newServer(t)
 	ctx := context.Background()
