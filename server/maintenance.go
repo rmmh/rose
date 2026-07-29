@@ -363,7 +363,7 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 			if plog == nil {
 				continue
 			}
-			if err := s.catchUpDuplicatePlogLocked(durableCtx, source, vlogID, mapping.PlogID, plog, info.Length); err != nil {
+			if err := s.catchUpDuplicatePlogLocked(durableCtx, source, vlogID, mapping.PlogID, plog, info.Length, info.Length); err != nil {
 				return err
 			}
 		}

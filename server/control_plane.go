@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -176,7 +177,7 @@ func (s *Server) offlinePlogsLocked(ctx context.Context, matches func(meta.PlogI
 			if offlineSet[mapping.PlogID] || plog == nil {
 				continue
 			}
-			if err := s.catchUpDuplicatePlogLocked(ctx, source, vlogID, mapping.PlogID, plog, targetLength); err != nil {
+			if err := s.catchUpDuplicatePlogLocked(ctx, source, vlogID, mapping.PlogID, plog, info.Length, targetLength); err != nil {
 				return err
 			}
 		}
@@ -310,7 +311,7 @@ func (s *Server) catchUpReturnedDuplicatesLocked(ctx context.Context, reopened m
 					targetLength = source.Length()
 				}
 			}
-			if err := s.catchUpDuplicatePlogLocked(ctx, source, vlogID, plogID, plog, targetLength); err != nil {
+			if err := s.catchUpDuplicatePlogLocked(ctx, source, vlogID, plogID, plog, info.Length, targetLength); err != nil {
 				return err
 			}
 		}
@@ -318,14 +319,65 @@ func (s *Server) catchUpReturnedDuplicatesLocked(ctx context.Context, reopened m
 	return nil
 }
 
-func (s *Server) catchUpDuplicatePlogLocked(ctx context.Context, source *storage.Vlog, vlogID, plogID uint32, plog *storage.Plog, targetLength int64) error {
+func (s *Server) catchUpDuplicatePlogLocked(ctx context.Context, source *storage.Vlog, vlogID, plogID uint32, plog *storage.Plog, committedLength, targetLength int64) error {
 	const copyChunk = int64(1 << 20)
-	if plog.LogicalLength() >= targetLength {
-		return nil
+	currentLength := plog.LogicalLength()
+	common := min(currentLength, targetLength)
+	changed := false
+	committedCommon := min(common, committedLength)
+	for offset := int64(0); offset < committedCommon; offset += copyChunk {
+		length := min(copyChunk, committedCommon-offset)
+		want, err := s.readCommittedDuplicateRangeLocked(ctx, vlogID, plogID, plog, offset, int(length))
+		if err != nil {
+			return fmt.Errorf("read vlog %d to verify plog %d: %w", vlogID, plogID, err)
+		}
+		got, err := plog.Read(offset, int(length))
+		if err == nil && bytes.Equal(got, want) {
+			continue
+		}
+		if err := plog.TruncateTo(0); err != nil {
+			return fmt.Errorf("reset stale plog %d: %w", plogID, err)
+		}
+		currentLength = 0
+		changed = true
+		break
 	}
-	for offset := plog.LogicalLength(); offset < targetLength; {
+	if !changed {
+		for offset := committedCommon; offset < common; offset += copyChunk {
+			length := min(copyChunk, common-offset)
+			want, err := source.Read(ctx, offset, int(length))
+			if err != nil {
+				return fmt.Errorf("read leased tail of vlog %d to verify plog %d: %w", vlogID, plogID, err)
+			}
+			got, err := plog.Read(offset, int(length))
+			if err == nil && bytes.Equal(got, want) {
+				continue
+			}
+			if err := plog.TruncateTo(committedCommon); err != nil {
+				return fmt.Errorf("reset stale leased tail on plog %d: %w", plogID, err)
+			}
+			currentLength = committedCommon
+			changed = true
+			break
+		}
+	}
+	if currentLength > targetLength {
+		if err := plog.TruncateTo(targetLength); err != nil {
+			return fmt.Errorf("trim plog %d to committed length: %w", plogID, err)
+		}
+		currentLength = targetLength
+		changed = true
+	}
+	for offset := currentLength; offset < targetLength; {
 		length := min(copyChunk, targetLength-offset)
-		data, err := source.Read(ctx, offset, int(length))
+		var data []byte
+		var err error
+		if offset < committedLength {
+			length = min(length, committedLength-offset)
+			data, err = s.readCommittedDuplicateRangeLocked(ctx, vlogID, plogID, plog, offset, int(length))
+		} else {
+			data, err = source.Read(ctx, offset, int(length))
+		}
 		if err != nil {
 			return fmt.Errorf("read vlog %d to catch up plog %d: %w", vlogID, plogID, err)
 		}
@@ -333,11 +385,60 @@ func (s *Server) catchUpDuplicatePlogLocked(ctx context.Context, source *storage
 			return fmt.Errorf("catch up plog %d at %d: %w", plogID, offset, err)
 		}
 		offset += length
+		changed = true
+	}
+	if !changed {
+		return nil
 	}
 	if err := plog.Commit(); err != nil {
 		return fmt.Errorf("commit caught-up plog %d: %w", plogID, err)
 	}
 	return nil
+}
+
+// readCommittedDuplicateRangeLocked returns bytes agreed on by the same number
+// of mirrors required for publication. The candidate may not yet be in s.plogs
+// (a hot-returned disk), so it is supplied explicitly. Choosing the first
+// readable mirror is unsafe: that mirror may contain a valid but unpublished
+// tail left by a failed quorum write.
+func (s *Server) readCommittedDuplicateRangeLocked(ctx context.Context, vlogID, candidateID uint32, candidate *storage.Plog, offset int64, length int) ([]byte, error) {
+	mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
+	if err != nil {
+		return nil, err
+	}
+	threshold := min(s.minCopies, len(mappings))
+	type agreement struct {
+		data  []byte
+		count int
+	}
+	byContent := make(map[string]*agreement)
+	for _, mapping := range mappings {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		p := s.plogs[mapping.PlogID]
+		if mapping.PlogID == candidateID {
+			p = candidate
+		}
+		if p == nil || p.LogicalLength() < offset+int64(length) {
+			continue
+		}
+		data, err := p.Read(offset, length)
+		if err != nil {
+			continue
+		}
+		key := string(data)
+		a := byContent[key]
+		if a == nil {
+			a = &agreement{data: data}
+			byContent[key] = a
+		}
+		a.count++
+		if a.count >= threshold {
+			return a.data, nil
+		}
+	}
+	return nil, fmt.Errorf("duplicate vlog %d has no %d-copy agreement at offset %d", vlogID, threshold, offset)
 }
 
 // nodeConfiguredLocked reports whether any configured disk lives on a node. The

@@ -386,6 +386,79 @@ func TestNodeReturnCatchesUpDuplicateWritesCommittedDuringOutage(t *testing.T) {
 	}
 }
 
+func TestNodeReturnReplacesSameLengthUncommittedTail(t *testing.T) {
+	ctx := context.Background()
+	s := newControlPlaneServer(t, 3)
+	s.SetMaintenanceInterval(0)
+	vlogID := provision(t, s, "DUPLICATE", 1, 0)
+	mappings, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stalePlog uint32
+	for _, mapping := range mappings {
+		if mapping.DiskID == 3 {
+			stalePlog = mapping.PlogID
+		}
+	}
+	if stalePlog == 0 {
+		t.Fatal("vlog has no replica on disk 3")
+	}
+
+	if err := s.SetNodeState(ctx, 1, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodeState(ctx, 2, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	stale := []byte("stale-unpublished-bytes")
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: vlogID, TxnId: 51, Buffer: stale,
+	}); err == nil {
+		t.Fatal("single surviving replica unexpectedly met the write quorum")
+	}
+	deadline := time.Now().Add(time.Second)
+	for s.plogs[stalePlog].LogicalLength() != int64(len(stale)) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := s.plogs[stalePlog].LogicalLength(); got != int64(len(stale)) {
+		t.Fatalf("failed write left stale replica length %d, want %d", got, len(stale))
+	}
+
+	if err := s.SetNodeState(ctx, 3, meta.NodeFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodeState(ctx, 1, meta.NodeWorking); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodeState(ctx, 2, meta.NodeWorking); err != nil {
+		t.Fatal(err)
+	}
+	committed := []byte("fresh-published-content")
+	if len(committed) != len(stale) {
+		t.Fatal("test payloads must have equal lengths")
+	}
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: vlogID, TxnId: 52, Buffer: committed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 52}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetNodeState(ctx, 3, meta.NodeWorking); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.plogs[stalePlog].Read(0, len(committed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, committed) {
+		t.Fatalf("returned replica retained stale bytes %q, want %q", got, committed)
+	}
+}
+
 type readFaultClient struct {
 	data    []byte
 	slow    bool
