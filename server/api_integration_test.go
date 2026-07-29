@@ -2373,6 +2373,31 @@ func TestOpenHandlePreservesEpochMtime(t *testing.T) {
 	assert.Zero(t, attr.GetMtime())
 }
 
+func TestRenamePreservesSourceMtime(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	writeAt(t, s, "/mtime-source", -1, [][2]any{{0, []byte("source")}})
+	sourceMtime := int64(123)
+	_, err := s.Setattr(ctx, &pb.SetattrRequest{Path: "/mtime-source", Mtime: &sourceMtime})
+	require.NoError(t, err)
+
+	_, err = s.Rename(ctx, &pb.RenameRequest{OldPath: "/mtime-source", NewPath: "/mtime-new"})
+	require.NoError(t, err)
+	attr, err := s.Getattr(ctx, &pb.GetattrRequest{Path: "/mtime-new"})
+	require.NoError(t, err)
+	assert.Equal(t, sourceMtime, attr.GetMtime())
+
+	writeAt(t, s, "/mtime-destination", -1, [][2]any{{0, []byte("destination")}})
+	destinationMtime := int64(456)
+	_, err = s.Setattr(ctx, &pb.SetattrRequest{Path: "/mtime-destination", Mtime: &destinationMtime})
+	require.NoError(t, err)
+	_, err = s.Rename(ctx, &pb.RenameRequest{OldPath: "/mtime-new", NewPath: "/mtime-destination"})
+	require.NoError(t, err)
+	attr, err = s.Getattr(ctx, &pb.GetattrRequest{Path: "/mtime-destination"})
+	require.NoError(t, err)
+	assert.Equal(t, sourceMtime, attr.GetMtime())
+}
+
 func TestSnapshotHandleRejectsMtimeMutation(t *testing.T) {
 	s := newServer(t)
 	ctx := context.Background()

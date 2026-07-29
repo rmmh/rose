@@ -889,8 +889,8 @@ func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 		return err
 	}
 
-	var oldID int64
-	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", oldPath).Scan(&oldID)
+	var oldID, oldMtime int64
+	err = tx.QueryRowContext(ctx, "SELECT file_id, mtime FROM file_head WHERE path = ?", oldPath).Scan(&oldID, &oldMtime)
 	if err == sql.ErrNoRows {
 		// Not a file: it may be a directory subtree.
 		var isDir int
@@ -953,9 +953,9 @@ func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 		return err
 	}
 	parent, name := splitPath(newPath)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id, parent, name) VALUES (?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id, parent = excluded.parent, name = excluded.name`,
-		newPath, oldID, parent, name); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO file_head (path, file_id, parent, name, mtime) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET file_id = excluded.file_id, parent = excluded.parent, name = excluded.name, mtime = excluded.mtime`,
+		newPath, oldID, parent, name, oldMtime); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM file_head WHERE path = ?", oldPath); err != nil {
