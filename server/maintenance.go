@@ -1159,6 +1159,27 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 	oldPath := s.plogPath(fromDisk, plogID)
 	newPath := s.plogPath(toDisk, plogID)
 
+	// A quorum mirror may be durably published while a slower extra copy misses
+	// the append. Relocating that physical file verbatim would move the stale
+	// copy and then fail (or later serve old bytes) when the vlog is remounted at
+	// its committed cursor. Bring the selected copy to quorum-agreed bytes first.
+	info, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		return fmt.Errorf("drain: load vlog %d: %w", vlogID, err)
+	}
+	if info.ProtectionScheme == "DUPLICATE" {
+		source := s.vlogs[vlogID]
+		plog := s.plogs[plogID]
+		if source == nil || plog == nil {
+			return fmt.Errorf("drain: duplicate vlog %d or plog %d is not mounted", vlogID, plogID)
+		}
+		if err := s.catchUpDuplicatePlogLocked(
+			ctx, source, vlogID, plogID, plog, info.Length, info.Length,
+		); err != nil {
+			return fmt.Errorf("drain: catch up plog %d: %w", plogID, err)
+		}
+	}
+
 	// Flush the live handle so we copy a consistent, durable file. vlogMu
 	// excludes concurrent writers, so the source can stay open and readable
 	// until both the copy and the catalog flip succeed.
