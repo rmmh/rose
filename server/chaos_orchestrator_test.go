@@ -204,15 +204,46 @@ func (i *chaosInjector) diskWithPlogs(ctx context.Context) (uint32, error) {
 }
 
 func (i *chaosInjector) anyPlog(ctx context.Context) (uint32, uint32, error) {
-	disk, err := i.diskWithPlogs(ctx)
-	if err != nil {
-		return 0, 0, err
+	type candidate struct {
+		disk uint32
+		plog uint32
 	}
-	ps, err := i.cluster.server().GetDB().PlogsOnDisk(ctx, disk)
-	if err != nil {
-		return 0, 0, err
+	states := i.cluster.server().DiskStates()
+	var disks []uint32
+	for disk, state := range states {
+		if state == meta.DiskActive {
+			disks = append(disks, disk)
+		}
 	}
-	return disk, ps[i.rng.Intn(len(ps))].PlogID, nil
+	sort.Slice(disks, func(a, b int) bool { return disks[a] < disks[b] })
+	var sealed []candidate
+	for _, disk := range disks {
+		ps, err := i.cluster.server().GetDB().PlogsOnDisk(ctx, disk)
+		if err != nil {
+			return 0, 0, err
+		}
+		for _, p := range ps {
+			info, err := i.cluster.server().GetDB().GetVlog(ctx, p.VlogID)
+			if err != nil {
+				return 0, 0, err
+			}
+			shardLength := info.Length
+			if info.ProtectionScheme == "EC" {
+				shardLength /= int64(info.DataShards)
+			}
+			// The open ragged-edge sector has no durable sector hash until it
+			// fills. Choose only shards with a sealed first sector so byte
+			// corruption is guaranteed to be visible to Scrub.
+			if shardLength >= storage.SectorSize {
+				sealed = append(sealed, candidate{disk: disk, plog: p.PlogID})
+			}
+		}
+	}
+	if len(sealed) == 0 {
+		return 0, 0, fmt.Errorf("no active plog has a sealed sector")
+	}
+	pick := sealed[i.rng.Intn(len(sealed))]
+	return pick.disk, pick.plog, nil
 }
 
 func (i *chaosInjector) assertInvariants(ctx context.Context) {
