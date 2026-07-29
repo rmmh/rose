@@ -683,6 +683,44 @@ func TestReplaceDiskRPCRetryResumesAfterSourceReturns(t *testing.T) {
 	}
 }
 
+func TestReplaceDiskUsesPreAttachedEmptyDestination(t *testing.T) {
+	dir := t.TempDir()
+	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	srv := server.NewServerWithDataDir(db, filepath.Join(dir, "plogs"))
+	srv.SetMaintenanceInterval(0)
+	if err := srv.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.StopMaintenanceDriver()
+
+	if _, err := srv.AddDisk(ctx, &pb.AddDiskRequest{
+		DiskId: 2, NodeId: 2, TotalBytes: 1 << 30,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := srv.ReplaceDisk(ctx, &pb.ReplaceDiskRequest{
+		OldDiskId: 1, NewDiskId: 2, NodeId: 2, TotalBytes: 1 << 30,
+	})
+	if err != nil {
+		t.Fatalf("replace did not resume from a pre-attached destination: %v", err)
+	}
+	status, err := srv.GetMaintenanceJob(ctx, &pb.GetMaintenanceJobRequest{JobId: job.GetJobId()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.GetState() != pb.MaintenanceJobState_MAINTENANCE_JOB_STATE_COMPLETED {
+		t.Fatalf("replacement job state = %s", status.GetState())
+	}
+	if state := srv.DiskStates()[1]; state != meta.DiskDetached {
+		t.Fatalf("source disk state = %q, want detached", state)
+	}
+}
+
 func TestVlogCommitControlsRecoveredLength(t *testing.T) {
 	dir := t.TempDir()
 	db, err := meta.Open(filepath.Join(dir, "meta.db"))

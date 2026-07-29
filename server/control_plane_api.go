@@ -76,9 +76,28 @@ func (s *Server) ReplaceDisk(ctx context.Context, req *pb.ReplaceDiskRequest) (*
 			return nil, fmt.Errorf("replace: destination disk %d for running job is not configured", job.DestDisk)
 		}
 	} else {
-		root := filepath.Join(s.dataDir, fmt.Sprintf("disk-%d", req.GetNewDiskId()))
-		if err := s.AttachDiskOnNode(ctx, req.GetNewDiskId(), req.GetNodeId(), root, req.GetTotalBytes()); err != nil {
-			return nil, err
+		if destState, configured := s.DiskStates()[req.GetNewDiskId()]; configured {
+			if destState != meta.DiskActive {
+				return nil, fmt.Errorf("replace: pre-attached destination disk %d is %s, must be active", req.GetNewDiskId(), destState)
+			}
+			s.vlogMu.Lock()
+			destNode := s.nodeOf(req.GetNewDiskId())
+			s.vlogMu.Unlock()
+			if destNode != req.GetNodeId() {
+				return nil, fmt.Errorf("replace: destination disk %d belongs to node %d, not node %d", req.GetNewDiskId(), destNode, req.GetNodeId())
+			}
+			plogs, err := s.db.PlogsOnDisk(ctx, req.GetNewDiskId())
+			if err != nil {
+				return nil, err
+			}
+			if len(plogs) != 0 {
+				return nil, fmt.Errorf("replace: pre-attached destination disk %d is not empty", req.GetNewDiskId())
+			}
+		} else {
+			root := filepath.Join(s.dataDir, fmt.Sprintf("disk-%d", req.GetNewDiskId()))
+			if err := s.AttachDiskOnNode(ctx, req.GetNewDiskId(), req.GetNodeId(), root, req.GetTotalBytes()); err != nil {
+				return nil, err
+			}
 		}
 		job, err = s.db.GetOrCreateReplaceJob(ctx, req.GetOldDiskId(), req.GetNewDiskId())
 		if err != nil {
