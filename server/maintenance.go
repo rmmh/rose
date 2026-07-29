@@ -355,6 +355,7 @@ func (s *Server) reconstructECShardLocked(ctx context.Context, info meta.VlogInf
 	total := int(info.DataShards + info.ParityShards)
 	shards := make([][]byte, total)
 	present := 0
+	var lastErr error
 	for _, m := range mappings {
 		if m.PlogID == lostPlogID || m.ShardIndex == lostShard {
 			continue // the shard we are regenerating: leave nil
@@ -365,12 +366,17 @@ func (s *Server) reconstructECShardLocked(ctx context.Context, info meta.VlogInf
 		}
 		data, err := p.Read(0, int(p.LogicalLength()))
 		if err != nil {
-			return nil, fmt.Errorf("reprotect: read surviving shard %d of vlog %d: %w", m.ShardIndex, info.ID, err)
+			lastErr = fmt.Errorf("read surviving shard %d: %w", m.ShardIndex, err)
+			continue
 		}
 		shards[m.ShardIndex] = data
 		present++
 	}
 	if present < int(info.DataShards) {
+		if lastErr != nil {
+			return nil, fmt.Errorf("reprotect: vlog %d has %d surviving shards, need %d to reconstruct: %w",
+				info.ID, present, info.DataShards, lastErr)
+		}
 		return nil, fmt.Errorf("reprotect: vlog %d has %d surviving shards, need %d to reconstruct (data lost)", info.ID, present, info.DataShards)
 	}
 	if err := storage.ReconstructECShard(int(info.DataShards), int(info.ParityShards), shards); err != nil {

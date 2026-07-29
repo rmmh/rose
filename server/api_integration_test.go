@@ -1870,9 +1870,9 @@ func corruptFileByte(t *testing.T, path string, off int64) {
 	}
 }
 
-// TestScrubAndRepairHealsBitrot writes an EC 3+1 file, flips a byte in one
-// shard's plog (bitrot), then runs ScrubAndRepair and asserts the shard is
-// rebuilt from the surviving redundancy: the repair reports one shard healed, a
+// TestScrubAndRepairHealsBitrot writes an EC 2+2 file, flips a byte in two
+// shard plogs (bitrot), then runs ScrubAndRepair and asserts both shards are
+// rebuilt from the surviving redundancy: the repair reports two shards healed, a
 // follow-up scrub is clean, and the file still reads back byte-identical.
 func TestScrubAndRepairHealsBitrot(t *testing.T) {
 	dir := t.TempDir()
@@ -1883,7 +1883,7 @@ func TestScrubAndRepairHealsBitrot(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 
-	// Four disks are enough for EC 3+1's four shards.
+	// Four disks are enough for EC 2+2's four shards.
 	roots := map[uint32]string{}
 	for id := uint32(1); id <= 4; id++ {
 		roots[id] = filepath.Join(dir, fmt.Sprintf("disk-%d", id))
@@ -1895,7 +1895,7 @@ func TestScrubAndRepairHealsBitrot(t *testing.T) {
 	}
 	t.Cleanup(srv.StopMaintenanceDriver)
 
-	if err := srv.SetBucketPolicy(ctx, meta.BucketPolicy{Name: "ec", ProtectionScheme: "EC", DataShards: 3, ParityShards: 1}); err != nil {
+	if err := srv.SetBucketPolicy(ctx, meta.BucketPolicy{Name: "ec", ProtectionScheme: "EC", DataShards: 2, ParityShards: 2}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1915,14 +1915,39 @@ func TestScrubAndRepairHealsBitrot(t *testing.T) {
 	if _, err := srv.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
 		t.Fatal(err)
 	}
-
-	// Flip a sealed sector byte in one shard's plog. disk-1 backs exactly one
-	// shard of the single EC vlog, so its lone plog file is that shard.
-	entries, err := os.ReadDir(roots[1])
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("read disk-1: %v", err)
+	if promoted, err := srv.PromoteStaging(ctx); err != nil {
+		t.Fatal(err)
+	} else if promoted == 0 {
+		t.Fatal("EC staging vlog did not promote")
 	}
-	corruptFileByte(t, filepath.Join(roots[1], entries[0].Name()), 4096+100)
+
+	// Flip a sealed-sector byte in two shards of the same non-staging EC vlog.
+	vlogs, err := db.ListVlogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ecID uint32
+	for _, vlog := range vlogs {
+		if vlog.ProtectionScheme == "EC" && !vlog.IsStaging() && vlog.Length > 0 {
+			ecID = vlog.ID
+			break
+		}
+	}
+	if ecID == 0 {
+		t.Fatal("no committed EC vlog found")
+	}
+	mappings, err := db.ListVlogPlogs(ctx, ecID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disks, err := db.VlogShardDisks(ctx, ecID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for shard := 0; shard < 2; shard++ {
+		path := filepath.Join(roots[disks[shard].DiskID], fmt.Sprintf("plog-%05d", mappings[shard].PlogID))
+		corruptFileByte(t, path, 4096+100)
+	}
 
 	// Confirm the corruption is detectable before repairing it.
 	scrubbed, err := srv.Scrub()
@@ -1945,8 +1970,8 @@ func TestScrubAndRepairHealsBitrot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.ShardsRepaired != 1 {
-		t.Fatalf("ScrubAndRepair healed %d shards, want 1 (result %+v)", res.ShardsRepaired, res)
+	if res.ShardsRepaired != 2 {
+		t.Fatalf("ScrubAndRepair healed %d shards, want 2 (result %+v)", res.ShardsRepaired, res)
 	}
 	if len(res.Unrepairable) != 0 {
 		t.Fatalf("ScrubAndRepair reported unrepairable shards: %+v", res.Unrepairable)
