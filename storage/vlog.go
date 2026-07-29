@@ -140,10 +140,17 @@ func (v *Vlog) SetWriteQuorum(quorum int) error {
 
 // Write appends data to the virtual log and returns the assigned virtual offset.
 func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, error) {
-	if len(data) == 0 {
-		return atomic.LoadInt64(&v.length), nil
-	}
+	return v.writeWithin(ctx, txnID, data, -1)
+}
 
+// WriteWithin appends data only if the resulting length does not exceed max.
+// The check and append share writeMu so concurrent RPCs cannot both pass a
+// stale boundary check.
+func (v *Vlog) WriteWithin(ctx context.Context, txnID int64, data []byte, max int64) (int64, error) {
+	return v.writeWithin(ctx, txnID, data, max)
+}
+
+func (v *Vlog) writeWithin(ctx context.Context, txnID int64, data []byte, max int64) (int64, error) {
 	// Serialize appends: the offset reservation below and the physical plog
 	// appends must happen as one unit, or concurrent writers interleave and a
 	// chunk's virtual offset no longer matches where its bytes landed.
@@ -151,9 +158,16 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 	defer v.writeMu.Unlock()
 
 	logicalLen := int64(len(data))
+	current := atomic.LoadInt64(&v.length)
+	if max >= 0 && (logicalLen > max || current > max-logicalLen) {
+		return 0, fmt.Errorf("vlog %d would exceed max length %d", v.id, max)
+	}
+	if len(data) == 0 {
+		return current, nil
+	}
 
 	if v.scheme == "NONE" || v.scheme == "DUPLICATE" {
-		offset := atomic.LoadInt64(&v.length)
+		offset := current
 		// Quorum fanout may return while a canceled slow copy is still unwinding.
 		// Keep an immutable owned payload alive for those loser goroutines rather
 		// than letting them retain the caller's RPC buffer after Write returns.
@@ -185,7 +199,7 @@ func (v *Vlog) Write(ctx context.Context, txnID int64, data []byte) (int64, erro
 		if len(data) == 0 || int64(len(data))%sw != 0 {
 			return 0, fmt.Errorf("EC vlog %d write: length %d is not a positive multiple of stripe width %d", v.id, len(data), sw)
 		}
-		offset := atomic.LoadInt64(&v.length)
+		offset := current
 		for rowOff := int64(0); rowOff < int64(len(data)); rowOff += sw {
 			shards, err := v.encodeRow(data[rowOff : rowOff+sw])
 			if err != nil {

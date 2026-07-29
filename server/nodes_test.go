@@ -613,6 +613,47 @@ func TestWriteVlogDoesNotWaitForSlowCopyAfterQuorum(t *testing.T) {
 	}
 }
 
+func TestConcurrentWriteVlogCannotCrossAddressBoundary(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	vlog, err := storage.NewVlog(105, "NONE", 1, 0, []storage.PlogClient{
+		&writeFaultClient{block: block, started: started},
+	}, MaxVlogBytes-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newControlPlaneServer(t, 1)
+	s.vlogs = map[uint32]*storage.Vlog{105: vlog}
+	ctx := context.Background()
+
+	results := make(chan error, 2)
+	go func() {
+		_, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{VlogId: 105, Buffer: []byte{1}})
+		results <- err
+	}()
+	<-started // the first append holds writeMu inside the backing-node write
+	go func() {
+		_, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{VlogId: 105, Buffer: []byte{2}})
+		results <- err
+	}()
+	close(block)
+
+	var succeeded, failed int
+	for range 2 {
+		if err := <-results; err != nil {
+			failed++
+		} else {
+			succeeded++
+		}
+	}
+	if succeeded != 1 || failed != 1 {
+		t.Fatalf("concurrent boundary writes: %d succeeded, %d failed; want 1 and 1", succeeded, failed)
+	}
+	if got := vlog.Length(); got != MaxVlogBytes {
+		t.Fatalf("vlog length = %d, want %d", got, MaxVlogBytes)
+	}
+}
+
 func TestSlowVlogWriteDoesNotBlockUnrelatedVlog(t *testing.T) {
 	block := make(chan struct{})
 	started := make(chan struct{}, 1)

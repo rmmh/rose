@@ -1765,11 +1765,7 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 	if v.Length() > math.MaxUint32 {
 		return nil, fmt.Errorf("vlog %d has no representable write offset", req.GetVlogId())
 	}
-	if v.Length()+int64(len(req.GetBuffer())) > MaxVlogBytes {
-		return nil, fmt.Errorf("vlog %d would exceed max size %d", req.GetVlogId(), MaxVlogBytes)
-	}
-
-	offset, err := v.Write(ctx, req.GetTxnId(), req.GetBuffer())
+	offset, err := v.WriteWithin(ctx, req.GetTxnId(), req.GetBuffer(), MaxVlogBytes)
 	if err != nil {
 		return nil, err
 	}
