@@ -552,6 +552,84 @@ func TestReplaceDiskCatchesUpAllSlowCommittedMirrors(t *testing.T) {
 	}
 }
 
+func TestScrubRepairCatchesUpSlowMirrorsBeforeRemount(t *testing.T) {
+	s := newControlPlaneServer(t, 4)
+	ctx := context.Background()
+	vlogID := provision(t, s, "DUPLICATE", 1, 0)
+	mappings, err := s.db.VlogShardDisks(ctx, vlogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slowPlogs := map[uint32]bool{
+		mappings[2].PlogID: true,
+		mappings[3].PlogID: true,
+	}
+	clients := make([]storage.PlogClient, len(mappings))
+	for i, mapping := range mappings {
+		local := &localPlogClient{plog: s.plogs[mapping.PlogID]}
+		if slowPlogs[mapping.PlogID] {
+			clients[i] = &writeFaultClient{slow: true, local: local}
+		} else {
+			clients[i] = local
+		}
+	}
+	vlog, err := storage.NewVlog(vlogID, "DUPLICATE", 1, 0, clients, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vlog.SetWriteQuorum(2); err != nil {
+		t.Fatal(err)
+	}
+	s.vlogMu.Lock()
+	s.vlogs[vlogID] = vlog
+	s.vlogMu.Unlock()
+
+	payload := bytes.Repeat([]byte{0x72}, 3*storage.SectorSize)
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: vlogID, TxnId: 78, Buffer: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 78}); err != nil {
+		t.Fatal(err)
+	}
+	victim := mappings[0]
+	f, err := os.OpenFile(s.plogPath(victim.DiskID, victim.PlogID), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b [1]byte
+	if _, err := f.ReadAt(b[:], storage.CalcPhysical(100)); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	b[0] ^= 0xff
+	if _, err := f.WriteAt(b[:], storage.CalcPhysical(100)); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.ScrubAndRepair(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Unrepairable) != 0 || res.ShardsRepaired != 1 {
+		t.Fatalf("scrub repair = %+v, want one repaired shard", res)
+	}
+	read, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: vlogID, Length: uint32(len(payload)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read.GetBuffer(), payload) {
+		t.Fatal("scrub repair with slow mirrors changed committed bytes")
+	}
+}
+
 func TestReplaceDiskDefersInFlightFileRead(t *testing.T) {
 	s := newControlPlaneServer(t, 2)
 	ctx := context.Background()

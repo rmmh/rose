@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -327,6 +328,39 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	}
 	s.plogs[newPlogID] = np
 
+	if info.ProtectionScheme == "DUPLICATE" {
+		// Remount validates every reachable mirror against the published cursor.
+		// Repair all surviving non-quorum copies from the verified bytes chosen
+		// above before flipping the corrupt shard; doing this after remount is too
+		// late because a short sibling makes that remount fail.
+		mappings, err := s.db.ListVlogPlogs(ctx, vlogID)
+		if err != nil {
+			return discard(err)
+		}
+		for _, mapping := range mappings {
+			if mapping.PlogID == lostPlogID {
+				continue
+			}
+			plog := s.plogs[mapping.PlogID]
+			if plog == nil {
+				continue
+			}
+			got, readErr := plog.Read(0, len(shardData))
+			if readErr == nil && bytes.Equal(got, shardData) {
+				continue
+			}
+			if err := plog.TruncateTo(0); err != nil {
+				return discard(fmt.Errorf("reprotect: reset stale plog %d: %w", mapping.PlogID, err))
+			}
+			if err := plog.EnsureAppend(0, shardData); err != nil {
+				return discard(fmt.Errorf("reprotect: catch up plog %d: %w", mapping.PlogID, err))
+			}
+			if err := plog.Commit(); err != nil {
+				return discard(fmt.Errorf("reprotect: commit caught-up plog %d: %w", mapping.PlogID, err))
+			}
+		}
+	}
+
 	if err := ctx.Err(); err != nil {
 		return discard(err)
 	}
@@ -348,27 +382,6 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	if old != nil {
 		_ = old.Close()
 	}
-
-	if info.ProtectionScheme == "DUPLICATE" {
-		// Quorum writes may leave a non-quorum mirror behind. Reprotection is
-		// about to remount every reachable copy at the committed vlog length, so
-		// heal any lagging survivors from the still-mounted readable vlog first.
-		mappings, err := s.db.ListVlogPlogs(durableCtx, vlogID)
-		if err != nil {
-			return err
-		}
-		source := s.vlogs[vlogID]
-		for _, mapping := range mappings {
-			plog := s.plogs[mapping.PlogID]
-			if plog == nil {
-				continue
-			}
-			if err := s.catchUpDuplicatePlogLocked(durableCtx, source, vlogID, mapping.PlogID, plog, info.Length, info.Length); err != nil {
-				return err
-			}
-		}
-	}
-
 	return nil
 }
 
