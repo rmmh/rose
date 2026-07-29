@@ -55,6 +55,7 @@ type FileHandle struct {
 	openedMtime  int64
 	pinOwner     int64
 	unlinked     bool
+	writeTouched bool
 }
 
 func (h *FileHandle) path() string {
@@ -505,6 +506,7 @@ func (s *Server) writeHandle(ctx context.Context, req *pb.WriteRequest, h *FileH
 	if err := s.spillCache(ctx, h); err != nil {
 		return nil, err
 	}
+	h.writeTouched = true
 	// AcknowledgedOffset is the handle-local logical size: monotonic for the
 	// sequential writer the retry contract is built around. In-flight bytes are
 	// made durable at Close, not here, so a resume re-sends them (idempotently).
@@ -684,6 +686,11 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 // private replay cache; afterward the immutable committed version is canonical.
 func (s *Server) refreshCommittedHandle(ctx context.Context, h *FileHandle) error {
 	if h.writeOpID == 0 || h.cache == nil {
+		return nil
+	}
+	// Preserve locally acknowledged writes until Close can compare them with a
+	// peer's committed result for the same idempotency key.
+	if h.writeTouched {
 		return nil
 	}
 	mu := s.writeOperationLock(h.writeOpID)
@@ -1101,6 +1108,11 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		if err != nil {
 			return err
 		}
+		if h.writeTouched {
+			if err := s.validateCommittedRetry(ctx, h, op, placements); err != nil {
+				return err
+			}
+		}
 		committedMtime, err = s.db.FileVersionMtime(ctx, fileID)
 		if err != nil {
 			return err
@@ -1116,12 +1128,35 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		h.chunks = placements
 		h.openedMtime = committedMtime
 		h.cache = nil
+		h.writeTouched = false
 		h.writeOpID = 0
 		h.writeKey = ""
 		h.fileID64 = 0
 		h.mtimeNs.Store(0)
 		h.mtimeSet.Store(false)
 		s.replacePins(h.pinOwner, placements)
+	}
+	return nil
+}
+
+func (s *Server) validateCommittedRetry(ctx context.Context, h *FileHandle, op meta.WriteOp, placements []meta.ChunkPlacement) error {
+	if h.cache == nil || h.cache.Length() != op.AcknowledgedOffset {
+		return fmt.Errorf("conflicting retry for committed write operation %q", h.writeKey)
+	}
+	const compareBatch = int64(1 << 20)
+	for offset := int64(0); offset < op.AcknowledgedOffset; offset += compareBatch {
+		length := min(compareBatch, op.AcknowledgedOffset-offset)
+		retried, err := h.cache.ReadAt(ctx, offset, length)
+		if err != nil {
+			return err
+		}
+		committed, err := s.readChunksAt(ctx, placements, offset, length)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(retried, committed) {
+			return fmt.Errorf("conflicting retry for committed write operation %q", h.writeKey)
+		}
 	}
 	return nil
 }
@@ -1547,6 +1582,7 @@ func (s *Server) Truncate(ctx context.Context, req *pb.TruncateRequest) (*pb.Tru
 		if err := h.cache.Truncate(ctx, req.GetSize()); err != nil {
 			return nil, err
 		}
+		h.writeTouched = true
 		return &pb.TruncateResponse{}, nil
 	}
 

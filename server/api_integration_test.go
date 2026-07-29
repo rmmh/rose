@@ -143,6 +143,63 @@ func TestWriteOperationRetriesOpenWriteAndClose(t *testing.T) {
 	}
 }
 
+func TestConflictingWriteOperationRetryIsRejected(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+	first, err := client.Open(ctx, &pb.OpenRequest{Path: "/conflicting-retry", OperationKey: "conflicting-op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.Open(ctx, &pb.OpenRequest{Path: "/conflicting-retry", OperationKey: "conflicting-op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	winner := []byte("winner payload")
+	loser := []byte("different bytes")
+	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: first.GetHandle(), Buffer: winner}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(ctx, &pb.WriteRequest{Handle: second.GetHandle(), Buffer: loser}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{
+		Handle: first.GetHandle(), IdempotencyKey: "conflicting-op",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{
+		Handle: second.GetHandle(), IdempotencyKey: "conflicting-op",
+	}); err == nil {
+		t.Fatal("conflicting retry reported success after discarding its acknowledged bytes")
+	}
+	read, err := client.Open(ctx, &pb.OpenRequest{Path: "/conflicting-retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readHandle(t, client, read.GetHandle()); !bytes.Equal(got, winner) {
+		t.Fatalf("committed payload = %q, want %q", got, winner)
+	}
+
+	identicalA, err := client.Open(ctx, &pb.OpenRequest{Path: "/identical-retry", OperationKey: "identical-op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identicalB, err := client.Open(ctx, &pb.OpenRequest{Path: "/identical-retry", OperationKey: "identical-op"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, handle := range []int64{identicalA.GetHandle(), identicalB.GetHandle()} {
+		if _, err := client.Write(ctx, &pb.WriteRequest{Handle: handle, Buffer: winner}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, handle := range []int64{identicalA.GetHandle(), identicalB.GetHandle()} {
+		if _, err := client.Close(ctx, &pb.CloseRequest{Handle: handle, IdempotencyKey: "identical-op"}); err != nil {
+			t.Fatalf("identical retry failed: %v", err)
+		}
+	}
+}
+
 func TestCloseRejectsMismatchedOperationKey(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()
