@@ -179,16 +179,25 @@ func (d *DB) GetOrCreateRebalanceJob(ctx context.Context) (Job, error) {
 // by target_disk. destDisk is 0 for jobs that pick destinations dynamically
 // (drain, reprotect) and the pinned destination for replace.
 func (d *DB) getOrCreateDiskJob(ctx context.Context, kind string, targetDisk, destDisk uint32) (Job, error) {
-	j, err := scanJob(d.db.QueryRowContext(ctx,
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Job{}, err
+	}
+	defer tx.Rollback()
+
+	j, err := scanJob(tx.QueryRowContext(ctx,
 		"SELECT "+jobColumns+" FROM job WHERE kind = ? AND state = ? AND target_disk = ?",
 		kind, JobRunning, targetDisk))
 	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return Job{}, err
+		}
 		return j, nil
 	}
 	if err != sql.ErrNoRows {
 		return Job{}, err
 	}
-	res, err := d.db.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		"INSERT INTO job (kind, state, target_disk, dest_disk, created_at) VALUES (?, ?, ?, ?, ?)",
 		kind, JobRunning, targetDisk, destDisk, time.Now().UnixNano())
 	if err != nil {
@@ -196,6 +205,9 @@ func (d *DB) getOrCreateDiskJob(ctx context.Context, kind string, targetDisk, de
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
+		return Job{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return Job{}, err
 	}
 	return Job{ID: id, Kind: kind, State: JobRunning, TargetDisk: targetDisk, DestDisk: destDisk}, nil

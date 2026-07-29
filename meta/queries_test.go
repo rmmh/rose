@@ -3,6 +3,7 @@ package meta
 import (
 	"bytes"
 	"context"
+	"sync"
 	"testing"
 )
 
@@ -77,5 +78,58 @@ func TestCommitFileCountsRepeatedChunkRefs(t *testing.T) {
 		t.Fatal("ChunkByHash did not find committed chunk")
 	} else if got.VlogID != a.VlogID || got.VaddrOffset != a.VaddrOffset || got.LogicalLen != a.LogicalLen || got.CompressedLen != a.CompressedLen {
 		t.Fatalf("ChunkByHash() = %+v, want %+v", got, a)
+	}
+}
+
+func TestConcurrentMaintenanceRetriesShareOneRunningJob(t *testing.T) {
+	db, err := OpenEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	const callers = 64
+	start := make(chan struct{})
+	ids := make(chan int64, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			job, err := db.GetOrCreateDrainJob(ctx, 7)
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- job.ID
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(ids)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+
+	var first int64
+	for id := range ids {
+		if first == 0 {
+			first = id
+		} else if id != first {
+			t.Fatalf("concurrent retry returned job %d, want shared job %d", id, first)
+		}
+	}
+	var running int
+	if err := db.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM job WHERE kind = ? AND state = ? AND target_disk = ?",
+		JobDrain, JobRunning, 7).Scan(&running); err != nil {
+		t.Fatal(err)
+	}
+	if running != 1 {
+		t.Fatalf("running drain jobs = %d, want 1", running)
 	}
 }
