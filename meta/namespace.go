@@ -226,6 +226,18 @@ func (d *DB) Rmdir(ctx context.Context, path string) error {
 		return err
 	}
 	defer tx.Rollback()
+	prefix := escapeLike(path) + `/%`
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vlog_lease WHERE write_op_id IN (
+		SELECT id FROM write_op
+		WHERE state = ? AND (path = ? OR path LIKE ? ESCAPE '\')
+	)`, WriteOpPrepared, path, prefix); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE write_op SET state = ?
+		WHERE state = ? AND (path = ? OR path LIKE ? ESCAPE '\')`,
+		WriteOpCancelled, WriteOpPrepared, path, prefix); err != nil {
+		return err
+	}
 	var child int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM file_head WHERE parent = ? LIMIT 1`, path).Scan(&child); err == nil {
 		return fmt.Errorf("rmdir %q: directory not empty", path)

@@ -245,6 +245,43 @@ func TestUnlinkCancelsPreparedWriteAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestRmdirCancelsPreparedWritesAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta.db")
+	dataDir := filepath.Join(dir, "plogs")
+	db, err := meta.Open(metaPath)
+	require.NoError(t, err)
+	ctx := context.Background()
+	before := server.NewServerWithDataDir(db, dataDir)
+	before.SetMaintenanceInterval(0)
+	require.NoError(t, before.Recover(ctx))
+	_, err = before.Mkdir(ctx, &pb.MkdirRequest{Path: "/removed-dir"})
+	require.NoError(t, err)
+	_, err = before.Open(ctx, &pb.OpenRequest{
+		Path: "/removed-dir/pending", OperationKey: "removed-dir-prepared-op",
+	})
+	require.NoError(t, err)
+	before.CloseStorage()
+	require.NoError(t, db.Close())
+
+	reopened, err := meta.Open(metaPath)
+	require.NoError(t, err)
+	defer reopened.Close()
+	after := server.NewServerWithDataDir(reopened, dataDir)
+	after.SetMaintenanceInterval(0)
+	require.NoError(t, after.Recover(ctx))
+	defer after.StopMaintenanceDriver()
+	_, err = after.Rmdir(ctx, &pb.RmdirRequest{Path: "/removed-dir"})
+	require.NoError(t, err)
+
+	_, err = after.Open(ctx, &pb.OpenRequest{
+		Path: "/removed-dir/pending", OperationKey: "removed-dir-prepared-op",
+	})
+	if err == nil {
+		t.Fatal("prepared write retry recreated a directory removed while its client was disconnected")
+	}
+}
+
 func TestMkdirCannotOverlapPendingFile(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()
