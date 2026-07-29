@@ -14,6 +14,26 @@ import (
 	"github.com/rmmh/rose/storage"
 )
 
+func TestWriteWaitingBehindCloseCannotMutateRemovedHandle(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+	open, err := s.Open(ctx, &pb.OpenRequest{Path: "/close-write-race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.handles[open.GetHandle()]
+
+	// `h` is the pointer Write captured from the handle map. Complete a
+	// concurrent Close before resuming Write at its post-lookup cut point.
+	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()}); err != nil {
+		t.Fatal(err)
+	}
+	req := &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte("lost")}
+	if _, err := s.writeHandle(ctx, req, h); err == nil || err.Error() != "invalid handle" {
+		t.Fatalf("Write after winning Close = %v, want invalid handle", err)
+	}
+}
+
 func collectChunkSizes(t *testing.T, chunker *chunkers.Chunker) []int {
 	t.Helper()
 	var sizes []int

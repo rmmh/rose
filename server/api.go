@@ -73,6 +73,17 @@ func (h *FileHandle) mtimeOrNow() int64 {
 	return time.Now().UnixNano()
 }
 
+// handleStillRegistered closes the lookup-to-lock race for mutating handle
+// operations. Close removes a handle while holding its stateMu; a Write or
+// Truncate that looked it up earlier but acquired stateMu afterward must not
+// mutate the now-orphaned object and report success for unpublished bytes.
+func (s *Server) handleStillRegistered(handle int64, h *FileHandle) bool {
+	s.handlesMu.Lock()
+	current, ok := s.handles[handle]
+	s.handlesMu.Unlock()
+	return ok && current == h
+}
+
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	s.namespaceMu.Lock()
 	defer s.namespaceMu.Unlock()
@@ -383,8 +394,17 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 		slog.Error("Write failed: invalid handle", "handle", req.GetHandle())
 		return nil, fmt.Errorf("invalid handle")
 	}
+	return s.writeHandle(ctx, req, h)
+}
+
+// writeHandle is the post-lookup half of Write, split out so deterministic
+// concurrency tests can pause at the lookup-to-state-lock cut point.
+func (s *Server) writeHandle(ctx context.Context, req *pb.WriteRequest, h *FileHandle) (*pb.WriteResponse, error) {
 	h.stateMu.Lock()
 	defer h.stateMu.Unlock()
+	if !s.handleStillRegistered(req.GetHandle(), h) {
+		return nil, fmt.Errorf("invalid handle")
+	}
 	if h.snapshotID != 0 {
 		return nil, fmt.Errorf("snapshot handles are read-only")
 	}
@@ -1428,6 +1448,9 @@ func (s *Server) Truncate(ctx context.Context, req *pb.TruncateRequest) (*pb.Tru
 		}
 		h.stateMu.Lock()
 		defer h.stateMu.Unlock()
+		if !s.handleStillRegistered(req.GetHandle(), h) {
+			return nil, fmt.Errorf("invalid handle")
+		}
 		if h.snapshotID != 0 {
 			return nil, fmt.Errorf("snapshot handles are read-only")
 		}
