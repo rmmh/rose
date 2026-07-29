@@ -143,6 +143,30 @@ func TestWriteOperationRetriesOpenWriteAndClose(t *testing.T) {
 	}
 }
 
+func TestCloseRejectsMismatchedOperationKey(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+	open, err := client.Open(ctx, &pb.OpenRequest{Path: "/close-key", OperationKey: "close-key-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(ctx, &pb.WriteRequest{
+		Handle: open.GetHandle(), Buffer: []byte("payload"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{
+		Handle: open.GetHandle(), IdempotencyKey: "close-key-b",
+	}); err == nil {
+		t.Fatal("Close committed a write under a different idempotency key")
+	}
+	if _, err := client.Close(ctx, &pb.CloseRequest{
+		Handle: open.GetHandle(), IdempotencyKey: "close-key-a",
+	}); err != nil {
+		t.Fatalf("Close with the operation's key failed after rejected mismatch: %v", err)
+	}
+}
+
 func TestCommittedWriteRetryFollowsRename(t *testing.T) {
 	s := newServer(t)
 	ctx := context.Background()

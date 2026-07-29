@@ -1013,6 +1013,9 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 	}
 	h.stateMu.Lock()
 	defer h.stateMu.Unlock()
+	if h.writeOpID != 0 && idempotencyKey != "" && idempotencyKey != h.writeKey {
+		return fmt.Errorf("close idempotency key does not match the write operation")
+	}
 	if h.unlinked && h.writeOpID != 0 {
 		// Flush must not make an unlinked name visible, but the handle remains
 		// usable until Release/Close. The final close abandons its unpublished
