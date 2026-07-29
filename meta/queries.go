@@ -875,6 +875,15 @@ func (d *DB) RenameFile(ctx context.Context, oldPath, newPath string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vlog_lease WHERE write_op_id IN (
+		SELECT id FROM write_op WHERE path = ? AND state = ?
+	)`, newPath, WriteOpPrepared); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE write_op SET state = ? WHERE path = ? AND state = ?",
+		WriteOpCancelled, newPath, WriteOpPrepared); err != nil {
+		return err
+	}
 
 	var oldID int64
 	err = tx.QueryRowContext(ctx, "SELECT file_id FROM file_head WHERE path = ?", oldPath).Scan(&oldID)

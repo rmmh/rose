@@ -282,6 +282,52 @@ func TestRmdirCancelsPreparedWritesAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestRenameCancelsPreparedDestinationWriteAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta.db")
+	dataDir := filepath.Join(dir, "plogs")
+	db, err := meta.Open(metaPath)
+	require.NoError(t, err)
+	ctx := context.Background()
+	before := server.NewServerWithDataDir(db, dataDir)
+	before.SetMaintenanceInterval(0)
+	require.NoError(t, before.Recover(ctx))
+
+	for path, data := range map[string]string{"/rename-source": "source", "/rename-dest": "old-dest"} {
+		open, err := before.Open(ctx, &pb.OpenRequest{Path: path})
+		require.NoError(t, err)
+		_, err = before.Write(ctx, &pb.WriteRequest{Handle: open.GetHandle(), Buffer: []byte(data)})
+		require.NoError(t, err)
+		_, err = before.Close(ctx, &pb.CloseRequest{Handle: open.GetHandle()})
+		require.NoError(t, err)
+	}
+	_, err = before.Open(ctx, &pb.OpenRequest{
+		Path: "/rename-dest", OperationKey: "rename-dest-prepared-op",
+	})
+	require.NoError(t, err)
+	before.CloseStorage()
+	require.NoError(t, db.Close())
+
+	reopened, err := meta.Open(metaPath)
+	require.NoError(t, err)
+	defer reopened.Close()
+	after := server.NewServerWithDataDir(reopened, dataDir)
+	after.SetMaintenanceInterval(0)
+	require.NoError(t, after.Recover(ctx))
+	defer after.StopMaintenanceDriver()
+	_, err = after.Rename(ctx, &pb.RenameRequest{
+		OldPath: "/rename-source", NewPath: "/rename-dest",
+	})
+	require.NoError(t, err)
+
+	_, err = after.Open(ctx, &pb.OpenRequest{
+		Path: "/rename-dest", OperationKey: "rename-dest-prepared-op",
+	})
+	if err == nil {
+		t.Fatal("prepared destination write retry could overwrite the renamed source")
+	}
+}
+
 func TestMkdirCannotOverlapPendingFile(t *testing.T) {
 	client := newClient(t)
 	ctx := context.Background()
