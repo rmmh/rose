@@ -433,7 +433,9 @@ func TestSlowVlogReadDoesNotBlockUnrelatedVlog(t *testing.T) {
 }
 
 type writeFaultClient struct {
-	slow bool
+	slow    bool
+	block   <-chan struct{}
+	started chan<- struct{}
 }
 
 func (c *writeFaultClient) Write(context.Context, int64, []byte) (int64, error) {
@@ -445,11 +447,17 @@ func (c *writeFaultClient) Read(context.Context, int64, int) ([]byte, error) {
 }
 
 func (c *writeFaultClient) EnsureAppend(ctx context.Context, _ int64, _ []byte) error {
+	if c.block != nil {
+		if c.started != nil {
+			c.started <- struct{}{}
+		}
+		<-c.block
+	}
 	if c.slow {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	return nil
+	return ctx.Err()
 }
 
 func (c *writeFaultClient) Commit(ctx context.Context, _ int64) error {
@@ -495,6 +503,45 @@ func TestWriteVlogDoesNotWaitForSlowCopyAfterQuorum(t *testing.T) {
 	if err := commitCtx.Err(); err != nil {
 		t.Fatalf("commit waited for slow copy after reaching quorum: %v", err)
 	}
+}
+
+func TestSlowVlogWriteDoesNotBlockUnrelatedVlog(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	slow, err := storage.NewVlog(103, "NONE", 1, 0, []storage.PlogClient{
+		&writeFaultClient{block: block, started: started},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthy, err := storage.NewVlog(104, "NONE", 1, 0, []storage.PlogClient{
+		&writeFaultClient{},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{vlogs: map[uint32]*storage.Vlog{103: slow, 104: healthy}}
+	slowDone := make(chan struct{})
+	go func() {
+		defer close(slowDone)
+		_, _ = s.WriteVlog(context.Background(), &pb.WriteVlogRequest{
+			VlogId: 103, TxnId: 1, Buffer: []byte("slow"),
+		})
+	}()
+	<-started
+	time.AfterFunc(50*time.Millisecond, func() { close(block) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: 104, TxnId: 2, Buffer: []byte("healthy"),
+	}); err != nil {
+		t.Fatalf("slow unrelated vlog blocked healthy write: %v", err)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("healthy write returned after its deadline: %v", err)
+	}
+	<-slowDone
 }
 
 // TestNodeStatePersistsAcrossRecover checks node liveness survives a restart, so

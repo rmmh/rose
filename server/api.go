@@ -1671,8 +1671,8 @@ func (s *Server) ReadVlog(ctx context.Context, req *pb.ReadVlogRequest) (*pb.Rea
 
 func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.WriteVlogResponse, error) {
 	s.vlogMu.Lock()
-	defer s.vlogMu.Unlock()
 	v, ok := s.vlogs[req.GetVlogId()]
+	s.vlogMu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("vlog not found")
 	}
