@@ -145,6 +145,51 @@ func TestRawLogWritesRejectUnrepresentableOffsets(t *testing.T) {
 	}
 }
 
+func TestWritePlogRejectsVlogOwnedShard(t *testing.T) {
+	s := newControlPlaneServer(t, 1)
+	ctx := context.Background()
+	made, err := s.MakeVlog(ctx, &pb.MakeVlogRequest{
+		ProtectionScheme: "NONE", DataShards: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mappings, err := s.db.ListVlogPlogs(ctx, made.GetVlogId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := []byte("first protected append")
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: made.GetVlogId(), TxnId: 1, Buffer: first,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.WritePlog(ctx, &pb.WritePlogRequest{
+		PlogId: mappings[0].PlogID, TxnId: 2, Buffer: []byte("bypass"),
+	}); err == nil {
+		t.Fatal("WritePlog appended directly to a vlog-owned shard")
+	}
+	second := []byte("second protected append")
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{
+		VlogId: made.GetVlogId(), TxnId: 1, Buffer: second,
+	}); err != nil {
+		t.Fatalf("vlog append after rejected shard write: %v", err)
+	}
+	if _, err := s.CommitVlog(ctx, &pb.CommitVlogRequest{TxnId: 1}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReadVlog(ctx, &pb.ReadVlogRequest{
+		VlogId: made.GetVlogId(), Length: uint32(len(first) + len(second)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append(append([]byte(nil), first...), second...)
+	if !bytes.Equal(got.GetBuffer(), want) {
+		t.Fatalf("vlog after rejected shard write = %q, want %q", got.GetBuffer(), want)
+	}
+}
+
 func TestListDirSerializesWithNamespaceMutation(t *testing.T) {
 	s := newControlPlaneServer(t, 1)
 	ctx := context.Background()

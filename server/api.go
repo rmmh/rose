@@ -1740,6 +1740,13 @@ func (s *Server) WritePlog(ctx context.Context, req *pb.WritePlogRequest) (*pb.W
 	if !ok {
 		return nil, fmt.Errorf("plog not found")
 	}
+	owners, err := s.db.VlogsForPlog(ctx, req.GetPlogId())
+	if err != nil {
+		return nil, err
+	}
+	if len(owners) != 0 {
+		return nil, fmt.Errorf("plog %d is owned by vlog %d", req.GetPlogId(), owners[0])
+	}
 	length := plog.LogicalLength()
 	if length > math.MaxUint32 || int64(len(req.GetBuffer())) > MaxVlogBytes-length {
 		return nil, fmt.Errorf("plog %d would exceed its 32-bit address space", req.GetPlogId())
