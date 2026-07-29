@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/rmmh/rose/meta"
@@ -60,6 +62,15 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 	}
 
 	info, err := s.db.GetVlog(ctx, stagingID)
+	if errors.Is(err, sql.ErrNoRows) {
+		finished, finishErr := s.db.FinishRunningPromoteJob(ctx, stagingID)
+		if finishErr != nil {
+			return false, finishErr
+		}
+		if finished {
+			return false, nil
+		}
+	}
 	if err != nil {
 		return false, fmt.Errorf("promote: load vlog %d: %w", stagingID, err)
 	}

@@ -578,3 +578,61 @@ func TestPromotablePrefix(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoverFinishesPromotionWhoseStagingVlogWasRetired(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta.db")
+	roots := map[uint32]string{
+		1: filepath.Join(dir, "disk-1"),
+		2: filepath.Join(dir, "disk-2"),
+	}
+	db, err := meta.Open(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	before := NewServerWithDiskRoots(db, roots)
+	before.SetMaintenanceInterval(0)
+	if err := before.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before.vlogMu.Lock()
+	stagingID, _, err := before.provisionStagingVlogLocked(ctx, 1, 1)
+	before.vlogMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetOrCreatePromoteJob(ctx, stagingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.vlogMu.Lock()
+	err = before.retireVlogLocked(ctx, stagingID)
+	before.vlogMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.CloseStorage()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := meta.Open(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	after := NewServerWithDiskRoots(reopened, roots)
+	after.SetMaintenanceInterval(0)
+	if err := after.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer after.StopMaintenanceDriver()
+	recovered, err := reopened.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != meta.JobDone {
+		t.Fatalf("post-retirement promotion job state = %q, want done", recovered.State)
+	}
+}
