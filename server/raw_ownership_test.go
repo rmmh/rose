@@ -7,6 +7,26 @@ import (
 	pb "github.com/rmmh/rose/proto"
 )
 
+func TestMaintenanceDestinationFencedBeforeJobAssignment(t *testing.T) {
+	s := newControlPlaneServer(t, 2)
+	s.StopMaintenanceDriver()
+	defer s.CloseStorage()
+	ctx := context.Background()
+	s.vlogMu.Lock()
+	id, _, err := s.provisionVlogInDomainLocked(ctx, "DUPLICATE", 1, 0, nil, true)
+	s.vlogMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := s.db.GetVlog(ctx, id)
+	if err != nil || !info.MaintenanceOwned {
+		t.Fatalf("destination not fenced at creation: %v", err)
+	}
+	if _, err := s.WriteVlog(ctx, &pb.WriteVlogRequest{VlogId: id, Buffer: []byte("unowned append")}); err == nil {
+		t.Fatal("raw write admitted before maintenance job assignment")
+	}
+}
+
 func TestRawTransactionsCannotMutateOrPublishFileOwnedLogs(t *testing.T) {
 	s := newControlPlaneServer(t, 1)
 	s.StopMaintenanceDriver()

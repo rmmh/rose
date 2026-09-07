@@ -398,6 +398,17 @@ func (d *DB) RetireVlog(ctx context.Context, vlogID uint32) ([]PlogInfo, error) 
 	}
 	defer tx.Rollback()
 
+	plogs, err := retireVlogTx(ctx, tx, vlogID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return plogs, nil
+}
+
+func retireVlogTx(ctx context.Context, tx *sql.Tx, vlogID uint32) ([]PlogInfo, error) {
 	var liveRemaining int
 	if err := tx.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM chunk WHERE vlog_id = ? AND refcount > 0", vlogID).Scan(&liveRemaining); err != nil {
@@ -439,9 +450,6 @@ func (d *DB) RetireVlog(ctx context.Context, vlogID uint32) ([]PlogInfo, error) 
 		}
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM vlog WHERE id = ?", vlogID); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return plogs, nil

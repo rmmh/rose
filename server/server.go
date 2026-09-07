@@ -343,6 +343,18 @@ func (s *Server) Recover(ctx context.Context) error {
 		s.bucketPolicies[p.Name] = p
 	}
 	s.activeVlogByBucket = make(map[string]uint32)
+	// Maintenance destinations are fenced from creation. A crash before the job
+	// claims one may leave incomplete files/mappings; retire that unreferenced
+	// empty catalog state before attempting to mount or resume jobs.
+	orphans, err := s.db.RetireUnassignedMaintenanceVlogs(ctx)
+	if err != nil {
+		return fmt.Errorf("retire interrupted maintenance provisioning: %w", err)
+	}
+	for _, p := range orphans {
+		if s.diskReachableLocked(p.DiskID) {
+			_ = storage.RemovePlogFiles(s.plogPath(p.DiskID, p.ID))
+		}
+	}
 
 	plogInfos, err := s.db.ListPlogs(ctx)
 	if err != nil {
@@ -694,7 +706,7 @@ func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataSha
 	return s.provisionVlogInDomainLocked(ctx, scheme, dataShards, parityShards, nil)
 }
 
-func (s *Server) provisionVlogInDomainLocked(ctx context.Context, scheme string, dataShards, parityShards int, domain []byte) (uint32, *storage.Vlog, error) {
+func (s *Server) provisionVlogInDomainLocked(ctx context.Context, scheme string, dataShards, parityShards int, domain []byte, maintenanceOwned ...bool) (uint32, *storage.Vlog, error) {
 	switch scheme {
 	case "NONE", "DUPLICATE":
 		if dataShards != 1 || parityShards != 0 {
@@ -723,7 +735,7 @@ func (s *Server) provisionVlogInDomainLocked(ctx context.Context, scheme string,
 			return 0, nil, fmt.Errorf("%w: EC vlog needs 1..%d active disks, got %d", syscall.ENOSPC, len(diskIDs), clientCount)
 		}
 	}
-	return s.provisionVlogCoreLocked(ctx, scheme, dataShards, parityShards, 0, 0, clientCount, diskIDs, domain)
+	return s.provisionVlogCoreLocked(ctx, scheme, dataShards, parityShards, 0, 0, clientCount, diskIDs, domain, maintenanceOwned...)
 }
 
 // provisionStagingVlogLocked creates a replicated staging vlog for an EC bucket:
@@ -749,12 +761,12 @@ func (s *Server) provisionStagingVlogInDomainLocked(ctx context.Context, targetD
 // provisionVlogCoreLocked records a vlog, lays its clientCount shards across the
 // given disks, mounts it, and registers it. The caller must hold
 // vlogMu.
-func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dataShards, parityShards, targetData, targetParity, clientCount int, diskIDs []uint32, domain []byte) (outID uint32, outVlog *storage.Vlog, retErr error) {
+func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dataShards, parityShards, targetData, targetParity, clientCount int, diskIDs []uint32, domain []byte, maintenanceOwned ...bool) (outID uint32, outVlog *storage.Vlog, retErr error) {
 	if err := s.ensureClusterKeys(ctx); err != nil {
 		return 0, nil, err
 	}
 	vlogUID := uid.New()
-	id, err := s.db.MakeVlogInDomain(ctx, vlogUID, scheme, int32(dataShards), int32(parityShards), int32(targetData), int32(targetParity), domain, clientCount)
+	id, err := s.db.MakeVlogInDomain(ctx, vlogUID, scheme, int32(dataShards), int32(parityShards), int32(targetData), int32(targetParity), domain, clientCount, maintenanceOwned...)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -797,6 +809,11 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 			_ = storage.RemovePlogFiles(s.plogPath(sp.diskID, sp.plogID))
 		}
 	}()
+	if len(maintenanceOwned) > 0 && maintenanceOwned[0] {
+		if err := s.maintenanceCheckpoint("maintenance-catalog-created"); err != nil {
+			return 0, nil, err
+		}
+	}
 	siblingUIDs := make([][]byte, clientCount)
 	for shard := 0; shard < clientCount; shard++ {
 		diskID := diskIDs[shard]
@@ -805,13 +822,15 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 			return 0, nil, fmt.Errorf("look up disk %d uid: %w", diskID, err)
 		}
 		plogUID := uid.New()
-		plogID, err := s.db.MakePlog(ctx, plogUID, diskID)
+		plogID, err := s.db.MakeAssignedPlog(ctx, plogUID, diskID, id, shard)
 		if err != nil {
 			return 0, nil, err
 		}
 		shards = append(shards, shardPlog{plogID, diskID, plogUID, diskUID})
-		if err := s.db.AssignPlogToVlog(ctx, id, shard, plogID); err != nil {
-			return 0, nil, err
+		if len(maintenanceOwned) > 0 && maintenanceOwned[0] {
+			if err := s.maintenanceCheckpoint("maintenance-shard-mapped"); err != nil {
+				return 0, nil, err
+			}
 		}
 		sib := plogUID
 		siblingUIDs[shard] = sib[:]

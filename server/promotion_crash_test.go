@@ -67,7 +67,7 @@ func assertPromotedCrashFiles(t *testing.T, s *Server, snapshot uint64) {
 
 func TestPromotionProcessCrashRecovery(t *testing.T) {
 	defer storage.SetECColumnBytesForTest(64)()
-	for _, stage := range []string{"promotion-destination", "ec-rows-synced", "ec-prefix-recorded", "ec-chunk-relocated", "promotion-job-done", "promotion-source-retired"} {
+	for _, stage := range []string{"maintenance-catalog-created", "maintenance-shard-mapped", "maintenance-provisioned", "promotion-destination", "ec-rows-synced", "ec-prefix-recorded", "ec-chunk-relocated", "promotion-job-done", "promotion-source-retired"} {
 		t.Run(stage, func(t *testing.T) {
 			dir := t.TempDir()
 			s, closeServer := openPublicationCrashServer(t, dir, 4)
@@ -109,6 +109,9 @@ func TestPromotionProcessCrashRecovery(t *testing.T) {
 			}
 			if s.vlogs[staging] != nil {
 				t.Fatal("promotion source survived completed recovery")
+			}
+			if destinations := ecVlogs(t, s); len(destinations) != 1 {
+				t.Fatalf("interrupted provisioning leaked EC destinations: count=%d", len(destinations))
 			}
 			jobs, err := s.db.RunningJobs(ctx)
 			if err != nil || len(jobs) != 0 {

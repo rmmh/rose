@@ -459,3 +459,28 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   Atomic creation/assignment or resumable cleanup must address that window.
   Stable job destinations do not implement disk/shard placement epochs or bound
   historical job metadata.
+
+### Interrupted maintenance provisioning cleanup
+
+- Maintenance destinations now persist `maintenance_owned` in their initial vlog
+  insert. Raw writes and file allocation therefore remain fenced even before
+  `SetJobDest` succeeds. Compaction and EC promotion both use this creation mode.
+- Writable recovery retires unassigned maintenance destinations before mounting
+  plogs. Selection and catalog deletion share a transaction and require zero
+  recorded length, no chunk rows, no lease, and no job destination reference.
+  Completed jobs still protect their outputs. Physical deletion follows catalog
+  deletion; inaccessible or undeletable stray files remain for the existing sweep.
+- Provisioning creates each plog row and its shard mapping in one transaction,
+  avoiding a process-crash window that left a shard indistinguishable from a raw,
+  intentionally unassigned plog. Normal failed-provisioning cleanup still runs
+  with cancellation-independent catalog operations.
+- Three additional promotion subprocess cases exit after the vlog insert, after
+  the first shard mapping, and after full provisioning but before assignment.
+  Recovery resumes promotion and leaves exactly one EC destination. Metadata
+  tests preserve ordinary, job-owned, nonempty, chunk-bearing, and leased logs;
+  raw API tests reject writes to a destination before job assignment.
+- Full Go suite, focused metadata/maintenance/provisioning race tests, vet, and
+  whitespace checks passed. Returned assignment errors can retain a fenced empty
+  destination until restart; immediate bounded cleanup and ambiguous SQLite
+  commit outcomes still require work. The tested process-crash gap is now
+  reclaimable without exposing its destination to ordinary writers.

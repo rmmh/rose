@@ -120,9 +120,12 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 	destID := job.DestVlog
 	var dest *storage.Vlog
 	if destID == 0 {
-		destID, dest, err = s.provisionVlogInDomainLocked(ctx, "EC", int(info.TargetDataShards), int(info.TargetParityShards), info.DedupDomain)
+		destID, dest, err = s.provisionVlogInDomainLocked(ctx, "EC", int(info.TargetDataShards), int(info.TargetParityShards), info.DedupDomain, true)
 		if err != nil {
 			return false, fmt.Errorf("promote: provision destination EC vlog: %w", err)
+		}
+		if err := s.maintenanceCheckpoint("maintenance-provisioned"); err != nil {
+			return false, err
 		}
 		if err := s.db.SetJobDest(ctx, job.ID, destID); err != nil {
 			return false, err

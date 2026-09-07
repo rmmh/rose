@@ -54,7 +54,7 @@ func (d *DB) MakeStagingVlog(ctx context.Context, u uid.UID, protectionScheme st
 	return d.MakeVlogInDomain(ctx, u, protectionScheme, dataShards, parityShards, targetDataShards, targetParityShards, nil, 0)
 }
 
-func (d *DB) MakeVlogInDomain(ctx context.Context, u uid.UID, protectionScheme string, dataShards, parityShards, targetDataShards, targetParityShards int32, domain []byte, requiredShards int) (uint32, error) {
+func (d *DB) MakeVlogInDomain(ctx context.Context, u uid.UID, protectionScheme string, dataShards, parityShards, targetDataShards, targetParityShards int32, domain []byte, requiredShards int, maintenanceOwned ...bool) (uint32, error) {
 	if requiredShards < 0 || (len(domain) != 0 && requiredShards == 0) {
 		return 0, fmt.Errorf("scoped vlog requires a positive durable shard requirement")
 	}
@@ -64,7 +64,7 @@ func (d *DB) MakeVlogInDomain(ctx context.Context, u uid.UID, protectionScheme s
 	if domain == nil {
 		domain = []byte{}
 	}
-	res, err := d.db.ExecContext(ctx, "INSERT INTO vlog (uid, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards, dedup_domain, required_shards) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", u[:], protectionScheme, dataShards, parityShards, targetDataShards, targetParityShards, domain, requiredShards)
+	res, err := d.db.ExecContext(ctx, "INSERT INTO vlog (uid, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards, dedup_domain, required_shards, maintenance_owned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", u[:], protectionScheme, dataShards, parityShards, targetDataShards, targetParityShards, domain, requiredShards, len(maintenanceOwned) > 0 && maintenanceOwned[0])
 	if err != nil {
 		return 0, fmt.Errorf("make vlog: %w", err)
 	}
@@ -297,6 +297,31 @@ func (d *DB) SetPlogLength(ctx context.Context, plogID uint32, length int64) err
 func (d *DB) AssignPlogToVlog(ctx context.Context, vlogID uint32, shardIdx int, plogID uint32) error {
 	_, err := d.db.ExecContext(ctx, "INSERT INTO vlog_plog (vlog_id, shard_idx, plog_id) VALUES (?, ?, ?)", vlogID, shardIdx, plogID)
 	return err
+}
+
+// MakeAssignedPlog creates a provisioning shard and its owner in one transaction.
+// A crash must not strand an unassigned row indistinguishable from a raw plog.
+func (d *DB) MakeAssignedPlog(ctx context.Context, u uid.UID, diskID, vlogID uint32, shardIdx int) (uint32, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, "INSERT INTO plog (uid, disk_id) VALUES (?, ?)", u[:], diskID)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO vlog_plog (vlog_id, shard_idx, plog_id) VALUES (?, ?, ?)", vlogID, shardIdx, id); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return uint32(id), nil
 }
 
 // ReplaceShardPlog atomically repoints a vlog shard from a lost plog to a freshly

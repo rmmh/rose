@@ -217,7 +217,7 @@ func (s *Server) provisionCompactionDestinationLocked(ctx context.Context, info 
 	if count <= 0 || len(disks) < count {
 		return 0, nil, fmt.Errorf("compact: %d active disks cannot meet required %d shards", len(disks), count)
 	}
-	id, v, err := s.provisionVlogCoreLocked(ctx, info.ProtectionScheme, int(info.DataShards), int(info.ParityShards), int(info.TargetDataShards), int(info.TargetParityShards), count, disks, info.DedupDomain)
+	id, v, err := s.provisionVlogCoreLocked(ctx, info.ProtectionScheme, int(info.DataShards), int(info.ParityShards), int(info.TargetDataShards), int(info.TargetParityShards), count, disks, info.DedupDomain, true)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -252,7 +252,7 @@ func (s *Server) compactECVlogLocked(ctx context.Context, sourceID uint32, sourc
 		destID := job.DestVlog
 		var dest *storage.Vlog
 		if destID == 0 {
-			destID, dest, err = s.provisionVlogInDomainLocked(ctx, "EC", int(info.DataShards), int(info.ParityShards), info.DedupDomain)
+			destID, dest, err = s.provisionVlogInDomainLocked(ctx, "EC", int(info.DataShards), int(info.ParityShards), info.DedupDomain, true)
 			if err != nil {
 				return fmt.Errorf("compact: provision destination EC vlog: %w", err)
 			}
