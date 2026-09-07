@@ -129,3 +129,28 @@ directory sync, and a retry that bypasses journal installation sync. All produce
 their expected invariant failures. The positive run completed with 934 generated /
 183 distinct states, depth 34. No fairness/liveness, replica loss, physical sector
 refinement, or composition with namespace publication is established by this run.
+
+### Conditional prefix progress
+
+`RosePrefixRecoveryLive` extends the same safety actions rather than implementing
+another protocol. It adds a cumulative budget of two faults across power loss,
+process exit, torn writes, and directory-sync failures. Once that budget is
+exhausted, successful protocol steps are weakly fair; early data/directory flushes
+remain unrestricted. The two modeled prefix requests remain offered until
+acknowledged. These are assumptions about eventual service and caller demand,
+not guarantees that hardware failures stop or clients keep submitting work.
+
+Under those conditions, TLC checks that every non-Idle phase eventually reaches
+Idle (`RecoveryCompletes`) and the two offered prefixes are eventually
+acknowledged (`PrefixesEventuallyAcknowledged`). The run completed with 1,255
+generated / 315 distinct states, depth 34. The unrestricted base safety model is
+unchanged and still allows arbitrarily many crashes and retry failures.
+
+`make -C tla prefix-liveness` checks both positive configurations and three
+sensitivity cases. Blocking replay retirement violates recovery completion;
+removing fair completion or allowing unlimited faults violates eventual
+acknowledgement. Each negative case selects only its expected temporal property
+and rejects safety violations, parser errors, and timeouts as successful evidence.
+This proves conditional progress only for the bounded plog abstraction. Runtime
+scheduling refinement, maintenance/lease-expiry liveness, and composition with the
+catalog and placement models remain open.

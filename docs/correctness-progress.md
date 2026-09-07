@@ -521,3 +521,17 @@ implementation and does not replace or reduce the plan's acceptance criteria.
 - The new make target and mutation runner passed; this batch changes models and
   documentation only. The original large EC placement TLC process remains live
   and is not replaced by this smaller, different-scope model.
+
+### Conditional prefix liveness
+
+- Added a separate liveness configuration extending the exact prefix safety
+  actions, with two cumulative faults and weak fairness for successful protocol
+  completion. It assumes both modeled prefix requests remain offered. It does
+  not constrain the original unrestricted safety configuration.
+- `RecoveryCompletes` and `PrefixesEventuallyAcknowledged` pass: 1,255 generated /
+  315 distinct states, depth 34. Blocking replay retirement, removing fairness,
+  and allowing unbounded faults each produce the expected temporal violation.
+- `make -C tla prefix-liveness` passes both positive configurations and all three
+  sensitivity checks. Assumptions and scope are recorded in the correspondence
+  document. This adds one conditional liveness obligation; maintenance, leases,
+  namespace history, and actual scheduler/refinement obligations remain open.

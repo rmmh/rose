@@ -1,4 +1,4 @@
-.PHONY: all test test-txn test-snapshots test-prefix mutations snapshot-coverage snapshot-mutations prefix-mutations clean
+.PHONY: all test test-txn test-snapshots test-prefix mutations snapshot-coverage snapshot-mutations prefix-mutations prefix-liveness clean
 
 all: test
 
@@ -32,6 +32,10 @@ snapshot-mutations: test-snapshots
 
 test-prefix:
 	java -Xmx512m -XX:+UseParallelGC -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RosePrefixRecovery.cfg RosePrefixRecovery.tla
+	java -Xmx512m -XX:+UseParallelGC -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RosePrefixRecoveryLive.cfg RosePrefixRecoveryLive.tla
 
 prefix-mutations: test-prefix
 	python3 check_prefix_mutations.py
+
+prefix-liveness: test-prefix
+	python3 check_prefix_liveness.py
