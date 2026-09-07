@@ -338,6 +338,16 @@ func (w *workload) doWrite(ctx context.Context, client pb.RoseClient, workerID i
 		w.recordOpErr(ctx, fmt.Errorf("write open %s: %w", path, err))
 		return
 	}
+	// This workload abandons failed writes instead of retrying their handles.
+	// Use the adapter cleanup boundary explicitly; gRPC has no abort method yet.
+	// restartMu remains read-locked by run until this cleanup has completed.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := w.cluster.server().AbortHandle(cleanupCtx, open.GetHandle()); err != nil {
+			w.t.Errorf("abandon workload write: %v", err)
+		}
+	}()
 	// A whole-file overwrite replaces the resource: truncate any prior (possibly
 	// longer) content to zero so the committed version is exactly `data`.
 	if _, err := client.Truncate(ctx, &pb.TruncateRequest{Handle: open.GetHandle(), Size: 0}); err != nil {

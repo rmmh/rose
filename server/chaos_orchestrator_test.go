@@ -53,7 +53,17 @@ func (i *chaosInjector) run(ctx context.Context) {
 
 func (i *chaosInjector) inject(ctx context.Context) {
 	i.active.Store(true)
-	defer i.active.Store(false)
+	defer func() {
+		// Drain operations that observed the outage before classifying subsequent
+		// errors as healthy-cluster failures. Work remains concurrent throughout
+		// injection and recovery; this barrier only closes the fault interval.
+		i.work.restartMu.Lock()
+		i.active.Store(false)
+		i.work.restartMu.Unlock()
+	}()
+	// The run deadline stops new faults, not restoration of an admitted fault.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	// All of these faults retain at least an EC read quorum: node outages are
 	// one at a time; disk maintenance is completed before the next injection.
 	var err error
@@ -75,7 +85,7 @@ func (i *chaosInjector) inject(ctx context.Context) {
 		i.work.restartMu.Unlock()
 	}
 	if ctx.Err() != nil {
-		return // run deadline interrupted a maintenance pass; final sweep is strict
+		err = ctx.Err()
 	}
 	if err != nil {
 		i.t.Errorf("chaos fault failed: %v", err)
@@ -126,7 +136,9 @@ func (i *chaosInjector) failAndReprotect(ctx context.Context) error {
 	if err := s.SetDiskState(ctx, disk, meta.DiskFailed); err != nil {
 		return err
 	}
-	return s.ReprotectDisk(ctx, disk)
+	return i.finishDiskMaintenance(ctx, disk, meta.JobReprotect, func() error {
+		return s.ReprotectDisk(ctx, disk)
+	})
 }
 
 func (i *chaosInjector) drainAndReplace(ctx context.Context) error {
@@ -145,7 +157,43 @@ func (i *chaosInjector) drainAndReplace(ctx context.Context) error {
 		return err
 	}
 	i.cluster.addDisk(newID, node, root)
-	return s.ReplaceDiskWith(ctx, old, newID)
+	return i.finishDiskMaintenance(ctx, old, meta.JobReplace, func() error {
+		// A background pass can finish replacement between retries.
+		if s.DiskStates()[old] == meta.DiskDetached {
+			return nil
+		}
+		return s.ReplaceDiskWith(ctx, old, newID)
+	})
+}
+
+// A maintenance API's nil return can mean it deferred a leased vlog. Completion
+// requires both an empty source and no remaining running job for this operation.
+func (i *chaosInjector) finishDiskMaintenance(ctx context.Context, disk uint32, kind string, step func() error) error {
+	for {
+		if err := step(); err != nil {
+			return err
+		}
+		plogs, err := i.cluster.server().GetDB().PlogsOnDisk(ctx, disk)
+		if err != nil {
+			return err
+		}
+		jobs, err := i.cluster.server().GetDB().RunningJobs(ctx)
+		if err != nil {
+			return err
+		}
+		running := false
+		for _, job := range jobs {
+			running = running || (job.Kind == kind && job.TargetDisk == disk)
+		}
+		if len(plogs) == 0 && !running {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func (i *chaosInjector) bitrotAndRepair(ctx context.Context) error {

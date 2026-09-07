@@ -113,6 +113,14 @@ weekly run selects a different seed. The test requires faults, reads, and writes
 then checks retained data after faults settle. The seed reproduces random choices,
 not a deterministic concurrent execution schedule or minimized trace.
 
+The workload explicitly abandons failed writes using the server's adapter-level
+`AbortHandle` boundary while holding its restart barrier. The gRPC protocol has
+no explicit abort method yet, so this mode does not test network-disconnect lease
+expiry. Disk faults finish only after their source mappings are gone and their
+durable jobs are no longer running. An admitted fault gets its own 30-second
+recovery context; the run deadline stops admission of new work. Requests that
+overlapped a fault finish before the injector clears its active-fault flag.
+
 Both required modes reject every test or package skip and reject empty execution.
 Results and logs use the same artifact format and retention as ordinary jobs.
 Scheduled large models, scale tests, and deterministic trace replay remain open.

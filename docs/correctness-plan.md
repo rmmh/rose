@@ -275,17 +275,20 @@ This does not resolve the separate cross-adapter namespace/handle identity work.
   of undo recovery, this could replay a live writer's pending journal and
   truncate its file behind the mounted handle. Selection now uses read-only
   `InspectPlog`; storage regressions assert that inspection cannot replay undo.
-- The newly enabled 30-second race-enabled chaos run with seed 1 currently
-  **fails**. After the inspection fix, the observed run verified 19 committed
+- The initially enabled 30-second race-enabled chaos run with seed 1 failed.
+  After the inspection fix, that observed run verified 19 committed
   files with zero read mismatches, but reported 98 unexpected degraded-write
-  errors and one bitrot injection with no observed repair. These are outstanding
-  failures, not successful chaos verification. `ReprotectDisk` can return nil
+  errors and one bitrot injection with no observed repair. `ReprotectDisk` can return nil
   after deferring leased/busy vlogs, while the injector treats return as complete
   and clears its active-fault flag. Failed Close attempts also retain retryable
-  writers. Establish explicit maintenance completion and writer-abandonment
-  semantics in the harness, then determine which remaining failures are runtime
-  defects. Do not weaken the strict publication gate or suppress these errors
-  merely to obtain a passing run.
+  writers. Following B13, the harness now explicitly aborts abandoned writes,
+  waits for source-shard removal and durable job completion, completes admitted
+  recovery within its own bounded context, and drains overlapping workload
+  requests before clearing the fault flag. Seed 1 then passed with 11 faults,
+  59 committed files verified, and zero read mismatches or operation errors.
+  The strict publication gate and healthy-state error assertions remain intact.
+  This is bounded sampled evidence, not exhaustive concurrency verification;
+  network abort/expiry histories and deterministic replay remain open.
 - After correcting platform-specific mount options, a full suite executed real
   FUSE mounts under escalated execution and exposed B14. The corrected required
   mount run passes; earlier sandbox skips did not validate this behavior.

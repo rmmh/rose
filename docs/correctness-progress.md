@@ -633,3 +633,27 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   including the formerly failing timestamp test. Adapter regressions and vet
   passed, followed by the full repository Go suite. This resolves the observed Create failure; broader cross-adapter
   namespace identity and notifications remain open.
+
+### Explicit chaos abandonment and fault completion
+
+- Failed workload writes now invoke adapter-level abort with a bounded cleanup
+  context. The workload retains its restart read lock until cleanup completes;
+  successful closed handles make this cleanup a no-op. Cleanup failures fail the
+  test even during an injected fault.
+- Disk fault completion checks both absence of source shards and absence of a
+  running durable job. Accepted/deferred maintenance is retried while workload
+  traffic remains concurrent. Each admitted fault has a bounded recovery context
+  independent of the run's admission deadline. A final request barrier prevents
+  an outage response from being misclassified after the fault flag clears.
+- Regressions verify rejected writes leave no prepared operations and a nil
+  maintenance result cannot report completion while the durable job remains
+  running. Both pass with the race detector.
+- The previously failing seed-1 history now passes: 11 completed faults, 107
+  successful writes, 59 committed files verified, zero read mismatches, and zero
+  operation errors. The history includes reprotection, replacement, outage,
+  bitrot repair, and restart. This does not replace deterministic exploration or
+  network-disconnect expiry tests; the adapter abort assumption is documented.
+- Seed 2 also passed: 13 faults, 117 writes, 62 committed files verified, no
+  mismatches or operation errors. Full repository race verification passed with
+  476 passing test events and four explicit opt-in skips; heavy chaos was checked
+  separately above. Vet and whitespace checks passed.
