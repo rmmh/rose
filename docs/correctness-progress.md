@@ -535,3 +535,24 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   sensitivity checks. Assumptions and scope are recorded in the correspondence
   document. This adds one conditional liveness obligation; maintenance, leases,
   namespace history, and actual scheduler/refinement obligations remain open.
+
+### Reproducible model execution and evidence
+
+- Added `tla/check_models.py` with explicit fast and large configuration sets.
+  It copies the exact model/configuration sources and records their hashes, JAR
+  hash, Java version, command, seed/fingerprint, state counts, depth, duration,
+  exit status, complete logs, and emitted counterexamples. Existing evidence
+  directories cannot be overwritten by a new run.
+- Passing requires TLC's explicit successful completion message, a nonempty
+  complete state graph, zero queued states, and depth/seed data. Parser tests
+  reject missing/partial evidence, failures, and timeouts. Reports remain
+  incomplete until all selected configurations pass; interruption terminates
+  only the runner's own current process and retains its log.
+- `make -C tla check-fast` passed its parser tests and all five configurations:
+  prefix safety 183 states, prefix liveness 315, transaction 396,292,
+  spare-disk transaction 147,520, and snapshot/owner pins 10,400. This batch
+  changes verification tooling and documentation only.
+- Added [model-verification.md](model-verification.md) with runnable commands,
+  artifact interpretation, and scope. The large tier is available for scheduled
+  execution; it was not launched alongside the existing live EC run. Repository
+  CI scheduling and Go/chaos/mount automation remain unfinished requirements.

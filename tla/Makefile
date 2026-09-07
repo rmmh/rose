@@ -1,4 +1,4 @@
-.PHONY: all test test-txn test-snapshots test-prefix mutations snapshot-coverage snapshot-mutations prefix-mutations prefix-liveness clean
+.PHONY: all test test-txn test-snapshots test-prefix mutations snapshot-coverage snapshot-mutations prefix-mutations prefix-liveness check-fast check-large test-evidence clean
 
 all: test
 
@@ -39,3 +39,12 @@ prefix-mutations: test-prefix
 
 prefix-liveness: test-prefix
 	python3 check_prefix_liveness.py
+
+test-evidence:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest test_check_models.py
+
+check-fast: test-evidence
+	python3 check_models.py --tier fast
+
+check-large: test-evidence
+	python3 check_models.py --tier large --timeout 43200
