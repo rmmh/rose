@@ -774,3 +774,16 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   repeated-failure shortcut.
 - Full repository tests, focused reprotection/recovery race tests, vet, and
   whitespace checks passed.
+
+### Validate replacement intent in the catalog transaction
+
+- Fixed B18: `GetOrCreateReplaceJob` compares the requested destination with the
+  running job inside the transaction. Two callers cannot both succeed with
+  different destinations after racing past RPC-level checks. Identical retries
+  preserve the original job, and invalid zero/self replacements create no row.
+- The concurrent regression passes with the race detector and fails against the
+  previous implementation because both conflicting requests are acknowledged.
+  This establishes replacement intent equality, not placement-generation or
+  late-I/O completion fencing.
+- Full repository tests, focused metadata/server replacement and reprotection
+  race tests, vet, and whitespace checks passed.

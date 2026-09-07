@@ -902,7 +902,7 @@ func (s *Server) ReplaceDiskWith(ctx context.Context, oldDisk, newDisk uint32) e
 	if err != nil {
 		return err
 	}
-	newDisk = job.DestDisk // honor a resumed job's pinned destination over the argument
+	newDisk = job.DestDisk // the transaction has validated the requested destination
 	if s.diskState[oldDisk] != meta.DiskDraining {
 		if err := s.setDiskStateLocked(ctx, oldDisk, meta.DiskDraining); err != nil {
 			return err

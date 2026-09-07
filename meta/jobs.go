@@ -166,7 +166,11 @@ func (d *DB) GetOrCreateReprotectJob(ctx context.Context, targetDisk uint32) (Jo
 // GetOrCreateReplaceJob returns the running replace job moving targetDisk's
 // shards onto destDisk, creating one if none exists. The pinned destination is
 // persisted so a crash mid-replace resumes onto the same freshly added disk.
+// A retry naming a different destination is rejected inside the transaction.
 func (d *DB) GetOrCreateReplaceJob(ctx context.Context, targetDisk, destDisk uint32) (Job, error) {
+	if targetDisk == 0 || destDisk == 0 || targetDisk == destDisk {
+		return Job{}, fmt.Errorf("replacement requires distinct nonzero source and destination disks")
+	}
 	return d.getOrCreateDiskJob(ctx, JobReplace, targetDisk, destDisk)
 }
 
@@ -198,6 +202,9 @@ func (d *DB) getOrCreateDiskJob(ctx context.Context, kind string, targetDisk, de
 	if err == nil {
 		if j.Kind != kind {
 			return Job{}, fmt.Errorf("disk %d already has a running %s job", targetDisk, j.Kind)
+		}
+		if kind == JobReplace && j.DestDisk != destDisk {
+			return Job{}, fmt.Errorf("disk %d already has a running replacement onto disk %d", targetDisk, j.DestDisk)
 		}
 		if err := tx.Commit(); err != nil {
 			return Job{}, err

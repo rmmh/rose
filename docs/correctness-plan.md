@@ -311,6 +311,22 @@ retries of the current completion, and readable data across both cycles. The
 previous implementation fails both new regressions. This avoids idle metadata
 growth but does not replace terminal-job retention or placement generations.
 
+### B18 — P2: replacement retries can acknowledge a different destination
+
+The RPC checked the destination before calling the catalog, but
+`GetOrCreateReplaceJob` returned an existing running job without comparing its
+destination with the request. Concurrent RPCs could both pass their preliminary
+checks and both succeed despite naming different replacement disks. The direct
+replacement path also silently preferred the existing job's destination.
+
+The catalog transaction now rejects destination mismatches, so preliminary RPC
+checks are not the ownership authority. Identical retries retain the original
+job. Zero and self-replacement arguments are rejected before inserting a job.
+A concurrent regression requires exactly one destination to win, checks stable
+identical retries, and verifies rejected requests add no catalog rows. The
+previous implementation acknowledges both conflicting requests. Placement epochs
+and delayed storage-completion fencing remain separate requirements.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or
