@@ -1,0 +1,67 @@
+name: Correctness
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [test, race, vet]
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Test evidence parser
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Run verification
+        run: python3 scripts/check_go.py '${{ matrix.mode }}' --output-dir '${{ runner.temp }}/go-evidence'
+      - name: Archive results, including failures and skips
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-${{ matrix.mode }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/go-evidence
+          if-no-files-found: error
+          retention-days: 14
+
+  fast-models:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Test evidence parser
+        run: make -C tla test-evidence
+      - name: Check all fast configurations to completion
+        run: python3 tla/check_models.py --tier fast --timeout 300 --output-dir '${{ runner.temp }}/model-evidence'
+      - name: Archive model evidence and counterexamples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fast-models-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/model-evidence
+          if-no-files-found: error
+          retention-days: 14

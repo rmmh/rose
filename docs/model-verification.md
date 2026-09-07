@@ -54,7 +54,40 @@ make -C tla prefix-mutations
 make -C tla prefix-liveness
 ```
 
-Repository CI scheduling, ordinary/race/vet Go jobs, deterministic trace replay,
-capability-aware mount tests, and scheduled chaos jobs remain requirements of the
-correctness plan. These commands provide model execution and evidence collection;
-adding them does not mean those broader automation requirements are complete.
+## Repository CI
+
+`.github/workflows/correctness.yml` runs on main pushes, pull requests, and manual
+dispatch. Separate Go test, full race, vet, and fast-model jobs preserve evidence
+even when a verification step fails. Go follows `go.mod`; TLC uses the checked-in
+JAR and Temurin Java 21. The workflow has read-only repository permissions.
+
+The Go jobs can also be reproduced locally, using a new output directory for
+each invocation:
+
+```sh
+python3 scripts/check_go.py test --output-dir /tmp/rose-go-test
+python3 scripts/check_go.py race --output-dir /tmp/rose-go-race
+python3 scripts/check_go.py vet --output-dir /tmp/rose-go-vet
+```
+
+The runner disables RAM disks and opt-in heavy chaos, disables test-result caching,
+and gives each Go test binary 180 seconds. It records the command, Go version,
+revision, dirty worktree, duration, exit code, package outcomes, test counts,
+failed tests, and every skipped test. Raw stdout/stderr and a concise summary are
+retained alongside `results.json`. Raw logs can include ephemeral test credentials;
+the console summary only prints outcomes and test identities.
+
+A Go test gate requires a zero exit code, valid event data, completed packages and
+started tests, and at least one passing test. Skips remain visible in the report
+and CI step summary; a passing gate with skips is explicitly partial coverage.
+Vet uses its process exit status. Reports start incomplete so an interrupted run
+cannot leave an earlier passing result. Evidence directories cannot be reused.
+CI artifacts are retained for 14 days; download evidence needed for longer-term
+review. CI service cancellation or setup failure can prevent artifact upload and
+must not be interpreted as completed verification.
+
+The fast-model job allows five minutes per complete configuration. The large tier
+is not substituted into that timeout and is not yet scheduled in CI. Scheduled
+large models, chaos/scale tests, capability-required mount tests, and deterministic
+trace replay remain requirements of the correctness plan. Adding this workflow
+does not establish that GitHub has executed it or that those omitted suites pass.

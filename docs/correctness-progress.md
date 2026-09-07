@@ -556,3 +556,25 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   artifact interpretation, and scope. The large tier is available for scheduled
   execution; it was not launched alongside the existing live EC run. Repository
   CI scheduling and Go/chaos/mount automation remain unfinished requirements.
+
+### Ordinary verification CI and visible skipped coverage
+
+- Added a main-push, pull-request, and manual GitHub Actions workflow with separate
+  ordinary Go, full race, vet, and fast complete TLC jobs. All jobs archive their
+  evidence on verification failure as well as success. Permissions are read-only;
+  Go uses the module version and model runs use the checked-in JAR.
+- Added a local Go runner recording commands, tool version, revision/worktree,
+  logs, package outcomes, passed test counts, and explicit failed/skipped test
+  identities. Test results cannot pass on empty, malformed, all-skipped, or
+  unfinished evidence, even with a zero exit code. Skipped tests are displayed
+  in the CI summary and mark coverage partial. Parser regressions cover these
+  false-success cases.
+- Scheduled large model, heavy chaos/scale, capability-required FUSE mount, and
+  deterministic replay automation remain open. The existing large EC TLC run
+  remains live; it has not been replaced or declared complete. The workflow has
+  been authored locally and has not yet run on GitHub.
+- Local validation passed: evidence-parser regressions, ordinary Go and full
+  race runs (465 passing test events and nine explicit skips each), vet, and all
+  five fast TLC configurations using the workflow's five-minute per-model limit.
+  YAML parsing and whitespace checks passed; hosted workflow execution remains
+  unverified.
