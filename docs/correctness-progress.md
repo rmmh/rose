@@ -502,3 +502,22 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   ordinary abandoned destinations. Cleanup errors themselves retain evidence or
   leave catalog-free files for the stray sweep; actual SQLite VFS ambiguous errors
   and filesystem failure permutations remain verification obligations.
+
+### Small prefix persistence model
+
+- Added `RosePrefixRecovery`, the first dedicated persistence layer requested by
+  the plan. It separates current and durable file/directory state, journal
+  installation and retirement, torn overwrites, retry errors, process exits, and
+  power-loss abstraction. Journal replay is interruptible. Two successive
+  nonempty prefixes expose rollback of previously acknowledged data.
+- The bounded run completed: 934 generated / 183 distinct states, depth 34.
+  Four targeted mutations remove journal directory sync, data sync, retirement
+  directory sync, or the retry installation sync; each fails its expected safety
+  invariant. `make -C tla prefix-mutations` runs the positive and negative checks.
+- Added an explicit runtime correspondence table and limitations. This model
+  checks one plog acknowledgement boundary, not the entire SQLite publication
+  transaction. Sector geometry, journal range extension/identity, corruption
+  rejection, conditional liveness, and compositional refinement remain required.
+- The new make target and mutation runner passed; this batch changes models and
+  documentation only. The original large EC placement TLC process remains live
+  and is not replaced by this smaller, different-scope model.

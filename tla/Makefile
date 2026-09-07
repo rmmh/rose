@@ -1,8 +1,8 @@
-.PHONY: all test test-txn test-snapshots mutations snapshot-coverage snapshot-mutations clean
+.PHONY: all test test-txn test-snapshots test-prefix mutations snapshot-coverage snapshot-mutations prefix-mutations clean
 
 all: test
 
-test: test-txn test-snapshots
+test: test-txn test-snapshots test-prefix
 	java -cp ../tla2tools.jar tlc2.TLC -workers 4 -deadlock -config RoseMetadata.cfg RoseMetadata.tla
 	java -cp ../tla2tools.jar tlc2.TLC -workers 4 -deadlock -config RoseStorageReplica.cfg RoseStorage.tla
 	java -cp ../tla2tools.jar tlc2.TLC -workers 4 -deadlock -config RoseStorageDisk.cfg RoseStorage.tla
@@ -29,3 +29,9 @@ snapshot-coverage:
 
 snapshot-mutations: test-snapshots
 	python3 check_snapshot_mutations.py
+
+test-prefix:
+	java -Xmx512m -XX:+UseParallelGC -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RosePrefixRecovery.cfg RosePrefixRecovery.tla
+
+prefix-mutations: test-prefix
+	python3 check_prefix_mutations.py

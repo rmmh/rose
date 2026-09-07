@@ -97,3 +97,35 @@ caught by the expected invariants. The final time-10 retention configuration als
 completed with no invariant error: 55,454,827 generated / 8,211,719 distinct states,
 depth 22, 18m43s. Conditional liveness and full snapshot immutability history remain
 unverified; neither finite run establishes runtime refinement.
+
+## Prefix persistence and recovery model
+
+`RosePrefixRecovery` models one plog's journal ordering with two successive
+nonempty acknowledged prefixes. Its `published` variable is the prefix whose
+plog Commit has returned successfully; SQLite namespace publication follows that
+boundary in the server and is modeled separately. Versions abstract correct,
+successively longer byte prefixes. `intact=FALSE` represents a torn overwrite
+that can damage previously acknowledged bytes.
+
+| Model action/state | Runtime correspondence | Abstraction or remaining gap |
+| --- | --- | --- |
+| `Prepare`, `SyncJournal`, `RenameJournal` | `saveUndo` streams the baseline, syncs the temporary journal, and renames it | Verified journal contents are abstracted as one prefix version. Partial journal writes and checksum failures are covered by runtime tests, not represented as readable model states. |
+| `InstallJournal`, `FailInstallSync` | `saveUndo` directory sync, including reuse after an error | Presence of a journal does not imply durable installation. The retry mutation removes this distinction and fails. |
+| `WriteData`, `TornWrite` | `Plog.writeLocked` and Commit's in-place ragged/trailer writes | One record abstracts data and integrity metadata. Sector geometry, truncation, range extension, and file identity are not modeled here. |
+| `SyncData`, `RemoveJournal`, `RetireJournal`, `RetryCommit` | `commitUndo` file sync, unlink, directory sync, and retry | No storage acknowledgement may precede durable journal retirement. |
+| `Publish` | Successful plog Commit return | This is not the complete SQLite file-publication transaction. |
+| `FlushData`, `FlushDirectory` | Writes reaching media before an explicit sync | Data and directory persistence are independent; explicit sync establishes ordering rather than being the only possible persistence event. |
+| `Crash`, `ProcessCrash` | Power-loss abstraction; abrupt process exit | Power loss restores only the modeled durable state. A process exit preserves current kernel state. Actual filesystem power-loss testing remains required. |
+| `Replay`, `ReplaySync`, `ReplayRemove`, `ReplayRetire` | `restoreUndo`, including durable retirement on writable reopen | Replay retains its durable baseline until restored data is synced. Journal identity changes and corrupt evidence remain outside this model. |
+
+`PublishedRecoverable` requires a durable correct file prefix or a durable journal
+capable of restoring it. `ReadyPrefixValid` checks the prefix exposed in Idle.
+`RollbackNotOlderThanPublished` prevents a surviving journal from rolling back
+an acknowledged prefix, even when the replacement file itself is already durable.
+
+`make -C tla prefix-mutations` runs the positive configuration and four sensitivity
+checks: missing journal directory sync, missing data sync, missing retirement
+directory sync, and a retry that bypasses journal installation sync. All produce
+their expected invariant failures. The positive run completed with 934 generated /
+183 distinct states, depth 34. No fairness/liveness, replica loss, physical sector
+refinement, or composition with namespace publication is established by this run.
