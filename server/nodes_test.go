@@ -1048,6 +1048,9 @@ func TestWriteVlogDoesNotWaitForSlowCopyAfterQuorum(t *testing.T) {
 	}
 	s := newControlPlaneServer(t, 1)
 	s.vlogs = map[uint32]*storage.Vlog{100: vlog}
+	if _, err := s.db.GetDB().Exec("INSERT INTO vlog (id, protection_scheme, data_shards, parity_shards) VALUES (?, 'NONE', 1, 0)", 100); err != nil {
+		t.Fatal(err)
+	}
 
 	writeCtx, cancelWrite := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancelWrite()
@@ -1081,6 +1084,9 @@ func TestConcurrentWriteVlogCannotCrossAddressBoundary(t *testing.T) {
 	}
 	s := newControlPlaneServer(t, 1)
 	s.vlogs = map[uint32]*storage.Vlog{105: vlog}
+	if _, err := s.db.GetDB().Exec("INSERT INTO vlog (id, protection_scheme, data_shards, parity_shards) VALUES (?, 'NONE', 1, 0)", 105); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 
 	results := make(chan error, 2)
@@ -1122,6 +1128,9 @@ func TestCommitVlogWaitsForConcurrentWrite(t *testing.T) {
 	}
 	s := newControlPlaneServer(t, 1)
 	s.vlogs = map[uint32]*storage.Vlog{106: vlog}
+	if _, err := s.db.GetDB().Exec("INSERT INTO vlog (id, protection_scheme, data_shards, parity_shards) VALUES (?, 'NONE', 1, 0)", 106); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 
 	writeDone := make(chan error, 1)
@@ -1210,7 +1219,15 @@ func TestSlowVlogWriteDoesNotBlockUnrelatedVlog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{vlogs: map[uint32]*storage.Vlog{103: slow, 104: healthy}}
+	s := newControlPlaneServer(t, 1)
+	s.StopMaintenanceDriver()
+	defer s.CloseStorage()
+	s.vlogs = map[uint32]*storage.Vlog{103: slow, 104: healthy}
+	for _, id := range []uint32{103, 104} {
+		if _, err := s.db.GetDB().Exec("INSERT INTO vlog (id, protection_scheme, data_shards, parity_shards) VALUES (?, 'NONE', 1, 0)", id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	slowDone := make(chan struct{})
 	go func() {
 		defer close(slowDone)

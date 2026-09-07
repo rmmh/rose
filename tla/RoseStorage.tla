@@ -23,6 +23,13 @@ Ack(d, o, s) == <<"ack", d, o, s>>
 Messages == {Request(d, o, s) : d \in Disks, o \in Objects, s \in 0..TotalShards} \cup
             {Ack(d, o, s) : d \in Disks, o \in Objects, s \in 0..TotalShards}
 
+\* A completed logical request may still have a retry or acknowledgement in
+\* flight. All of them retain placement ownership until consumed or dropped.
+\* This models the required lease/active-I/O relocation hold; a bare absence
+\* of the <<object, shard>> marker is not proof that a disk is quiescent.
+PendingPlacement(d, o, s) ==
+    <<o, s>> \in pending[d] \/ Request(d, o, s) \in pending[d] \/ Ack(d, o, s) \in pending[d]
+
 \* Bounded TLC configurations select one of these relations with
 \* `DiskNodes <- ...`; every valid relation assigns exactly one node per disk.
 IdentityDiskNodes == {<<d, d>> : d \in Disks}
@@ -79,14 +86,14 @@ AcknowledgedForCommit(o) ==
 \* it may not collapse distinct EC shards (or duplicate copies) onto a node.
 PlacementAllowed(o, s, d) ==
     /\ DiskLive(d)
-    /\ <<o, s>> \notin pending[d]
+    /\ ~PendingPlacement(d, o, s)
     /\ (object_mode[o] = "EC" =>
           \A s2 \in 1..TotalShards : s2 # s =>
-             <<o, s2>> \notin stored[d] /\ <<o, s2>> \notin pending[d])
+             <<o, s2>> \notin stored[d] /\ ~PendingPlacement(d, o, s2))
     /\ IF NodeLevelDurability
        THEN \A d2 \in Disks : DiskNode(d2) = DiskNode(d) =>
               \A s2 \in 0..TotalShards :
-                  <<o, s2>> \notin stored[d2] /\ <<o, s2>> \notin pending[d2]
+                  <<o, s2>> \notin stored[d2] /\ ~PendingPlacement(d2, o, s2)
        ELSE TRUE
 
 Open(o) ==
@@ -311,6 +318,7 @@ DrainStep(j, to, o, s) ==
     /\ job_kind[j] \in {"remove", "replace"}
     /\ DiskReadable(job_disk[j])
     /\ <<o, s>> \in stored[job_disk[j]]
+    /\ ~PendingPlacement(job_disk[j], o, s)
     /\ PlacementAllowed(o, s, to)
     /\ <<o, s>> \notin stored[to]
     /\ to # job_disk[j]
@@ -340,7 +348,7 @@ RebalanceStep(j, from, to, o, s) ==
     /\ job_kind[j] = "rebalance"
     /\ DiskLive(from)
     /\ <<o, s>> \in stored[from]
-    /\ <<o, s>> \notin pending[from]
+    /\ ~PendingPlacement(from, o, s)
     /\ PlacementAllowed(o, s, to)
     /\ <<o, s>> \notin stored[to]
     /\ to # from

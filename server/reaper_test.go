@@ -38,6 +38,11 @@ func TestReapAbandonedWriteOps(t *testing.T) {
 		t.Fatal(err)
 	}
 	h1 := openResp.GetHandle()
+	release, err := s.RetainHandle(h1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
 
 	// Verify it's created and active.
 	ops, err := s.db.ListPreparedWriteOps(ctx)
@@ -60,6 +65,8 @@ func TestReapAbandonedWriteOps(t *testing.T) {
 		t.Fatalf("expected 0 reaped ops (since handle is active), got %d", reaped)
 	}
 
+	// Release adapter ownership; the idle handle is now eligible for expiration.
+	release()
 	// Close the handle without committing by removing it from the server's handles map.
 	s.handlesMu.Lock()
 	delete(s.handles, h1)
@@ -151,6 +158,11 @@ func TestReaperWaitsForWriteOperationRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	release, err := s.RetainHandle(open.GetHandle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
 	h := s.handles[open.GetHandle()]
 	h.stateMu.Lock()
 	key := fmt.Sprintf("legacy-handle-%d-0", open.GetHandle())

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
 	"errors"
@@ -29,8 +28,10 @@ import (
 )
 
 type FileHandle struct {
-	stateMu sync.Mutex
-	id      int64
+	stateMu     sync.Mutex
+	lastUsed    time.Time // renewed under stateMu; expiration fences under the same lock
+	localOwners int       // in-process adapters explicitly retain handles until Release/Close
+	id          int64
 	// pathPtr is the namespace path the handle commits to. It is read on the
 	// write path without the handle's write-op lock and mutated by Rename (to
 	// retarget an open handle to its new name), so access goes through atomic
@@ -89,6 +90,41 @@ func (s *Server) handleStillRegistered(handle int64, h *FileHandle) bool {
 	current, ok := s.handles[handle]
 	s.handlesMu.Unlock()
 	return ok && current == h
+}
+
+func (s *Server) useHandle(handle int64, h *FileHandle) bool {
+	if !s.handleStillRegistered(handle, h) {
+		return false
+	}
+	h.lastUsed = s.now()
+	return true
+}
+
+// RetainHandle gives an in-process adapter explicit ownership of a handle.
+// Unlike an abandoned network connection, a mounted open fd can legitimately
+// remain idle indefinitely. The owner must call the returned release function
+// when its fd/request ends. Network clients renew through handle RPCs instead.
+func (s *Server) RetainHandle(handle int64) (func(), error) {
+	s.handlesMu.Lock()
+	h, ok := s.handles[handle]
+	s.handlesMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("invalid handle")
+	}
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
+	if !s.useHandle(handle, h) {
+		return nil, fmt.Errorf("invalid handle")
+	}
+	h.localOwners++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			h.stateMu.Lock()
+			defer h.stateMu.Unlock()
+			h.localOwners--
+		})
+	}, nil
 }
 
 func (s *Server) discardHandle(handle int64) {
@@ -184,7 +220,7 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	s.handleCounter++
 	s.handlesMu.Unlock()
 
-	h := &FileHandle{id: id, chunks: chunks, openedMtime: openedMtime, pinOwner: handlePinOwner(hid)}
+	h := &FileHandle{lastUsed: s.now(), id: id, chunks: chunks, openedMtime: openedMtime, pinOwner: handlePinOwner(hid)}
 	h.setPath(path)
 	if req.GetOperationKey() != "" {
 		op, err := s.db.CreateWriteOp(ctx, req.GetOperationKey(), path)
@@ -248,7 +284,7 @@ func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) 
 	if err != nil {
 		return nil, err
 	}
-	hs := &FileHandle{
+	hs := &FileHandle{lastUsed: s.now(),
 		id: id, snapshotID: req.GetSnapshotId(), chunks: chunks,
 		openedMtime: mtime, pinOwner: handlePinOwner(hid),
 	}
@@ -478,7 +514,7 @@ func (s *Server) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotReque
 	if req.GetName() == "" {
 		return nil, fmt.Errorf("snapshot name cannot be empty")
 	}
-	id, err := s.db.CreateSnapshot(ctx, req.GetName(), time.Now().UnixNano())
+	id, err := s.db.CreateSnapshot(ctx, req.GetName(), s.now().UnixNano())
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +553,7 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 func (s *Server) writeHandle(ctx context.Context, req *pb.WriteRequest, h *FileHandle) (*pb.WriteResponse, error) {
 	h.stateMu.Lock()
 	defer h.stateMu.Unlock()
-	if !s.handleStillRegistered(req.GetHandle(), h) {
+	if !s.useHandle(req.GetHandle(), h) {
 		return nil, fmt.Errorf("invalid handle")
 	}
 	if h.snapshotID != 0 {
@@ -526,9 +562,8 @@ func (s *Server) writeHandle(ctx context.Context, req *pb.WriteRequest, h *FileH
 	if err := s.ensureWriteOperation(ctx, h, req.GetHandle()); err != nil {
 		return nil, err
 	}
-	mu := s.writeOperationLock(h.writeOpID)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.writeOperationLock(h.writeOpID)
+	defer unlock()
 	op, err := s.db.WriteOpByKey(ctx, h.writeKey)
 	if err != nil {
 		return nil, err
@@ -607,7 +642,7 @@ func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRespons
 func (s *Server) readHandle(ctx context.Context, req *pb.ReadRequest, h *FileHandle) (*pb.ReadResponse, error) {
 	h.stateMu.Lock()
 	defer h.stateMu.Unlock()
-	if !s.handleStillRegistered(req.GetHandle(), h) {
+	if !s.useHandle(req.GetHandle(), h) {
 		return nil, fmt.Errorf("invalid handle")
 	}
 	if err := s.refreshCommittedHandle(ctx, h); err != nil {
@@ -689,50 +724,44 @@ func (s *Server) readChunksAt(ctx context.Context, chunks []meta.ChunkPlacement,
 	return out, nil
 }
 
-// maxRepointRetries bounds how many times resolveVlog will follow a compaction
-// repoint before giving up. Each retry observes a distinct relocation, so a
-// handful covers any realistic burst of back-to-back compactions; exceeding it
-// means the chunk is genuinely unresolvable.
-const maxRepointRetries = 16
-
-// resolveVlog returns the mounted vlog and the placement to read a chunk from,
-// following a compaction repoint when the caller's snapshotted placement names
-// a vlog that has since been retired. Compaction relocates a live chunk's bytes
-// into a fresh vlog and repoints the chunk row (RelocateChunk) before unmounting
-// the old vlog (retireVlogLocked), both under vlogMu -- so a read holding a
-// placement captured before the move finds its vlog gone. Because relocation is
-// content-preserving, re-resolving the chunk by its content hash yields the same
-// bytes at their new home, which is what this does. It only surfaces the
-// not-mounted error when re-resolution makes no progress (the chunk row is gone
-// or still points at the unmounted vlog), i.e. a genuine inconsistency.
+// resolveVlog resolves content identity to the current placement and holds the
+// mounted storage against retirement until endVlogOp.
 func (s *Server) resolveVlog(ctx context.Context, chunk meta.ChunkPlacement) (*storage.Vlog, meta.ChunkPlacement, error) {
-	for attempt := 0; ; attempt++ {
-		s.vlogMu.Lock()
-		vlog, ok := s.vlogs[chunk.VlogID]
-		if ok {
-			s.beginVlogOpLocked(chunk.VlogID)
-		}
-		s.vlogMu.Unlock()
-		if ok {
-			return vlog, chunk, nil
-		}
-		if attempt >= maxRepointRetries {
-			return nil, chunk, fmt.Errorf("vlog %d not mounted", chunk.VlogID)
-		}
-		fresh, found, err := s.db.ChunkByHash(ctx, chunk.Hash)
-		if err != nil {
-			return nil, chunk, err
-		}
-		if !found || fresh.VlogID == chunk.VlogID {
-			// No live chunk row, or it still resolves to the unmounted vlog:
-			// there is no repoint to follow, so fail with the original error.
-			return nil, chunk, fmt.Errorf("vlog %d not mounted", chunk.VlogID)
-		}
-		chunk.VlogID = fresh.VlogID
-		chunk.VaddrOffset = fresh.VaddrOffset
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
+	// Follow the canonical live placement even while the old vlog is mounted.
+	// A rewrite can replace a dead location without retiring its whole vlog.
+	// Unpublished cache chunks have no live row and retain their own placement.
+	fresh, found, err := s.db.LiveChunkByHash(ctx, chunk.Hash)
+	if err != nil {
+		return nil, chunk, err
 	}
+	if found {
+		chunk = fresh
+	}
+	vlog, ok := s.vlogs[chunk.VlogID]
+	if !ok {
+		return nil, chunk, fmt.Errorf("vlog %d not mounted", chunk.VlogID)
+	}
+	s.beginVlogOpLocked(chunk.VlogID)
+	return vlog, chunk, nil
 }
+
 func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.GetattrResponse, error) {
+	if req.GetSnapshotId() != 0 {
+		if req.GetHandle() != 0 {
+			return nil, fmt.Errorf("snapshot stat cannot also specify a handle")
+		}
+		entry, exists, err := s.db.StatSnapshotPath(ctx, req.GetSnapshotId(), req.GetPath())
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, fmt.Errorf("snapshot path not found")
+		}
+		return &pb.GetattrResponse{Size: entry.Size, IsDir: entry.IsDir, Mtime: entry.Mtime}, nil
+	}
+
 	// A stat against an open write handle must reflect read-your-writes within the
 	// handle: the committed file head is not updated until Close, so serve the
 	// live size from the handle's write cache.
@@ -740,8 +769,15 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 		s.handlesMu.Lock()
 		h, ok := s.handles[req.GetHandle()]
 		s.handlesMu.Unlock()
+		if !ok {
+			return nil, fmt.Errorf("invalid handle")
+		}
 		if ok {
 			h.stateMu.Lock()
+			if !s.useHandle(req.GetHandle(), h) {
+				h.stateMu.Unlock()
+				return nil, fmt.Errorf("invalid handle")
+			}
 			if err := s.refreshCommittedHandle(ctx, h); err != nil {
 				h.stateMu.Unlock()
 				return nil, err
@@ -761,6 +797,7 @@ func (s *Server) Getattr(ctx context.Context, req *pb.GetattrRequest) (*pb.Getat
 				return response, nil
 			}
 			h.stateMu.Unlock()
+			return &pb.GetattrResponse{}, nil
 		}
 	}
 	entry, ok, err := s.db.StatPath(ctx, req.GetPath())
@@ -786,9 +823,8 @@ func (s *Server) refreshCommittedHandle(ctx context.Context, h *FileHandle) erro
 	if h.writeTouched {
 		return nil
 	}
-	mu := s.writeOperationLock(h.writeOpID)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.writeOperationLock(h.writeOpID)
+	defer unlock()
 	s.pinMu.Lock()
 	defer s.pinMu.Unlock()
 	op, err := s.db.WriteOpByKey(ctx, h.writeKey)
@@ -845,7 +881,7 @@ func (s *Server) SetHandleMtime(ctx context.Context, handle int64, mtime int64) 
 func (s *Server) setHandleMtime(ctx context.Context, handle int64, mtime int64, h *FileHandle) error {
 	h.stateMu.Lock()
 	defer h.stateMu.Unlock()
-	if !s.handleStillRegistered(handle, h) {
+	if !s.useHandle(handle, h) {
 		return fmt.Errorf("invalid handle")
 	}
 	if h.snapshotID != 0 {
@@ -875,7 +911,13 @@ func (s *Server) setHandleMtime(ctx context.Context, handle int64, mtime int64, 
 func (s *Server) ListDir(ctx context.Context, req *pb.ListDirRequest) (*pb.ListDirResponse, error) {
 	s.namespaceMu.Lock()
 	defer s.namespaceMu.Unlock()
-	entries, err := s.db.ListDir(ctx, req.GetPath())
+	var entries []meta.DirEntry
+	var err error
+	if req.GetSnapshotId() != 0 {
+		entries, err = s.db.ListSnapshotDir(ctx, req.GetSnapshotId(), req.GetPath())
+	} else {
+		entries, err = s.db.ListDir(ctx, req.GetPath())
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -953,15 +995,33 @@ func (s *Server) activeVlogForAppend(ctx context.Context, bucket string, n int) 
 	return s.provisionBucketVlogLocked(ctx, bucket)
 }
 
-func (s *Server) writeOperationLock(id int64) *sync.Mutex {
+type operationLock struct {
+	mu    sync.Mutex
+	users int // holders and waiters; guarded by writeOpsMu
+}
+
+// A registry entry exists only while a holder or waiter owns it. Counting before
+// blocking is essential: removing the old lock while a waiter retains its pointer
+// would let a new caller use a different lock for the same operation.
+func (s *Server) writeOperationLock(id int64) func() {
 	s.writeOpsMu.Lock()
-	defer s.writeOpsMu.Unlock()
-	mu := s.writeOps[id]
-	if mu == nil {
-		mu = &sync.Mutex{}
-		s.writeOps[id] = mu
+	lock := s.writeOps[id]
+	if lock == nil {
+		lock = &operationLock{}
+		s.writeOps[id] = lock
 	}
-	return mu
+	lock.users++
+	s.writeOpsMu.Unlock()
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		s.writeOpsMu.Lock()
+		lock.users--
+		if lock.users == 0 {
+			delete(s.writeOps, id)
+		}
+		s.writeOpsMu.Unlock()
+	}
 }
 
 // ensureWriteOperation lazily supplies an operation for legacy callers that
@@ -1006,7 +1066,7 @@ func (s *Server) ensureRecoveryFileID(ctx context.Context, h *FileHandle, op met
 	return s.db.SetWriteOpTail(ctx, op.ID, buf[:])
 }
 
-func (s *Server) leasedVlogForWriteReserved(ctx context.Context, opID int64, path string, n int, reserved map[uint32]int64) (uint32, *storage.Vlog, error) {
+func (s *Server) leasedVlogForWriteReserved(ctx context.Context, opID int64, pol meta.BucketPolicy, n int, reserved map[uint32]int64) (uint32, *storage.Vlog, error) {
 	if int64(n) > MaxVlogBytes {
 		return 0, nil, fmt.Errorf("chunk exceeds max vlog size")
 	}
@@ -1026,6 +1086,13 @@ func (s *Server) leasedVlogForWriteReserved(ctx context.Context, opID int64, pat
 		return v.Length()
 	}
 	for i := len(leases) - 1; i >= 0; i-- {
+		info, err := s.db.GetVlog(ctx, leases[i])
+		if err != nil {
+			return 0, nil, err
+		}
+		if !bytes.Equal(info.DedupDomain, pol.DedupDomain()) {
+			continue
+		}
 		if v := s.vlogs[leases[i]]; v != nil && lengthOf(leases[i], v)+int64(n) <= MaxVlogBytes {
 			if reserved != nil {
 				reserved[leases[i]] = lengthOf(leases[i], v) + int64(n)
@@ -1033,7 +1100,6 @@ func (s *Server) leasedVlogForWriteReserved(ctx context.Context, opID int64, pat
 			return leases[i], v, nil
 		}
 	}
-	pol := s.bucketPolicyLocked(bucketOf(path))
 	// Prefer a compatible, currently unlocked vlog.  The unique vlog_lease row
 	// arbitrates concurrent claimers; a uniqueness error simply means another
 	// operation won that candidate.
@@ -1049,7 +1115,14 @@ func (s *Server) leasedVlogForWriteReserved(ctx context.Context, opID int64, pat
 		if err != nil {
 			continue
 		}
-		if !vlogMatchesPolicy(info, pol) {
+		held, err := s.db.VlogHasRunningJob(ctx, id)
+		if err != nil {
+			return 0, nil, err
+		}
+		if held || info.MaintenanceOwned {
+			continue
+		}
+		if !vlogMatchesPolicy(info, pol) || !bytes.Equal(info.DedupDomain, pol.DedupDomain()) || s.activeVlogOps[id] != 0 || v.Length() != info.Length {
 			continue
 		}
 		if err := s.db.ClaimVlogLease(ctx, id, opID, len(leases)); err == nil {
@@ -1113,9 +1186,9 @@ func vlogMatchesPolicy(info meta.VlogInfo, pol meta.BucketPolicy) bool {
 // hold vlogMu.
 func (s *Server) provisionForPolicyLocked(ctx context.Context, pol meta.BucketPolicy) (uint32, *storage.Vlog, error) {
 	if pol.ProtectionScheme == "EC" {
-		return s.provisionStagingVlogLocked(ctx, pol.DataShards, pol.ParityShards)
+		return s.provisionStagingVlogInDomainLocked(ctx, pol.DataShards, pol.ParityShards, pol.DedupDomain())
 	}
-	return s.provisionVlogLocked(ctx, pol.ProtectionScheme, pol.DataShards, pol.ParityShards)
+	return s.provisionVlogInDomainLocked(ctx, pol.ProtectionScheme, pol.DataShards, pol.ParityShards, pol.DedupDomain())
 }
 
 func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResponse, error) {
@@ -1154,6 +1227,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 	}
 	h.stateMu.Lock()
 	defer h.stateMu.Unlock()
+	h.lastUsed = s.now()
 	if h.writeOpID != 0 && idempotencyKey != "" && idempotencyKey != h.writeKey {
 		return fmt.Errorf("close idempotency key does not match the write operation")
 	}
@@ -1183,9 +1257,8 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		}
 		return nil
 	}
-	mu := s.writeOperationLock(h.writeOpID)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.writeOperationLock(h.writeOpID)
+	defer unlock()
 	op, err := s.db.WriteOpByKey(ctx, h.writeKey)
 	if err != nil {
 		return err
@@ -1203,39 +1276,15 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		if err != nil {
 			return err
 		}
-		// Make every vlog this operation wrote durable, then record each one's
-		// new length, before publishing the file version. The commit must precede
-		// SetVlogLength: recovery (ReconcileShardLengths) only trims a plog that is
-		// physically longer than the DB length, so the DB length must never exceed
-		// what is durable on the plogs. WriteOpLeases lists every vlog the op
-		// leased across all spills, since leases are not released until commit.
-		leases, err := s.db.WriteOpLeases(ctx, op.ID)
+		placements, err = s.rehomePublicationChunks(ctx, h, placements)
 		if err != nil {
 			return err
 		}
-		for _, vlogID := range leases {
-			s.vlogMu.Lock()
-			v := s.vlogs[vlogID]
-			s.vlogMu.Unlock()
-			if v == nil {
-				continue
-			}
-			if err := v.Commit(ctx, op.ID); err != nil {
-				return err
-			}
-			if err := s.db.SetVlogLength(ctx, vlogID, v.Length()); err != nil {
-				return err
-			}
-		}
 		committedMtime = h.mtimeOrNow()
-		fileID, err = s.db.CommitWriteOpVersion(ctx, op.ID, h.path(), committedMtime, placements)
+		fileID, placements, err = s.publishPreparedVersion(ctx, op.ID, h.path(), committedMtime, placements)
 		if err != nil {
 			return fmt.Errorf("publish write operation: %w", err)
 		}
-		// The committed file version now holds a real refcount on every chunk this
-		// operation deduplicated against, so the in-memory pins that protected them
-		// across the write are no longer needed.
-		s.releasePins(op.ID)
 	} else {
 		fileID = op.FileID
 		placements, err = s.db.FileVersionChunks(ctx, fileID)
@@ -1255,6 +1304,10 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 			return fmt.Errorf("conflicting mtime retry for committed write operation %q", h.writeKey)
 		}
 	}
+	// Release preparation pins on both the first success and a successful retry
+	// after the database committed but its reply was lost. The committed version
+	// owns references now; handle pins are managed separately below.
+	s.releasePins(op.ID)
 	if remove {
 		s.handlesMu.Lock()
 		delete(s.handles, handle)
@@ -1427,7 +1480,7 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte, st
 
 			fileOffset := startOffset + localOffset
 			isLast := final && nextErr == io.EOF
-			nextPrevHash64 := hash64(chunkCopy)
+
 			p, plan, err := s.planChunk(ctx, h, chunkCopy, reserved, fileOffset, prevHash64, ordinal, isLast)
 			if err != nil {
 				return nil, err
@@ -1436,7 +1489,7 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte, st
 			if plan != nil {
 				pending = append(pending, *plan)
 			}
-			prevHash64 = nextPrevHash64
+			prevHash64 = binary.LittleEndian.Uint64(p.Hash[:8])
 			localOffset += int64(len(chunkCopy))
 			ordinal++
 		}
@@ -1455,7 +1508,10 @@ func (s *Server) storeChunks(ctx context.Context, h *FileHandle, data []byte, st
 // reserved placement is returned alongside the bytes to seal, so a later grouped
 // vlog commit can make a whole batch durable together.
 func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, reserved map[uint32]int64, fileOffset int64, prevHash64 uint64, ordinal int, last bool) (meta.ChunkPlacement, *pendingChunk, error) {
-	sum := sha256.Sum256(data)
+	s.vlogMu.Lock()
+	pol := s.bucketPolicyLocked(bucketOf(h.path()))
+	s.vlogMu.Unlock()
+	sum := storage.ContentHash(pol.DedupDomain(), data)
 	hash := sum[:15]
 	// Pin-and-resolve rather than a bare lookup: a dedup hit reuses an existing
 	// chunk's bytes without rewriting them, so it must hold those bytes live
@@ -1468,7 +1524,7 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 		return p, nil, nil
 	}
 	recordLen := storage.ChunkHeaderSize + len(data)
-	vlogID, _, err := s.leasedVlogForWriteReserved(ctx, h.writeOpID, h.path(), recordLen, reserved)
+	vlogID, _, err := s.leasedVlogForWriteReserved(ctx, h.writeOpID, pol, recordLen, reserved)
 	if err != nil {
 		return meta.ChunkPlacement{}, nil, err
 	}
@@ -1495,11 +1551,6 @@ func (s *Server) planChunk(ctx context.Context, h *FileHandle, data []byte, rese
 	}
 	pending := &pendingChunk{vlogID: vlogID, vaddr: vaddr, header: header, payload: data}
 	return meta.ChunkPlacement{Hash: append([]byte(nil), hash...), VlogID: vlogID, VaddrOffset: vaddr, LogicalLen: len(data), CompressedLen: len(data)}, pending, nil
-}
-
-func hash64(data []byte) uint64 {
-	sum := sha256.Sum256(data)
-	return binary.LittleEndian.Uint64(sum[:8])
 }
 
 func pathHint(path string, initial bool, ordinal int) [32]byte {
@@ -1699,7 +1750,7 @@ func (s *Server) Truncate(ctx context.Context, req *pb.TruncateRequest) (*pb.Tru
 		}
 		h.stateMu.Lock()
 		defer h.stateMu.Unlock()
-		if !s.handleStillRegistered(req.GetHandle(), h) {
+		if !s.useHandle(req.GetHandle(), h) {
 			return nil, fmt.Errorf("invalid handle")
 		}
 		if h.snapshotID != 0 {
@@ -1708,9 +1759,8 @@ func (s *Server) Truncate(ctx context.Context, req *pb.TruncateRequest) (*pb.Tru
 		if err := s.ensureWriteOperation(ctx, h, req.GetHandle()); err != nil {
 			return nil, err
 		}
-		mu := s.writeOperationLock(h.writeOpID)
-		mu.Lock()
-		defer mu.Unlock()
+		unlock := s.writeOperationLock(h.writeOpID)
+		defer unlock()
 		if h.cache == nil {
 			if err := s.buildCache(ctx, h); err != nil {
 				return nil, err
@@ -1834,7 +1884,14 @@ func (s *Server) ReadPlog(ctx context.Context, req *pb.ReadPlogRequest) (*pb.Rea
 func (s *Server) CommitPlog(ctx context.Context, req *pb.CommitPlogRequest) (*pb.CommitPlogResponse, error) {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
-	for _, plog := range s.plogs {
+	for id, plog := range s.plogs {
+		owners, err := s.db.VlogsForPlog(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if len(owners) != 0 {
+			continue
+		}
 		if err := plog.Commit(); err != nil {
 			return nil, err
 		}
@@ -1869,6 +1926,15 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 	s.vlogMu.Lock()
 	v, ok := s.vlogs[req.GetVlogId()]
 	if ok {
+		allowed, err := s.rawVlogWritableLocked(ctx, req.GetVlogId())
+		if err != nil {
+			s.vlogMu.Unlock()
+			return nil, err
+		}
+		if !allowed {
+			s.vlogMu.Unlock()
+			return nil, fmt.Errorf("vlog %d is owned by file publication", req.GetVlogId())
+		}
 		s.beginVlogOpLocked(req.GetVlogId())
 	}
 	s.vlogMu.Unlock()
@@ -1884,6 +1950,25 @@ func (s *Server) WriteVlog(ctx context.Context, req *pb.WriteVlogRequest) (*pb.W
 		return nil, err
 	}
 	return &pb.WriteVlogResponse{Offset: uint32(offset)}, nil
+}
+
+// rawVlogWritableLocked keeps raw storage transactions out of file-owned logs.
+// Scoped logs remain file-owned after their lease ends. Admission and lease
+// acquisition share vlogMu, and file allocation excludes active raw requests.
+func (s *Server) rawVlogWritableLocked(ctx context.Context, id uint32) (bool, error) {
+	info, err := s.db.GetVlog(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if len(info.DedupDomain) != 0 || info.MaintenanceOwned {
+		return false, nil
+	}
+	held, err := s.db.VlogHasRunningJob(ctx, id)
+	if err != nil || held {
+		return false, err
+	}
+	leased, err := s.db.VlogLeased(ctx, id)
+	return !leased, err
 }
 
 func (s *Server) beginVlogOpLocked(vlogID uint32) {
@@ -1905,16 +1990,26 @@ func (s *Server) endVlogOp(vlogID uint32) {
 func (s *Server) CommitVlog(ctx context.Context, req *pb.CommitVlogRequest) (*pb.CommitVlogResponse, error) {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
-	for _, vlog := range s.vlogs {
-		if err := vlog.Commit(ctx, req.GetTxnId()); err != nil {
+	prefixes := make(map[uint32]int64, len(s.vlogs))
+	for id, vlog := range s.vlogs {
+		allowed, err := s.rawVlogWritableLocked(ctx, id)
+		if err != nil {
 			return nil, err
 		}
+		if !allowed {
+			continue
+		}
+		prefix, err := vlog.CommitPrefix(ctx, req.GetTxnId())
+		if err != nil {
+			return nil, err
+		}
+		prefixes[id] = prefix
 	}
 	// Publish lengths only after every vlog's bytes are durable. If a commit
 	// fails, recovery may safely trim physical tails back to the older catalog
 	// lengths; the catalog must never get ahead of disk.
-	for id, vlog := range s.vlogs {
-		if err := s.db.SetVlogLength(ctx, id, vlog.Length()); err != nil {
+	for id, prefix := range prefixes {
+		if err := s.db.SetVlogLength(ctx, id, prefix); err != nil {
 			return nil, err
 		}
 	}

@@ -98,6 +98,9 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 		// re-resumed forever.
 		if len(live) == 0 {
 			if err := s.retireVlogLocked(ctx, stagingID); err != nil {
+				if errors.Is(err, errVlogPinned) {
+					return false, nil
+				}
 				return false, err
 			}
 		}
@@ -116,7 +119,7 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 	destID := job.DestVlog
 	var dest *storage.Vlog
 	if destID == 0 {
-		destID, dest, err = s.provisionVlogLocked(ctx, "EC", int(info.TargetDataShards), int(info.TargetParityShards))
+		destID, dest, err = s.provisionVlogInDomainLocked(ctx, "EC", int(info.TargetDataShards), int(info.TargetParityShards), info.DedupDomain)
 		if err != nil {
 			return false, fmt.Errorf("promote: provision destination EC vlog: %w", err)
 		}
@@ -143,6 +146,9 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 	// empty replica: retire it so it does not linger holding only dead bytes.
 	if count == len(live) {
 		if err := s.retireVlogLocked(ctx, stagingID); err != nil {
+			if errors.Is(err, errVlogPinned) {
+				return true, nil // moved live data; retry source retirement after pins clear
+			}
 			return false, err
 		}
 	}
@@ -181,13 +187,17 @@ func (s *Server) writeChunksAsRows(ctx context.Context, txnID int64, source, des
 	if err != nil {
 		return fmt.Errorf("write rows to EC vlog %d: %w", destID, err)
 	}
-	if err := dest.Commit(ctx, txnID); err != nil {
+	durableLength, err := dest.CommitPrefix(ctx, txnID)
+	if err != nil {
 		return fmt.Errorf("commit EC vlog %d: %w", destID, err)
 	}
-	if err := s.db.SetVlogLength(ctx, destID, dest.Length()); err != nil {
+	if err := s.db.SetVlogLength(ctx, destID, durableLength); err != nil {
 		return err
 	}
 	for i, c := range chunks {
+		if err := s.verifyProtectedChunk(ctx, dest, destID, meta.ChunkLoc{Hash: c.Hash, VaddrOffset: base + offsets[i], LogicalLen: c.LogicalLen}); err != nil {
+			return fmt.Errorf("verify EC destination: %w", err)
+		}
 		if err := s.db.RelocateChunk(ctx, c.Hash, destID, base+offsets[i]); err != nil {
 			return fmt.Errorf("reparent chunk: %w", err)
 		}

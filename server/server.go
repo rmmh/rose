@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -106,9 +107,10 @@ type Server struct {
 	handles       map[int64]*FileHandle
 	handleCounter int64
 	writeOpsMu    sync.Mutex
-	writeOps      map[int64]*sync.Mutex
+	writeOps      map[int64]*operationLock
 	writeOpExpiry time.Duration
 	startTime     time.Time
+	now           func() time.Time // immutable after construction; injectable in deterministic tests
 
 	// pinMu guards pinnedChunks. A pinned hash is either reused by an in-flight
 	// write operation or referenced by a live file handle. Reclamation -- gcLocked
@@ -116,8 +118,9 @@ type Server struct {
 	// deduplicated write or an open-but-unlinked file cannot lose its bytes.
 	// Positive owners are write-operation ids; negative owners are handle ids.
 	// Pins are in-memory only: a crash discards both in-flight writes and handles.
-	pinMu        sync.Mutex
-	pinnedChunks map[int64]map[string]struct{}
+	pinMu            sync.Mutex
+	pinnedChunks     map[int64]map[string]struct{}
+	publicationFault func(string) error // installed before requests by fault tests
 }
 
 // MaxVlogBytes is the 32-bit byte-addressable virtual-log boundary described
@@ -147,10 +150,11 @@ func NewServer(db *meta.DB) *Server {
 		compaction:         DefaultCompactionPolicy(),
 		maintenanceEvery:   time.Second,
 		handles:            make(map[int64]*FileHandle),
-		writeOps:           make(map[int64]*sync.Mutex),
+		writeOps:           make(map[int64]*operationLock),
 		pinnedChunks:       make(map[int64]map[string]struct{}),
 		writeOpExpiry:      DefaultWriteOpExpiry,
 		startTime:          time.Now(),
+		now:                time.Now,
 		handleCounter:      newHandleCounter(),
 	}
 	s.resetDiskStates()
@@ -481,6 +485,13 @@ func (s *Server) Recover(ctx context.Context) error {
 		return err
 	}
 
+	// Authenticate sources before any recovery job can copy or re-sign them.
+	for id, plog := range s.plogs {
+		if err := plog.RecoverHashes(ctx, s); err != nil {
+			slog.Warn("failed to recover hashes for plog, continuing", "plogID", id, "error", err)
+		}
+	}
+
 	// Resume any maintenance work interrupted by the crash/restart.
 	jobs, err := s.db.RunningJobs(ctx)
 	if err != nil {
@@ -514,11 +525,6 @@ func (s *Server) Recover(ctx context.Context) error {
 				"job", job.ID, "kind", job.Kind, "error", resumeErr)
 		}
 	}
-	for id, plog := range s.plogs {
-		if err := plog.RecoverHashes(ctx, s); err != nil {
-			slog.Warn("failed to recover hashes for plog, continuing", "plogID", id, "error", err)
-		}
-	}
 	s.startMaintenanceDriver()
 	return nil
 }
@@ -543,6 +549,19 @@ func (s *Server) validatePlogIdentity(ctx context.Context, info meta.PlogInfo, p
 	diskUID, err := uid.FromBytes(header.GetDiskUid())
 	if err != nil || diskUID != wantDiskUID {
 		return fmt.Errorf("plog %d disk uid does not match catalog disk %d", info.ID, info.DiskID)
+	}
+	owners, err := s.db.VlogsForPlog(ctx, info.ID)
+	if err != nil {
+		return err
+	}
+	for _, id := range owners {
+		vlog, err := s.db.GetVlog(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(header.GetDedupDomain(), vlog.DedupDomain) {
+			return fmt.Errorf("plog %d content domain does not match vlog %d", info.ID, id)
+		}
 	}
 	return nil
 }
@@ -598,12 +617,14 @@ func bucketOf(path string) string {
 // already provisioned for it are unaffected. It is the operator knob that makes
 // the file path write EC or N-way DUPLICATE instead of the default mirror.
 func (s *Server) SetBucketPolicy(ctx context.Context, p meta.BucketPolicy) error {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
 	p.Name = cleanPath(p.Name)
 	if err := s.db.SetBucketPolicy(ctx, p); err != nil {
 		return err
 	}
-	s.vlogMu.Lock()
-	defer s.vlogMu.Unlock()
 	s.bucketPolicies[p.Name] = p
 	// Drop the bucket's active vlog so the next append provisions one under the
 	// new scheme rather than continuing to append under the old one.
@@ -631,6 +652,8 @@ func (s *Server) bucketPolicyLocked(bucket string) meta.BucketPolicy {
 // requested copy count so a single number selects the replication factor. The
 // Name field of p is ignored; the requested bucket's name is substituted at use.
 func (s *Server) SetDefaultProtection(p meta.BucketPolicy) {
+	s.namespaceMu.Lock()
+	defer s.namespaceMu.Unlock()
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
 	s.defaultBucketPolicy = &p
@@ -667,6 +690,10 @@ func (s *Server) clearActiveVlogLocked(vlogID uint32) {
 // disks, and the in-memory clients, registering everything. The caller must
 // hold vlogMu.
 func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataShards, parityShards int) (uint32, *storage.Vlog, error) {
+	return s.provisionVlogInDomainLocked(ctx, scheme, dataShards, parityShards, nil)
+}
+
+func (s *Server) provisionVlogInDomainLocked(ctx context.Context, scheme string, dataShards, parityShards int, domain []byte) (uint32, *storage.Vlog, error) {
 	switch scheme {
 	case "NONE", "DUPLICATE":
 		if dataShards != 1 || parityShards != 0 {
@@ -695,7 +722,7 @@ func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataSha
 			return 0, nil, fmt.Errorf("%w: EC vlog needs 1..%d active disks, got %d", syscall.ENOSPC, len(diskIDs), clientCount)
 		}
 	}
-	return s.provisionVlogCoreLocked(ctx, scheme, dataShards, parityShards, 0, 0, clientCount, diskIDs)
+	return s.provisionVlogCoreLocked(ctx, scheme, dataShards, parityShards, 0, 0, clientCount, diskIDs, domain)
 }
 
 // provisionStagingVlogLocked creates a replicated staging vlog for an EC bucket:
@@ -703,6 +730,10 @@ func (s *Server) provisionVlogLocked(ctx context.Context, scheme string, dataSha
 // tolerance) tagged with the EC scheme its chunks will be promoted into. The
 // caller must hold vlogMu.
 func (s *Server) provisionStagingVlogLocked(ctx context.Context, targetData, targetParity int) (uint32, *storage.Vlog, error) {
+	return s.provisionStagingVlogInDomainLocked(ctx, targetData, targetParity, nil)
+}
+
+func (s *Server) provisionStagingVlogInDomainLocked(ctx context.Context, targetData, targetParity int, domain []byte) (uint32, *storage.Vlog, error) {
 	diskIDs := s.placementDisksLocked(0)
 	if len(diskIDs) == 0 {
 		return 0, nil, fmt.Errorf("no active disks configured")
@@ -711,18 +742,18 @@ func (s *Server) provisionStagingVlogLocked(ctx context.Context, targetData, tar
 	if mirrors > len(diskIDs) {
 		return 0, nil, fmt.Errorf("%w: EC staging needs %d active disks for m+1 mirrors, got %d", syscall.ENOSPC, mirrors, len(diskIDs))
 	}
-	return s.provisionVlogCoreLocked(ctx, "DUPLICATE", 1, 0, targetData, targetParity, mirrors, diskIDs)
+	return s.provisionVlogCoreLocked(ctx, "DUPLICATE", 1, 0, targetData, targetParity, mirrors, diskIDs, domain)
 }
 
 // provisionVlogCoreLocked records a vlog, lays its clientCount shards across the
 // given disks, mounts it, and registers it. The caller must hold
 // vlogMu.
-func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dataShards, parityShards, targetData, targetParity, clientCount int, diskIDs []uint32) (outID uint32, outVlog *storage.Vlog, retErr error) {
+func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dataShards, parityShards, targetData, targetParity, clientCount int, diskIDs []uint32, domain []byte) (outID uint32, outVlog *storage.Vlog, retErr error) {
 	if err := s.ensureClusterKeys(ctx); err != nil {
 		return 0, nil, err
 	}
 	vlogUID := uid.New()
-	id, err := s.db.MakeStagingVlog(ctx, vlogUID, scheme, int32(dataShards), int32(parityShards), int32(targetData), int32(targetParity))
+	id, err := s.db.MakeVlogInDomain(ctx, vlogUID, scheme, int32(dataShards), int32(parityShards), int32(targetData), int32(targetParity), domain, clientCount)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -743,23 +774,27 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 		if !cleanup {
 			return
 		}
+		outID = 0
+		outVlog = nil
+		// Cancellation must not leave committed placement rows pointing at
+		// files we have deleted. Retire catalog ownership first; retain physical
+		// evidence if either catalog operation has an uncertain outcome.
+		cleanupCtx := context.WithoutCancel(ctx)
+		if cleanupErr := s.db.DiscardEmptyVlog(cleanupCtx, id); cleanupErr != nil {
+			retErr = errors.Join(retErr, cleanupErr)
+			return
+		}
 		for _, sp := range shards {
+			if cleanupErr := s.db.DiscardUnassignedPlog(cleanupCtx, sp.plogID); cleanupErr != nil {
+				retErr = errors.Join(retErr, cleanupErr)
+				continue
+			}
 			if p, ok := s.plogs[sp.plogID]; ok {
 				_ = p.Close()
 				delete(s.plogs, sp.plogID)
 			}
-			_ = os.Remove(s.plogPath(sp.diskID, sp.plogID))
+			_ = storage.RemovePlogFiles(s.plogPath(sp.diskID, sp.plogID))
 		}
-		if cleanupErr := s.db.DiscardEmptyVlog(ctx, id); cleanupErr != nil {
-			retErr = errors.Join(retErr, cleanupErr)
-		}
-		for _, sp := range shards {
-			if cleanupErr := s.db.DiscardUnassignedPlog(ctx, sp.plogID); cleanupErr != nil {
-				retErr = errors.Join(retErr, cleanupErr)
-			}
-		}
-		outID = 0
-		outVlog = nil
 	}()
 	siblingUIDs := make([][]byte, clientCount)
 	for shard := 0; shard < clientCount; shard++ {
@@ -801,6 +836,7 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 			DataShards:       uint32(dataShards),
 			ParityShards:     uint32(parityShards),
 			SiblingPlogUids:  siblingUIDs,
+			DedupDomain:      domain,
 		}
 		plog, err := storage.OpenPlog(s.plogPath(sp.diskID, sp.plogID), sp.plogID, storage.WithHeader(header))
 		if err != nil {
@@ -813,7 +849,7 @@ func (s *Server) provisionVlogCoreLocked(ctx context.Context, scheme string, dat
 	if err != nil {
 		return 0, nil, fmt.Errorf("create vlog in memory: %w", err)
 	}
-	if scheme == "DUPLICATE" {
+	if scheme == "DUPLICATE" && len(domain) == 0 {
 		if err := vlog.SetWriteQuorum(min(s.minCopies, clientCount)); err != nil {
 			return 0, nil, err
 		}
@@ -904,6 +940,7 @@ func (s *Server) stampVlogMembership(ctx context.Context, h *pb.PlogHeader, vlog
 	h.DataShards = uint32(vinfo.DataShards)
 	h.ParityShards = uint32(vinfo.ParityShards)
 	h.SiblingPlogUids = siblings
+	h.DedupDomain = vinfo.DedupDomain
 	return nil
 }
 
@@ -945,7 +982,7 @@ func (s *Server) mountVlogLocked(ctx context.Context, info meta.VlogInfo) (*stor
 	if err != nil {
 		return nil, fmt.Errorf("mount vlog %d: %w", info.ID, err)
 	}
-	if info.ProtectionScheme == "DUPLICATE" {
+	if info.ProtectionScheme == "DUPLICATE" && len(info.DedupDomain) == 0 && !info.MaintenanceOwned {
 		if err := vlog.SetWriteQuorum(min(s.minCopies, len(clients))); err != nil {
 			return nil, err
 		}

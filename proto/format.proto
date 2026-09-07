@@ -32,4 +32,6 @@ message PlogHeader {
   uint32 parity_shards     = 12;
   // Indexed by shard_index; each entry is a 15-byte plog UID.
   repeated bytes sibling_plog_uids = 13;
+  // Content-address domain, preserved across promotion and relocation.
+  bytes dedup_domain = 14;
 }

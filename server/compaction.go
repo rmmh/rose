@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 
 	"github.com/rmmh/rose/meta"
@@ -133,7 +132,7 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 	destID := job.DestVlog
 	var dest *storage.Vlog
 	if destID == 0 {
-		destID, dest, err = s.provisionVlogLocked(ctx, info.ProtectionScheme, int(info.DataShards), int(info.ParityShards))
+		destID, dest, err = s.provisionCompactionDestinationLocked(ctx, info)
 		if err != nil {
 			return fmt.Errorf("compact: provision destination: %w", err)
 		}
@@ -183,13 +182,17 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 		}{c.Hash, offset})
 	}
 	if len(relocations) > 0 {
-		if err := dest.Commit(ctx, 0); err != nil {
+		durableLength, err := dest.CommitPrefix(ctx, 0)
+		if err != nil {
 			return fmt.Errorf("compact: commit destination: %w", err)
 		}
-		if err := s.db.SetVlogLength(ctx, destID, dest.Length()); err != nil {
+		if err := s.db.SetVlogLength(ctx, destID, durableLength); err != nil {
 			return err
 		}
-		for _, r := range relocations {
+		for i, r := range relocations {
+			if err := s.verifyProtectedChunk(ctx, dest, destID, meta.ChunkLoc{Hash: r.hash, VaddrOffset: r.offset, LogicalLen: live[i].LogicalLen}); err != nil {
+				return fmt.Errorf("compact: verify destination: %w", err)
+			}
 			if err := s.db.RelocateChunk(ctx, r.hash, destID, r.offset); err != nil {
 				return fmt.Errorf("compact: relocate chunk: %w", err)
 			}
@@ -197,6 +200,31 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 	}
 
 	return s.finishCompactionLocked(ctx, sourceID, job.ID)
+}
+
+// Compaction preserves the source's durable protection requirement and staging
+// target. It must not reinterpret fewer currently active disks as a lower
+// replication factor for already published content.
+func (s *Server) provisionCompactionDestinationLocked(ctx context.Context, info meta.VlogInfo) (uint32, *storage.Vlog, error) {
+	disks := s.placementDisksLocked(0)
+	count := info.RequiredShards
+	if count == 0 {
+		count = len(disks)
+		if info.ProtectionScheme == "NONE" {
+			count = 1
+		}
+	}
+	if count <= 0 || len(disks) < count {
+		return 0, nil, fmt.Errorf("compact: %d active disks cannot meet required %d shards", len(disks), count)
+	}
+	id, v, err := s.provisionVlogCoreLocked(ctx, info.ProtectionScheme, int(info.DataShards), int(info.ParityShards), int(info.TargetDataShards), int(info.TargetParityShards), count, disks, info.DedupDomain)
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := v.SetWriteQuorum(count); err != nil {
+		return 0, nil, err
+	}
+	return id, v, nil
 }
 
 // compactECVlogLocked rewrites an EC vlog's live chunks into a fresh EC vlog and
@@ -224,7 +252,7 @@ func (s *Server) compactECVlogLocked(ctx context.Context, sourceID uint32, sourc
 		destID := job.DestVlog
 		var dest *storage.Vlog
 		if destID == 0 {
-			destID, dest, err = s.provisionVlogLocked(ctx, "EC", int(info.DataShards), int(info.ParityShards))
+			destID, dest, err = s.provisionVlogInDomainLocked(ctx, "EC", int(info.DataShards), int(info.ParityShards), info.DedupDomain)
 			if err != nil {
 				return fmt.Errorf("compact: provision destination EC vlog: %w", err)
 			}
@@ -262,20 +290,16 @@ func (s *Server) compactECVlogLocked(ctx context.Context, sourceID uint32, sourc
 // source has already been relocated off it, so a fresh pin resolves to the
 // destination rather than the source.
 func (s *Server) finishCompactionLocked(ctx context.Context, sourceID uint32, jobID int64) error {
-	if pinned := s.pinnedHashList(); len(pinned) > 0 {
-		held, err := s.db.VlogHoldsAnyHash(ctx, sourceID, pinned)
-		if err != nil {
-			return err
-		}
-		if held {
+	if err := s.retireVlogLocked(ctx, sourceID); err != nil {
+		if errors.Is(err, errVlogPinned) {
 			return nil
 		}
-	}
-	if err := s.retireVlogLocked(ctx, sourceID); err != nil {
 		return err
 	}
 	return s.db.MarkJobDone(ctx, jobID)
 }
+
+var errVlogPinned = errors.New("vlog contains pinned chunks")
 
 // retireVlogLocked drops a fully-drained vlog from the catalog and unmounts and
 // deletes its backing plog files, the shared tail of compaction, EC compaction,
@@ -285,6 +309,24 @@ func (s *Server) finishCompactionLocked(ctx context.Context, sourceID uint32, jo
 func (s *Server) retireVlogLocked(ctx context.Context, vlogID uint32) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	// Pins are roots even when persistent reference counts are zero. Enforce
+	// that at the shared deletion boundary, including empty staging retirement,
+	// and keep pin admission fenced through the catalog transaction.
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	var hashes [][]byte
+	for hash := range s.pinnedHashesLocked() {
+		hashes = append(hashes, []byte(hash))
+	}
+	if len(hashes) > 0 {
+		held, err := s.db.VlogHoldsAnyHash(ctx, vlogID, hashes)
+		if err != nil {
+			return err
+		}
+		if held {
+			return fmt.Errorf("retire vlog %d: %w", vlogID, errVlogPinned)
+		}
 	}
 	// RetireVlog is the authoritative deletion. Once admitted, finish both the
 	// catalog transaction and in-memory unmount even if the maintenance caller
@@ -301,7 +343,7 @@ func (s *Server) retireVlogLocked(ctx context.Context, vlogID uint32) error {
 			_ = plog.Close()
 			delete(s.plogs, p.ID)
 		}
-		_ = os.Remove(s.plogPath(p.DiskID, p.ID))
+		_ = storage.RemovePlogFiles(s.plogPath(p.DiskID, p.ID))
 	}
 	s.clearActiveVlogLocked(vlogID)
 	return nil

@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -28,13 +31,16 @@ import (
 )
 
 var (
-	mountPoint = flag.String("mount", "", "Mount point for FUSE (optional)")
-	metaDir    = flag.String("metadir", "", "Directory for SQLite metadata storage")
-	dataDirs   = flag.String("datadirs", "", "Comma-separated list of directories for physical logs; extra positional dirs are also accepted")
-	rpcAddr    = flag.String("rpc", ":50051", "RPC listen address")
-	webdavAddr = flag.String("webdav", "", "WebDAV listen address (e.g. :8080); empty disables it")
-	protection = flag.String("protection", "", "Default protection for new buckets: \"N\" for N-way duplication, or \"N+K\" for erasure coding with N data and K parity shards (e.g. 3 or 3+2). Empty keeps the built-in 2-copy mirror.")
-	debug      = flag.Bool("debug", false, "Verbose logging: per-operation FUSE tracing and debug-level logs. Off by default; the per-op trace noticeably slows the write path.")
+	checkStorage      = flag.Bool("check-storage", false, "Inspect a quiescent catalog and data files without repair; requires metadir and datadirs")
+	checkCatalog      = flag.Bool("check-catalog", false, "Check catalog consistency without starting services or repairing data; requires only metadir")
+	mountPoint        = flag.String("mount", "", "Mount point for FUSE (optional)")
+	metaDir           = flag.String("metadir", "", "Directory for SQLite metadata storage")
+	dataDirs          = flag.String("datadirs", "", "Comma-separated list of directories for physical logs; extra positional dirs are also accepted")
+	rpcAddr           = flag.String("rpc", ":50051", "RPC listen address")
+	webdavAddr        = flag.String("webdav", "", "WebDAV listen address (e.g. :8080); empty disables it")
+	protection        = flag.String("protection", "", "Default protection for new buckets: \"N\" for N-way duplication, or \"N+K\" for erasure coding with N data and K parity shards (e.g. 3 or 3+2). Empty keeps the built-in 2-copy mirror.")
+	snapshotRetention = flag.String("snapshot-retention", "", "Persist snapshot retention as continuous,daily,weekly durations (e.g. 24h,720h,8760h); off disables expiration; empty keeps the saved policy")
+	debug             = flag.Bool("debug", false, "Verbose logging: per-operation FUSE tracing and debug-level logs. Off by default; the per-op trace noticeably slows the write path.")
 )
 
 // parseProtection turns a --protection value into a default bucket policy. A bare
@@ -81,6 +87,28 @@ func parseDataDirs(first string, extra []string) []string {
 
 func main() {
 	flag.Parse()
+	if *checkCatalog || *checkStorage {
+		if *metaDir == "" {
+			log.Fatal("check-catalog requires metadir")
+		}
+		if *checkStorage {
+			if *dataDirs == "" {
+				log.Fatal("check-storage requires datadirs")
+			}
+			roots := map[uint32]string{}
+			for i, root := range parseDataDirs(*dataDirs, flag.Args()) {
+				roots[uint32(i+1)] = root
+			}
+			if err := runStorageCheck(context.Background(), filepath.Join(*metaDir, "rose.db"), roots, os.Stdout); err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
+		if err := runCatalogCheck(context.Background(), filepath.Join(*metaDir, "rose.db"), os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	if *metaDir == "" || *dataDirs == "" {
 		log.Fatalf("Missing required arguments. Usage: ./rose --metadir <dir> --datadirs <dir1,dir2> [dir3 ...] [--mount <dir>] [--webdav :8080]")
@@ -128,6 +156,15 @@ func main() {
 		}
 		roseServer.SetDefaultProtection(pol)
 		log.Printf("Default protection: %s", *protection)
+	}
+	if *snapshotRetention != "" {
+		p, err := parseSnapshotRetention(*snapshotRetention)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := roseServer.SetSnapshotRetention(context.Background(), p); err != nil {
+			log.Fatal(err)
+		}
 	}
 	if err := roseServer.Recover(context.Background()); err != nil {
 		log.Fatal("recover storage:", err)
@@ -235,4 +272,61 @@ func main() {
 	log.Println("Shutting down gRPC server...")
 	grpcServer.GracefulStop()
 	log.Println("Shutdown complete.")
+}
+
+func parseSnapshotRetention(value string) (*meta.SnapshotRetention, error) {
+	if value == "off" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ",")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("snapshot retention requires continuous,daily,weekly durations or off")
+	}
+	windows := make([]time.Duration, 3)
+	for i, p := range parts {
+		duration, err := time.ParseDuration(strings.TrimSpace(p))
+		if err != nil || duration < 0 {
+			return nil, fmt.Errorf("invalid snapshot retention duration %q", p)
+		}
+		windows[i] = duration
+	}
+	if windows[0] > windows[1] || windows[1] > windows[2] {
+		return nil, fmt.Errorf("snapshot retention windows must be nondecreasing")
+	}
+	return &meta.SnapshotRetention{Continuous: windows[0], Daily: windows[1], Weekly: windows[2]}, nil
+}
+
+func runCatalogCheck(ctx context.Context, path string, out io.Writer) error {
+	issues, err := meta.CheckCatalogFile(ctx, path)
+	if err != nil {
+		return err
+	}
+	return writeConsistencyReport(out, "catalog", issues)
+}
+
+func runStorageCheck(ctx context.Context, path string, roots map[uint32]string, out io.Writer) error {
+	issues, err := meta.CheckStorageFiles(ctx, path, roots)
+	if err != nil {
+		return err
+	}
+	return writeConsistencyReport(out, "catalog-and-files", issues)
+}
+
+func writeConsistencyReport(out io.Writer, scope string, issues []meta.ConsistencyIssue) error {
+	if issues == nil {
+		issues = []meta.ConsistencyIssue{}
+	}
+	report := struct {
+		Scope  string                  `json:"scope"`
+		Issues []meta.ConsistencyIssue `json:"issues"`
+	}{scope, issues}
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(report); err != nil {
+		return err
+	}
+	if len(issues) > 0 {
+		return fmt.Errorf("%s has %d consistency issues", scope, len(issues))
+	}
+	return nil
 }

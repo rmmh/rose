@@ -6,19 +6,21 @@ EXTENDS Integers, FiniteSets
 \* only the changed leaf and root, sharing the other leaf with older roots.
 \* A snapshot is therefore only a timestamped root reference.
 
-CONSTANTS RootNodes, LeafNodes, Chunks, Snapshots,
+CONSTANTS RootNodes, LeafNodes, Chunks, Snapshots, Owners,
           ContinuousWindow, DailyWindow, WeeklyWindow,
           DailyPeriod, WeeklyPeriod, MaxTime
 
 Nodes == RootNodes \cup LeafNodes
 
-VARIABLES now, live_root, snapshot_state, snapshot_root, snapshot_time,
+VARIABLES now, live_root, snapshot_state, snapshot_root, snapshot_time, snapshot_generation,
           node_state, left_child, right_child, leaf_chunks,
-          node_refcount, chunk_state, chunk_refcount, pinned_chunks
+          node_refcount, chunk_state, chunk_refcount, owner_pins
 
-vars == <<now, live_root, snapshot_state, snapshot_root, snapshot_time,
+vars == <<now, live_root, snapshot_state, snapshot_root, snapshot_time, snapshot_generation,
           node_state, left_child, right_child, leaf_chunks,
-          node_refcount, chunk_state, chunk_refcount, pinned_chunks>>
+          node_refcount, chunk_state, chunk_refcount, owner_pins>>
+
+PinnedChunks == UNION {owner_pins[o] : o \in Owners}
 
 InitRoot == CHOOSE r \in RootNodes : TRUE
 InitLeft == CHOOSE l \in LeafNodes : TRUE
@@ -47,13 +49,14 @@ Init ==
     /\ snapshot_state = [s \in Snapshots |-> "empty"]
     /\ snapshot_root = [s \in Snapshots |-> "none"]
     /\ snapshot_time = [s \in Snapshots |-> 0]
+    /\ snapshot_generation = [s \in Snapshots |-> 0]
     /\ node_state = [n \in Nodes |-> IF n \in {InitRoot, InitLeft, InitRight} THEN "active" ELSE "free"]
     /\ left_child = [r \in RootNodes |-> IF r = InitRoot THEN InitLeft ELSE "none"]
     /\ right_child = [r \in RootNodes |-> IF r = InitRoot THEN InitRight ELSE "none"]
     /\ leaf_chunks = [l \in LeafNodes |-> IF l = InitLeft THEN {InitChunkLeft}
                                            ELSE IF l = InitRight THEN {InitChunkRight} ELSE {}]
     /\ chunk_state = [c \in Chunks |-> IF c \in {InitChunkLeft, InitChunkRight} THEN "committed" ELSE "new"]
-    /\ pinned_chunks = {}
+    /\ owner_pins = [o \in Owners |-> {}]
     /\ node_refcount = NodeRefcounts(live_root, snapshot_state, snapshot_root,
                                      node_state, left_child, right_child)
     /\ chunk_refcount = ChunkRefcounts(node_state, leaf_chunks)
@@ -81,15 +84,16 @@ SnapshotReadable(s) == \A c \in VisibleChunks(snapshot_root[s]) : chunk_state[c]
 CommitChunk(c) ==
     /\ chunk_state[c] = "new"
     /\ chunk_state' = [chunk_state EXCEPT ![c] = "committed"]
-    /\ UNCHANGED <<now, live_root, snapshot_state, snapshot_root, snapshot_time,
+    /\ UNCHANGED <<now, live_root, snapshot_state, snapshot_root, snapshot_time, snapshot_generation,
                   node_state, left_child, right_child, leaf_chunks,
-                  node_refcount, chunk_refcount, pinned_chunks>>
+                  node_refcount, chunk_refcount, owner_pins>>
 
 \* Publishing one metadata mutation creates exactly two new nodes: a root and
 \* one leaf.  The unmodified branch remains shared by every older root.
 Publish(s, newRoot, newLeaf, newChunk, side) ==
     /\ s \in Snapshots
-    /\ snapshot_state[s] = "empty"
+    /\ snapshot_state[s] \in {"empty", "expired"}
+    /\ snapshot_generation[s] < 2
     /\ node_state[newRoot] = "free"
     /\ node_state[newLeaf] = "free"
     /\ newRoot \in RootNodes /\ newLeaf \in LeafNodes
@@ -105,46 +109,44 @@ Publish(s, newRoot, newLeaf, newChunk, side) ==
        /\ snapshot_state' = [snapshot_state EXCEPT ![s] = "active"]
        /\ snapshot_root' = [snapshot_root EXCEPT ![s] = newRoot]
        /\ snapshot_time' = [snapshot_time EXCEPT ![s] = now + 1]
+       /\ snapshot_generation' = [snapshot_generation EXCEPT ![s] = @ + 1]
        /\ now' = now + 1
-       /\ node_refcount' = NodeRefcounts(newRoot,
-                                          [snapshot_state EXCEPT ![s] = "active"],
-                                          [snapshot_root EXCEPT ![s] = newRoot],
-                                          ns,
-                                          [left_child EXCEPT ![newRoot] = IF side = "left" THEN newLeaf ELSE left_child[live_root]],
-                                          [right_child EXCEPT ![newRoot] = IF side = "right" THEN newLeaf ELSE right_child[live_root]])
-       /\ chunk_refcount' = ChunkRefcounts(ns, [leaf_chunks EXCEPT ![newLeaf] = {newChunk}])
-    /\ UNCHANGED <<chunk_state, pinned_chunks>>
+       /\ node_refcount' = [n \in Nodes |-> node_refcount[n]
+            + (IF n = newRoot THEN 2 ELSE 0)
+            - (IF n = live_root THEN 1 ELSE 0)
+            + (IF n = newLeaf THEN 1 ELSE 0)
+            + (IF n = (IF side = "left" THEN right_child[live_root] ELSE left_child[live_root]) THEN 1 ELSE 0)]
+       /\ chunk_refcount' = [c \in Chunks |-> chunk_refcount[c] + (IF c = newChunk THEN 1 ELSE 0)]
+    /\ UNCHANGED <<chunk_state, owner_pins>>
 
 Tick ==
     /\ now < MaxTime
     /\ now' = now + 1
-    /\ UNCHANGED <<live_root, snapshot_state, snapshot_root, snapshot_time,
+    /\ UNCHANGED <<live_root, snapshot_state, snapshot_root, snapshot_time, snapshot_generation,
                   node_state, left_child, right_child, leaf_chunks,
-                  node_refcount, chunk_state, chunk_refcount, pinned_chunks>>
+                  node_refcount, chunk_state, chunk_refcount, owner_pins>>
 
 ExpireSnapshot(s) ==
     /\ snapshot_state[s] = "active"
     /\ ~Retained(s)
     /\ snapshot_state' = [snapshot_state EXCEPT ![s] = "expired"]
-    /\ node_refcount' = NodeRefcounts(live_root,
-                                       [snapshot_state EXCEPT ![s] = "expired"], snapshot_root,
-                                       node_state, left_child, right_child)
-    /\ UNCHANGED <<now, live_root, snapshot_root, snapshot_time, node_state,
+    /\ node_refcount' = [node_refcount EXCEPT ![snapshot_root[s]] = @ - 1]
+    /\ UNCHANGED <<now, live_root, snapshot_root, snapshot_time, snapshot_generation, node_state,
                   left_child, right_child, leaf_chunks, chunk_state,
-                  chunk_refcount, pinned_chunks>>
+                  chunk_refcount, owner_pins>>
 
-PinChunk(c) ==
+PinChunk(o, c) ==
     /\ chunk_state[c] = "committed"
     /\ chunk_refcount[c] > 0
-    /\ pinned_chunks' = pinned_chunks \cup {c}
-    /\ UNCHANGED <<now, live_root, snapshot_state, snapshot_root, snapshot_time,
+    /\ owner_pins' = [owner_pins EXCEPT ![o] = @ \cup {c}]
+    /\ UNCHANGED <<now, live_root, snapshot_state, snapshot_root, snapshot_time, snapshot_generation,
                   node_state, left_child, right_child, leaf_chunks, node_refcount,
                   chunk_state, chunk_refcount>>
 
-UnpinChunk(c) ==
-    /\ c \in pinned_chunks
-    /\ pinned_chunks' = pinned_chunks \ {c}
-    /\ UNCHANGED <<now, live_root, snapshot_state, snapshot_root, snapshot_time,
+UnpinChunk(o, c) ==
+    /\ c \in owner_pins[o]
+    /\ owner_pins' = [owner_pins EXCEPT ![o] = @ \ {c}]
+    /\ UNCHANGED <<now, live_root, snapshot_state, snapshot_root, snapshot_time, snapshot_generation,
                   node_state, left_child, right_child, leaf_chunks, node_refcount,
                   chunk_state, chunk_refcount>>
 
@@ -155,26 +157,25 @@ GCNode(n) ==
     /\ left_child' = IF n \in RootNodes THEN [left_child EXCEPT ![n] = "none"] ELSE left_child
     /\ right_child' = IF n \in RootNodes THEN [right_child EXCEPT ![n] = "none"] ELSE right_child
     /\ leaf_chunks' = IF n \in LeafNodes THEN [leaf_chunks EXCEPT ![n] = {}] ELSE leaf_chunks
-    /\ node_refcount' = NodeRefcounts(live_root, snapshot_state, snapshot_root,
-                                       [node_state EXCEPT ![n] = "free"],
-                                       IF n \in RootNodes THEN [left_child EXCEPT ![n] = "none"] ELSE left_child,
-                                       IF n \in RootNodes THEN [right_child EXCEPT ![n] = "none"] ELSE right_child)
-    /\ chunk_refcount' = ChunkRefcounts([node_state EXCEPT ![n] = "free"],
-                                         IF n \in LeafNodes THEN [leaf_chunks EXCEPT ![n] = {}] ELSE leaf_chunks)
-    /\ UNCHANGED <<now, live_root, snapshot_state, snapshot_root, snapshot_time,
-                  chunk_state, pinned_chunks>>
+    /\ node_refcount' = [x \in Nodes |-> node_refcount[x]
+         - (IF n \in RootNodes THEN IF x \in {left_child[n], right_child[n]} THEN 1 ELSE 0 ELSE 0)]
+    /\ chunk_refcount' = [c \in Chunks |-> chunk_refcount[c]
+         - (IF n \in LeafNodes THEN IF c \in leaf_chunks[n] THEN 1 ELSE 0 ELSE 0)]
+    /\ UNCHANGED <<now, live_root, snapshot_state, snapshot_root, snapshot_time, snapshot_generation,
+                  chunk_state, owner_pins>>
 
 GCChunk(c) ==
     /\ chunk_state[c] = "committed"
     /\ chunk_refcount[c] = 0
-    /\ c \notin pinned_chunks
+    /\ c \notin PinnedChunks
     /\ chunk_state' = [chunk_state EXCEPT ![c] = "collected"]
-    /\ UNCHANGED <<now, live_root, snapshot_state, snapshot_root, snapshot_time,
+    /\ UNCHANGED <<now, live_root, snapshot_state, snapshot_root, snapshot_time, snapshot_generation,
                   node_state, left_child, right_child, leaf_chunks, node_refcount,
-                  chunk_refcount, pinned_chunks>>
+                  chunk_refcount, owner_pins>>
 
 Next ==
-    \/ \E c \in Chunks : CommitChunk(c) \/ PinChunk(c) \/ UnpinChunk(c) \/ GCChunk(c)
+    \/ \E c \in Chunks : CommitChunk(c) \/ GCChunk(c)
+    \/ \E o \in Owners, c \in Chunks : PinChunk(o, c) \/ UnpinChunk(o, c)
     \/ \E s \in Snapshots, r \in RootNodes, l \in LeafNodes, c \in Chunks, side \in {"left", "right"} : Publish(s, r, l, c, side)
     \/ \E s \in Snapshots : ExpireSnapshot(s)
     \/ \E n \in Nodes : GCNode(n)
@@ -183,7 +184,10 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
+    /\ owner_pins \in [Owners -> SUBSET Chunks]
     /\ live_root \in RootNodes
+    /\ now \in 0..MaxTime
+    /\ snapshot_generation \in [Snapshots -> 0..2]
     /\ \A s \in Snapshots : snapshot_state[s] \in {"empty", "active", "expired"}
     /\ \A n \in Nodes : node_state[n] \in {"free", "active"} /\ node_refcount[n] \in Nat
     /\ \A c \in Chunks : chunk_state[c] \in {"new", "committed", "collected"} /\ chunk_refcount[c] \in Nat
@@ -193,6 +197,17 @@ NodeRefsCorrect == node_refcount = NodeRefcounts(live_root, snapshot_state, snap
 ChunkRefsCorrect == chunk_refcount = ChunkRefcounts(node_state, leaf_chunks)
 RetainedSnapshotsReadable == \A s \in Snapshots : Retained(s) => SnapshotReadable(s)
 NoCollectedReachableChunk == \A c \in VisibleChunks(live_root) : chunk_state[c] = "committed"
-NoPins == pinned_chunks = {}
+NoPins == PinnedChunks = {}
+PinnedChunksReadable == \A c \in PinnedChunks : chunk_state[c] = "committed"
+
+\* Negated coverage predicates: checking one as an invariant must find a
+\* counterexample. They are witnesses of exercised horizons, not safety checks.
+NoDailyOnlySnapshot == ~\E s \in Snapshots :
+    Retained(s) /\ Age(s) > ContinuousWindow /\ Age(s) <= DailyWindow
+NoWeeklyOnlySnapshot == ~\E s \in Snapshots :
+    Retained(s) /\ Age(s) > DailyWindow /\ Age(s) <= WeeklyWindow
+NoPastWeeklyCandidate == ~\E s \in Snapshots : snapshot_state[s] = "active" /\ Age(s) > WeeklyWindow
+NoExpiredSnapshot == \A s \in Snapshots : snapshot_state[s] # "expired"
+NoReusedSnapshotSlot == \A s \in Snapshots : snapshot_generation[s] <= 1
 
 =============================================================================

@@ -123,6 +123,9 @@ func (s *Server) RunMaintenanceOnce(ctx context.Context) error {
 	if _, err := s.PromoteStaging(ctx); err != nil {
 		recordErr(err)
 	}
+	if _, err := s.ExpireSnapshots(ctx); err != nil {
+		recordErr(err)
+	}
 	if _, err := s.gcLocked(ctx); err != nil {
 		recordErr(err)
 	}

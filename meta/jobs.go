@@ -224,8 +224,33 @@ func (d *DB) getOrCreateDiskJob(ctx context.Context, kind string, targetDisk, de
 }
 
 func (d *DB) SetJobDest(ctx context.Context, jobID int64, destVlog uint32) error {
-	_, err := d.db.ExecContext(ctx, "UPDATE job SET dest_vlog = ? WHERE id = ?", destVlog, jobID)
-	return err
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, "UPDATE vlog SET maintenance_owned=1 WHERE id=?", destVlog)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("maintenance destination %d does not exist", destVlog)
+	}
+	res, err = tx.ExecContext(ctx, "UPDATE job SET dest_vlog=? WHERE id=? AND state=?", destVlog, jobID, JobRunning)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("running maintenance job %d does not exist", jobID)
+	}
+	return tx.Commit()
+}
+
+// VlogHasRunningJob fences new appends to sources of unfinished rewrites.
+func (d *DB) VlogHasRunningJob(ctx context.Context, id uint32) (bool, error) {
+	var held bool
+	err := d.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM job WHERE state=? AND target_vlog=?)", JobRunning, id).Scan(&held)
+	return held, err
 }
 
 // FinishRunningPromoteJob marks any running promotion job for a staging vlog
@@ -417,8 +442,8 @@ func (d *DB) GetVlog(ctx context.Context, vlogID uint32) (VlogInfo, error) {
 	var info VlogInfo
 	var rawUID []byte
 	err := d.db.QueryRowContext(ctx,
-		"SELECT id, uid, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards FROM vlog WHERE id = ?", vlogID).
-		Scan(&info.ID, &rawUID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards)
+		"SELECT id, uid, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards, dedup_domain, required_shards, maintenance_owned FROM vlog WHERE id = ?", vlogID).
+		Scan(&info.ID, &rawUID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards, &info.DedupDomain, &info.RequiredShards, &info.MaintenanceOwned)
 	if err != nil {
 		return VlogInfo{}, err
 	}

@@ -90,6 +90,8 @@ message GetattrRequest {
   // When non-zero, read the live size from this open write handle's cache so a
   // stat between write and close reflects the uncommitted length.
   int64 handle = 2;
+  // Nonzero selects immutable snapshot metadata; cannot be combined with handle.
+  uint64 snapshot_id = 3;
 }
 
 message GetattrResponse {
@@ -132,6 +134,7 @@ message DirEntry {
 
 message ListDirRequest {
   string path = 1;
+  uint64 snapshot_id = 2;
 }
 
 message ListDirResponse {

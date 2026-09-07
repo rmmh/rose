@@ -87,8 +87,9 @@ func TestMakeVlogRejectsInvalidShardGeometryWithoutPanicking(t *testing.T) {
 		{ProtectionScheme: "EC", DataShards: 1, ParityShards: 0},
 		{ProtectionScheme: "bogus", DataShards: 1, ParityShards: 1},
 	}
-	for _, req := range tests {
-		if _, err := s.MakeVlog(ctx, &req); err == nil {
+	for i := range tests {
+		req := &tests[i]
+		if _, err := s.MakeVlog(ctx, req); err == nil {
 			t.Errorf("MakeVlog(%+v) succeeded", req)
 		}
 	}

@@ -195,22 +195,30 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 		if err != nil {
 			return nil, err
 		}
+		release, err := f.srv.RetainHandle(resp.GetHandle())
+		if err != nil {
+			_ = f.srv.AbortHandle(context.WithoutCancel(ctx), resp.GetHandle())
+			return nil, err
+		}
 		if flag&os.O_TRUNC != 0 {
 			if _, err := f.srv.Truncate(ctx, &pb.TruncateRequest{Handle: resp.GetHandle(), Size: 0}); err != nil {
+				release()
+				_ = f.srv.AbortHandle(context.WithoutCancel(ctx), resp.GetHandle())
 				return nil, err
 			}
 			size = 0
 		}
 		return &roseFile{
-			ctx:      ctx,
-			srv:      f.srv,
-			path:     path,
-			handle:   resp.GetHandle(),
-			writing:  true,
-			readable: flag&os.O_WRONLY == 0,
-			append:   flag&os.O_APPEND != 0,
-			size:     size,
-			writeOff: writeOff,
+			ctx:          ctx,
+			srv:          f.srv,
+			path:         path,
+			handle:       resp.GetHandle(),
+			writing:      true,
+			readable:     flag&os.O_WRONLY == 0,
+			append:       flag&os.O_APPEND != 0,
+			size:         size,
+			writeOff:     writeOff,
+			releaseLocal: release,
 		}, nil
 	}
 
@@ -233,6 +241,11 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 			return nil, err
 		}
 		rf.handle = resp.GetHandle()
+		rf.releaseLocal, err = f.srv.RetainHandle(rf.handle)
+		if err != nil {
+			_ = f.srv.AbortHandle(context.WithoutCancel(ctx), rf.handle)
+			return nil, err
+		}
 	}
 	return rf, nil
 }
@@ -241,13 +254,14 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 // one mode: reading (random-access via Read/Seek) or writing (sequential append
 // committed on Close).
 type roseFile struct {
-	ctx      context.Context
-	srv      *server.Server
-	path     string
-	handle   int64
-	writing  bool
-	readable bool
-	append   bool
+	releaseLocal func()
+	ctx          context.Context
+	srv          *server.Server
+	path         string
+	handle       int64
+	writing      bool
+	readable     bool
+	append       bool
 
 	size  int64
 	mtime int64
@@ -370,6 +384,9 @@ func (f *roseFile) Stat() (os.FileInfo, error) {
 }
 
 func (f *roseFile) Close() error {
+	if f.releaseLocal != nil {
+		defer f.releaseLocal()
+	}
 	if f.handle != 0 {
 		if f.writing && f.ctx.Err() != nil {
 			// The HTTP request is gone, so publishing the partial PUT would be

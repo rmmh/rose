@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -52,21 +53,23 @@ var ErrPlogHeaderCorrupt = errors.New("plog superblock corrupt")
 // valid trailer is authoritative: it yields the exact committed length and the
 // hashes the sectors had when last made durable, so a sector that rotted while
 // the process was down no longer matches and reads fail with ErrBitrot. Without
-// it (a fresh block, or a torn write that overwrote the old trailer before the
-// next Commit) the loader falls back to recomputing (trusting) the sectors,
-// exactly the pre-trailer behavior.
+// it, open-block bytes remain unverified until catalog recovery authenticates
+// them. A missing trailer must never make damaged bytes their own evidence.
 type Plog struct {
+	undoActive        bool
+	undoStart         int64
 	mu                sync.Mutex
 	id                uint32
 	file              *os.File
-	logicalLength     int64 // total logical bytes, including the open buffered sector
-	loadedFromTrailer bool  // set when geometry came from an open-block trailer
+	writeAt           func([]byte, int64) (int, error) // optional per-file fault injection
+	logicalLength     int64                            // total logical bytes, including the open buffered sector
+	loadedFromTrailer bool                             // set when geometry came from an open-block trailer
+	openUnverified    bool                             // some open-block bytes have no independent integrity evidence
 
 	buf        []byte // open trailing sector, 0..4096 bytes (sealed once full)
-	bufCorrupt bool   // committed trailer or ragged bytes failed authentication
+	bufCorrupt bool   // ragged bytes failed authentication or await catalog verification
 	hashes     []byte // hashes of sealed sectors in the current open block
 	writeBuf   []byte // reusable batched-write scratch, grown under p.mu
-	hashSector [SectorSize]byte
 
 	header *pb.PlogHeader // parsed superblock (sector 0)
 }
@@ -92,7 +95,7 @@ const PlogFormatVersion = plogFormatVersion
 
 const (
 	plogMagic            = "ROSEPLG1"
-	plogFormatVersion    = 3
+	plogFormatVersion    = 4
 	plogHeaderSize       = SectorSize
 	plogHeaderPrefix     = 14 // magic(8) + version(2) + payloadLen(4)
 	plogHeaderHMACOffset = SectorSize - HashSize
@@ -211,6 +214,16 @@ func openPlogFile(path string, id uint32, flag int, header *pb.PlogHeader) (*Plo
 	if err != nil {
 		return nil, fmt.Errorf("open plog: %w", err)
 	}
+	if flag&os.O_RDWR != 0 {
+		if err := restoreUndo(f); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("restore plog %d prefix: %w", id, err)
+		}
+		if err := discardUndoTemp(f); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("clean plog %d temporary journal: %w", id, err)
+		}
+	}
 	info, err := f.Stat()
 	if err != nil {
 		f.Close()
@@ -285,6 +298,14 @@ func (p *Plog) Header() *pb.PlogHeader { return p.header }
 func (p *Plog) RebindDiskUID(diskUID []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// The rollback journal is bound to this superblock. Relocation must commit
+	// the source before copying; changing identity with a pending journal would
+	// make its original prefix impossible to restore.
+	if _, err := os.Stat(p.file.Name() + ".undo"); err == nil {
+		return fmt.Errorf("rebind plog %d: uncommitted prefix journal", p.id)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	header := proto.Clone(p.header).(*pb.PlogHeader)
 	header.DiskUid = append([]byte(nil), diskUID...)
 	if err := writeSuperblock(p.file, header); err != nil {
@@ -370,25 +391,19 @@ func (p *Plog) reload() error {
 	}
 
 	p.loadedFromTrailer = false
-	// No valid trailer (a fresh/just-completed block, or a torn write that
-	// overwrote the old trailer before the next Commit): trust the bytes. The
-	// length is the size-derived value OpenPlog already set; recompute the open
-	// block's sealed hashes from the very sectors they protect, the original
-	// pre-trailer behavior.
+	// A missing trailer supplies no integrity evidence. Recover geometry now;
+	// catalog recovery must authenticate open-block bytes before they are read.
 	return p.rebuildOpenBlock()
 }
 
-// rebuildOpenBlock reconstructs the in-memory open sector (the ragged edge) and
-// the hashes of the sectors already sealed in the current open block from the
-// file bytes at the current logicalLength. It is the trust-the-bytes
-// reconstruction shared by reload's fallback and TruncateTo; the caller sets
-// logicalLength first.
+// rebuildOpenBlock loads geometry without inventing integrity evidence. Until
+// RecoverHashes validates cataloged records, reads of the partial sector fail
+// and sealed sectors carry deliberately nonmatching hashes.
 func (p *Plog) rebuildOpenBlock() error {
 	p.buf = p.buf[:0]
-	p.bufCorrupt = false
-	p.hashes = p.hashes[:0]
 	partial := p.logicalLength % SectorSize
 	sealed := p.logicalLength - partial
+	p.bufCorrupt = partial > 0
 	if partial > 0 {
 		p.buf = p.buf[:partial]
 		if _, err := p.file.ReadAt(p.buf, CalcPhysical(sealed)); err != nil {
@@ -396,14 +411,8 @@ func (p *Plog) rebuildOpenBlock() error {
 		}
 	}
 	blockStart := (sealed / dataPerBlock) * dataPerBlock
-	for s := blockStart; s < sealed; s += SectorSize {
-		sector := make([]byte, SectorSize)
-		if _, err := p.file.ReadAt(sector, CalcPhysical(s)); err != nil {
-			return fmt.Errorf("reload plog %d sector at %d: %w", p.id, s, err)
-		}
-		h := sectorHash(sector)
-		p.hashes = append(p.hashes, h[:]...)
-	}
+	p.hashes = make([]byte, int((sealed-blockStart)/SectorSize)*HashSize)
+	p.openUnverified = blockStart < p.logicalLength
 	return nil
 }
 
@@ -412,7 +421,7 @@ func (p *Plog) rebuildOpenBlock() error {
 // file grew past the length the metadata DB recorded for its vlog: a crash that
 // sealed new data to the file after the previous open-block trailer was
 // overwritten but before the vlog length was committed leaves the plog reloading
-// an inflated, trust-the-bytes length. The orphan tail is referenced by nobody,
+// an inflated size-derived length. The orphan tail is referenced by nobody,
 // so dropping it keeps the plog cursor aligned with where the vlog expects the
 // next append (otherwise that append is placed past where reads resolve). It only
 // ever shrinks; a target beyond the current length is a different inconsistency
@@ -429,6 +438,14 @@ func (p *Plog) TruncateTo(logical int64) error {
 	if logical == p.logicalLength {
 		return nil
 	}
+	// A valid old trailer or completed block can authenticate the retained
+	// prefix even though it describes a longer log. Preserve that evidence;
+	// in particular EC parity has no catalog chunks to authenticate it later.
+	blockStart := (logical / dataPerBlock) * dataPerBlock
+	verified, verifyErr := p.readLocked(blockStart, int(logical-blockStart))
+	if err := p.protectPrefixLocked(CalcPhysical(blockStart)); err != nil {
+		return err
+	}
 	if err := p.file.Truncate(CalcPhysical(logical)); err != nil {
 		return fmt.Errorf("truncate plog %d: %w", p.id, err)
 	}
@@ -436,10 +453,22 @@ func (p *Plog) TruncateTo(logical int64) error {
 	if err := p.rebuildOpenBlock(); err != nil {
 		return err
 	}
-	// The authenticated trailer described the pre-reconciliation geometry and
-	// was removed by the truncate. The rebuilt hashes came from disk bytes, so
-	// startup must validate them against cataloged chunks before trusting them.
+	// The old trailer no longer describes this geometry. Catalog recovery must
+	// establish fresh evidence for the retained open-block bytes.
 	p.loadedFromTrailer = false
+	if verifyErr == nil {
+		sealedLen := len(verified) / SectorSize * SectorSize
+		for offset := 0; offset < sealedLen; offset += SectorSize {
+			h := sectorHash(verified[offset : offset+SectorSize])
+			copy(p.hashes[offset/SectorSize*HashSize:], h[:])
+		}
+		copy(p.buf, verified[sealedLen:])
+		p.bufCorrupt = false
+		p.openUnverified = false
+		// The retained bytes were checked against existing integrity evidence,
+		// not blessed by hashing unknown disk contents.
+		p.loadedFromTrailer = true
+	}
 	return nil
 }
 
@@ -447,7 +476,7 @@ func (p *Plog) TruncateTo(logical int64) error {
 // hashes from the inline trailer Commit writes as the last sector of a cleanly
 // committed open block. It returns true and sets logicalLength, buf, and hashes
 // when a recognized trailer is found; false leaves the Plog for reload's
-// trust-the-bytes fallback. The HMAC (and the requirement that the implied block
+// unverified fallback. The HMAC (and the requirement that the implied block
 // start be block-aligned) means a real data sector left in the trailer's place
 // by a torn write is rejected rather than mistaken for one.
 func (p *Plog) recoverFromTrailer(size int64) bool {
@@ -557,7 +586,7 @@ func (p *Plog) Write(txnID int64, data []byte) (int64, error) {
 }
 
 func (p *Plog) writeLocked(data []byte) (int64, error) {
-	if p.bufCorrupt {
+	if p.bufCorrupt || p.openUnverified {
 		return 0, fmt.Errorf("plog %d open sector: %w", p.id, ErrBitrot)
 	}
 	offset := p.logicalLength
@@ -571,6 +600,9 @@ func (p *Plog) writeLocked(data []byte) (int64, error) {
 		return offset, nil
 	}
 
+	if err := p.protectPrefixLocked(CalcPhysical((p.logicalLength / dataPerBlock) * dataPerBlock)); err != nil {
+		return 0, err
+	}
 	// We are going to seal at least one sector.
 	oldLogicalLength := p.logicalLength
 	oldBuf := append([]byte(nil), p.buf...)
@@ -641,7 +673,7 @@ func (p *Plog) writeLocked(data []byte) (int64, error) {
 
 	// Perform the batched write
 	if len(writeBuf) > 0 {
-		if _, err := p.file.WriteAt(writeBuf, firstSectorPhysicalStart); err != nil {
+		if err := p.writePhysical(writeBuf, firstSectorPhysicalStart); err != nil {
 			p.logicalLength = oldLogicalLength
 			p.buf = append(p.buf[:0], oldBuf...)
 			p.hashes = append(p.hashes[:0], oldHashes...)
@@ -683,35 +715,6 @@ func (p *Plog) EnsureAppend(offset int64, data []byte) error {
 	}
 	_, err := p.writeLocked(data[overlap:])
 	return err
-}
-
-// sealSector writes the now-full open sector to its fixed physical position and
-// records its hash, emitting a hash sector when the block completes.
-func (p *Plog) sealSector() error {
-	sectorStart := p.logicalLength - int64(len(p.buf))
-	if _, err := p.file.WriteAt(p.buf, CalcPhysical(sectorStart)); err != nil {
-		return fmt.Errorf("seal plog %d sector: %w", p.id, err)
-	}
-	h := sectorHash(p.buf)
-	p.hashes = append(p.hashes, h[:]...)
-	p.buf = p.buf[:0]
-
-	if len(p.hashes) == HashesPerBlock*HashSize {
-		for i := range p.hashSector {
-			p.hashSector[i] = 0
-		}
-		copy(p.hashSector[:], p.hashes)
-		// The hash sector sits right after the 255 data sectors just sealed.
-		sealed := p.logicalLength - int64(len(p.buf))
-		blockIdx := sealed/dataPerBlock - 1
-		mac := completedBlockMAC(blockIdx, p.hashes)
-		copy(p.hashSector[HashesPerBlock*HashSize:], mac[:])
-		if _, err := p.file.WriteAt(p.hashSector[:], hashSectorPhys(blockIdx)); err != nil {
-			return fmt.Errorf("write plog %d hash sector: %w", p.id, err)
-		}
-		p.hashes = p.hashes[:0]
-	}
-	return nil
 }
 
 // Read reads length bytes from logical offset, verifying the recorded hash of
@@ -928,13 +931,19 @@ func (p *Plog) Scrub() (ScrubResult, error) {
 func (p *Plog) Commit() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.bufCorrupt {
+	if p.bufCorrupt || p.openUnverified {
 		return fmt.Errorf("commit plog %d open sector: %w", p.id, ErrBitrot)
+	}
+	if len(p.hashes) > 0 || len(p.buf) > 0 {
+		start := ((p.logicalLength - int64(len(p.buf))) / dataPerBlock) * dataPerBlock
+		if err := p.protectPrefixLocked(CalcPhysical(start)); err != nil {
+			return err
+		}
 	}
 	raggedLen := len(p.buf)
 	sealed := p.logicalLength - int64(raggedLen)
 	if raggedLen > 0 {
-		if _, err := p.file.WriteAt(p.buf, CalcPhysical(sealed)); err != nil {
+		if err := p.writePhysical(p.buf, CalcPhysical(sealed)); err != nil {
 			return fmt.Errorf("commit plog %d ragged edge: %w", p.id, err)
 		}
 	}
@@ -942,19 +951,33 @@ func (p *Plog) Commit() error {
 	// trailer sector one position past the ragged edge. Continued writes overwrite
 	// it as the block grows, and the block's real hash sector replaces it on
 	// completion. The trailer only describes sectors already written above, so a
-	// single fsync makes the ragged edge, the trailer, and any sectors sealed this
-	// session durable together -- no second sync. A just-completed block with no
+	// data fsync makes the ragged edge, the trailer, and any sectors sealed this
+	// session durable together. Retiring the undo journal also syncs its directory.
+	// A just-completed block with no
 	// ragged edge has nothing to protect and needs no trailer; c only rises within
 	// a block, so no stale trailer can survive for the loader to mistake.
 	wroteTrailer := len(p.hashes) > 0 || raggedLen > 0
 	if wroteTrailer {
-		if _, err := p.file.WriteAt(p.buildOpenTrailer(raggedLen), CalcPhysical(sealed)+SectorSize); err != nil {
+		if err := p.writePhysical(p.buildOpenTrailer(raggedLen), CalcPhysical(sealed)+SectorSize); err != nil {
 			return fmt.Errorf("commit plog %d open trailer: %w", p.id, err)
 		}
 	}
-	if err := p.file.Sync(); err != nil {
+	// A failed append can have written a longer physical suffix even though its
+	// in-memory cursor was rolled back. Remove that suffix before retiring the
+	// journal; otherwise reopen may interpret failed bytes as the new trailer or
+	// as data beyond the acknowledged prefix.
+	end := CalcPhysical(p.logicalLength)
+	if wroteTrailer {
+		end = CalcPhysical(sealed) + 2*SectorSize
+	}
+	if err := p.file.Truncate(end); err != nil {
+		return fmt.Errorf("commit plog %d physical length: %w", p.id, err)
+	}
+	if err := commitUndo(p.file); err != nil {
+		p.undoActive = false
 		return err
 	}
+	p.undoActive = false
 	if wroteTrailer {
 		// The in-memory hashes and ragged bytes produced this now-durable
 		// authenticated trailer. A later hot-return recovery pass must not treat
@@ -962,6 +985,18 @@ func (p *Plog) Commit() error {
 		p.loadedFromTrailer = true
 	}
 	return nil
+}
+
+func (p *Plog) writePhysical(data []byte, offset int64) error {
+	write := p.writeAt
+	if write == nil {
+		write = p.file.WriteAt
+	}
+	n, err := write(data, offset)
+	if err == nil && n != len(data) {
+		return io.ErrShortWrite
+	}
+	return err
 }
 
 // buildOpenTrailer assembles the inline open-block trailer sector: the magic, the
@@ -1033,7 +1068,8 @@ func (p *Plog) ReadLogicalUnverified(offset int64, length int) ([]byte, error) {
 	return out, nil
 }
 
-// RecoverHashes verifies and recovers the open block's hashes using a recoverer if the plog fell back to trust-the-bytes.
+// RecoverHashes authenticates the complete open block, including its partial
+// final sector, against independently validated catalog records.
 func (p *Plog) RecoverHashes(ctx context.Context, recoverer ChunkRecoverer) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1044,156 +1080,92 @@ func (p *Plog) RecoverHashes(ctx context.Context, recoverer ChunkRecoverer) erro
 	partial := p.logicalLength % SectorSize
 	sealed := p.logicalLength - partial
 	blockStart := (sealed / dataPerBlock) * dataPerBlock
-
-	if blockStart >= sealed {
+	sealedCount := int((sealed - blockStart) / SectorSize)
+	// Invalidate evidence before consulting the catalog, including on errors.
+	p.hashes = make([]byte, sealedCount*HashSize)
+	p.bufCorrupt = partial > 0
+	p.openUnverified = blockStart < p.logicalLength
+	if blockStart == p.logicalLength {
 		return nil
 	}
-
-	blockStartPhys := CalcPhysical(blockStart)
-	sealedPhys := CalcPhysical(sealed)
-	numSectors := int((sealed - blockStart) / SectorSize)
-
-	chunks, err := recoverer.RecoverChunks(ctx, p.id, blockStartPhys, sealedPhys)
+	chunks, err := recoverer.RecoverChunks(ctx, p.id, CalcPhysical(blockStart), CalcPhysical(p.logicalLength))
 	if err != nil {
-		// The caller may keep mounting other replicas after a catalog failure.
-		// Do not leave this shard carrying hashes recomputed from unauthenticated
-		// disk bytes in that degraded state.
-		p.hashes = make([]byte, numSectors*HashSize)
 		return err
 	}
-	if len(chunks) == 0 {
-		// The trailer was unavailable and the catalog cannot authenticate this
-		// open block (notably an EC parity shard has no direct chunk rows).
-		// Never bless the current disk bytes by hashing them: a torn/corrupt disk
-		// could then become the new source of truth. Deliberately nonmatching
-		// hashes make reads and scrub report the shard corrupt so redundancy can
-		// rebuild it.
-		p.hashes = make([]byte, numSectors*HashSize)
+
+	// Key by record index, not hash: repeated content may have different
+	// encrypted headers and different physical locations.
+	verified := make([][]byte, len(chunks))
+	for i, c := range chunks {
+		if c.LogicalStart < 0 || c.Length <= 0 || int64(c.Length) > p.logicalLength-c.LogicalStart {
+			continue
+		}
+		data, err := p.ReadLogicalUnverified(c.LogicalStart, c.Length)
+		if err != nil {
+			continue
+		}
+		if c.Validate != nil {
+			if !c.Validate(data) {
+				continue
+			}
+		} else {
+			if c.PayloadOffset < 0 || c.PayloadOffset > len(data) {
+				continue
+			}
+			sum := sha256.Sum256(data[c.PayloadOffset:])
+			if !bytes.Equal(sum[:15], c.Hash) {
+				continue
+			}
+		}
+		verified[i] = data
+	}
+
+	allVerified := true
+	for start := blockStart; start < p.logicalLength; start += SectorSize {
+		end := min(start+SectorSize, p.logicalLength)
+		sector := make([]byte, int(end-start))
+		covered := make([]bool, len(sector))
+		valid := true
+		for i, c := range chunks {
+			if c.LogicalStart >= end || c.LogicalStart+int64(c.Length) <= start {
+				continue
+			}
+			if verified[i] == nil {
+				valid = false
+				break
+			}
+			lo, hi := max(start, c.LogicalStart), min(end, c.LogicalStart+int64(c.Length))
+			copy(sector[lo-start:hi-start], verified[i][lo-c.LogicalStart:hi-c.LogicalStart])
+			for j := lo - start; j < hi-start; j++ {
+				covered[j] = true
+			}
+		}
+		for _, ok := range covered {
+			valid = valid && ok
+		}
+		if !valid {
+			allVerified = false
+			continue // Unknown and corrupt bytes remain unreadable.
+		}
+		if start == sealed {
+			copy(p.buf, sector)
+			p.bufCorrupt = false
+		} else {
+			h := sectorHash(sector)
+			copy(p.hashes[int((start-blockStart)/SectorSize)*HashSize:], h[:])
+		}
+	}
+	p.openUnverified = !allVerified
+	return nil
+}
+
+func (p *Plog) protectPrefixLocked(start int64) error {
+	if p.undoActive && start >= p.undoStart {
 		return nil
 	}
-
-	newHashes := make([]byte, 0, numSectors*HashSize)
-
-	// Cache read chunks by their Hash to avoid redundant physical reads and validation
-	type cachedChunk struct {
-		data  []byte
-		valid bool
+	if err := saveUndo(p.file, start); err != nil {
+		return fmt.Errorf("protect plog %d prefix: %w", p.id, err)
 	}
-	chunkCache := make(map[string]cachedChunk)
-
-	for i := 0; i < numSectors; i++ {
-		secLogicalStart := blockStart + int64(i)*SectorSize
-		secLogicalEnd := secLogicalStart + SectorSize
-
-		// Find the chunks that overlap this sector
-		var overlapping []RecoveredChunk
-		for _, c := range chunks {
-			cEnd := c.LogicalStart + int64(c.Length)
-			if c.LogicalStart < secLogicalEnd && cEnd > secLogicalStart {
-				overlapping = append(overlapping, c)
-			}
-		}
-
-		if len(overlapping) == 0 {
-			// No overlapping chunks found in the DB for this sector.
-			// We can't validate it using chunks, fall back to the disk sector hash.
-			sector := make([]byte, SectorSize)
-			if _, err := p.file.ReadAt(sector, CalcPhysical(secLogicalStart)); err != nil {
-				return fmt.Errorf("recover hashes: read fallback sector %d: %w", secLogicalStart/SectorSize, err)
-			}
-			h := sectorHash(sector)
-			newHashes = append(newHashes, h[:]...)
-			continue
-		}
-
-		secBuf := make([]byte, SectorSize)
-		filled := make([]bool, SectorSize)
-
-		sectorCorrupt := false
-		for _, c := range overlapping {
-			hashKey := string(c.Hash)
-			cc, ok := chunkCache[hashKey]
-			if !ok {
-				// Read chunk bytes bypassing verification
-				chunkBytes, readErr := p.ReadLogicalUnverified(c.LogicalStart, c.Length)
-				if readErr != nil {
-					sectorCorrupt = true
-					break
-				}
-				if c.Validate != nil {
-					if c.Validate(chunkBytes) {
-						cc = cachedChunk{data: chunkBytes, valid: true}
-					} else {
-						cc = cachedChunk{valid: false}
-					}
-				} else {
-					payload := chunkBytes
-					if c.PayloadOffset > 0 {
-						if c.PayloadOffset >= len(chunkBytes) {
-							cc = cachedChunk{valid: false}
-							chunkCache[hashKey] = cc
-							continue
-						}
-						payload = chunkBytes[c.PayloadOffset:]
-					}
-					sum := sha256.Sum256(payload)
-					if bytes.Equal(sum[:15], c.Hash) {
-						cc = cachedChunk{data: chunkBytes, valid: true}
-					} else {
-						cc = cachedChunk{valid: false}
-					}
-				}
-				chunkCache[hashKey] = cc
-			}
-
-			if !cc.valid {
-				sectorCorrupt = true
-				break
-			}
-
-			// Copy the overlapping part of the chunk into the sector buffer
-			cEnd := c.LogicalStart + int64(c.Length)
-			overlapStart := max(c.LogicalStart, secLogicalStart)
-			overlapEnd := min(cEnd, secLogicalEnd)
-			overlapLen := int(overlapEnd - overlapStart)
-
-			chunkOffset := int(overlapStart - c.LogicalStart)
-			secOffset := int(overlapStart - secLogicalStart)
-
-			copy(secBuf[secOffset:secOffset+overlapLen], cc.data[chunkOffset:chunkOffset+overlapLen])
-			for k := secOffset; k < secOffset+overlapLen; k++ {
-				filled[k] = true
-			}
-		}
-
-		if sectorCorrupt {
-			// Sector has rotted/failed validation. Use all-zeros dummy hash.
-			dummy := make([]byte, HashSize)
-			newHashes = append(newHashes, dummy...)
-			continue
-		}
-
-		// Verify if the sector is fully tiled/filled
-		fullyFilled := true
-		for _, f := range filled {
-			if !f {
-				fullyFilled = false
-				break
-			}
-		}
-
-		if !fullyFilled {
-			// Gap in chunks for this sector, use all-zeros dummy hash
-			dummy := make([]byte, HashSize)
-			newHashes = append(newHashes, dummy...)
-			continue
-		}
-
-		// Compute sector hash of the reconstructed/validated sector
-		h := sectorHash(secBuf)
-		newHashes = append(newHashes, h[:]...)
-	}
-
-	p.hashes = newHashes
+	p.undoActive, p.undoStart = true, start
 	return nil
 }

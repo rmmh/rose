@@ -112,7 +112,13 @@ func (s *Server) sweepStrayPlogFilesLocked(ctx context.Context) (int, error) {
 			if e.IsDir() {
 				continue
 			}
-			idStr, ok := strings.CutPrefix(e.Name(), "plog-")
+			base := e.Name()
+			if strings.HasSuffix(base, ".undo.tmp") {
+				base = strings.TrimSuffix(base, ".undo.tmp")
+			} else {
+				base = strings.TrimSuffix(base, ".undo")
+			}
+			idStr, ok := strings.CutPrefix(base, "plog-")
 			if !ok {
 				continue
 			}
@@ -304,7 +310,7 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 			_ = np.Close()
 		}
 		delete(s.plogs, newPlogID)
-		_ = os.Remove(s.plogPath(toDisk, newPlogID))
+		_ = storage.RemovePlogFiles(s.plogPath(toDisk, newPlogID))
 		return cause
 	}
 	header, err := s.basePlogHeader(ctx, newPlogID, toDisk, newPlogUID)
@@ -660,7 +666,7 @@ func (s *Server) repairVlogShardsLocked(ctx context.Context, info meta.VlogInfo,
 		if oldPlog != nil {
 			_ = oldPlog.Close()
 		}
-		_ = os.Remove(s.plogPath(corruptDisk, corruptPlog))
+		_ = storage.RemovePlogFiles(s.plogPath(corruptDisk, corruptPlog))
 		repaired++
 	}
 	return repaired, failures, nil
@@ -1211,35 +1217,35 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 		}
 	}
 	if err := copyFile(oldPath, newPath); err != nil {
-		_ = os.Remove(newPath)
+		_ = storage.RemovePlogFiles(newPath)
 		return fmt.Errorf("drain: copy plog %d to disk %d: %w", plogID, toDisk, err)
 	}
 	// Validate and open the durable destination before making it authoritative.
 	// A dead destination must leave the catalog and mounted vlog on the source.
 	reopened, err := storage.OpenExistingPlog(newPath, plogID)
 	if err != nil {
-		_ = os.Remove(newPath)
+		_ = storage.RemovePlogFiles(newPath)
 		return fmt.Errorf("drain: open copied plog %d on disk %d: %w", plogID, toDisk, err)
 	}
 	if err := reopened.Verify(); err != nil {
 		_ = reopened.Close()
-		_ = os.Remove(newPath)
+		_ = storage.RemovePlogFiles(newPath)
 		return fmt.Errorf("drain: verify copied plog %d on disk %d: %w", plogID, toDisk, err)
 	}
 	diskUID, err := s.db.DiskUID(ctx, toDisk)
 	if err != nil {
 		_ = reopened.Close()
-		_ = os.Remove(newPath)
+		_ = storage.RemovePlogFiles(newPath)
 		return fmt.Errorf("drain: look up destination disk %d uid: %w", toDisk, err)
 	}
 	if err := reopened.RebindDiskUID(diskUID[:]); err != nil {
 		_ = reopened.Close()
-		_ = os.Remove(newPath)
+		_ = storage.RemovePlogFiles(newPath)
 		return fmt.Errorf("drain: bind plog %d to disk %d: %w", plogID, toDisk, err)
 	}
 	if err := ctx.Err(); err != nil {
 		_ = reopened.Close()
-		_ = os.Remove(newPath)
+		_ = storage.RemovePlogFiles(newPath)
 		return err
 	}
 
@@ -1249,7 +1255,7 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 	durableCtx := context.WithoutCancel(ctx)
 	if err := s.db.MovePlogToDisk(durableCtx, plogID, toDisk); err != nil {
 		_ = reopened.Close()
-		_ = os.Remove(newPath)
+		_ = storage.RemovePlogFiles(newPath)
 		return fmt.Errorf("drain: move plog %d to disk %d: %w", plogID, toDisk, err)
 	}
 	old := s.plogs[plogID]
@@ -1270,13 +1276,13 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 			delete(s.plogs, plogID)
 		}
 		_ = reopened.Close()
-		_ = os.Remove(newPath)
+		_ = storage.RemovePlogFiles(newPath)
 		return err
 	}
 	if old != nil {
 		_ = old.Close()
 	}
-	_ = os.Remove(oldPath)
+	_ = storage.RemovePlogFiles(oldPath)
 	return nil
 }
 

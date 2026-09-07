@@ -180,6 +180,9 @@ func (d *DB) CommitWriteOpVersion(ctx context.Context, opID int64, path string, 
 	if err != nil {
 		return 0, err
 	}
+	if err := d.publicationCheckpoint("version-written"); err != nil {
+		return 0, err
+	}
 	var acknowledgedOffset int64
 	for _, placement := range placements {
 		acknowledgedOffset += int64(placement.LogicalLen)
@@ -188,13 +191,29 @@ func (d *DB) CommitWriteOpVersion(ctx context.Context, opID int64, path string, 
 		WriteOpCommitted, fileID, acknowledgedOffset, opID); err != nil {
 		return 0, err
 	}
+	if err := d.publicationCheckpoint("operation-written"); err != nil {
+		return 0, err
+	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM vlog_lease WHERE write_op_id = ?", opID); err != nil {
+		return 0, err
+	}
+	if err := d.publicationCheckpoint("leases-released"); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	if err := d.publicationCheckpoint("committed"); err != nil {
+		return 0, err
+	}
 	return fileID, nil
+}
+
+func (d *DB) publicationCheckpoint(stage string) error {
+	if d.publicationFault != nil {
+		return d.publicationFault(stage)
+	}
+	return nil
 }
 
 type PreparedWriteOp struct {

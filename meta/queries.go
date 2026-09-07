@@ -51,7 +51,20 @@ func (d *DB) DiscardEmptyVlog(ctx context.Context, vlogID uint32) error {
 // it as a replicated staging vlog whose chunks will later be promoted into an EC
 // vlog with the given target shard counts.
 func (d *DB) MakeStagingVlog(ctx context.Context, u uid.UID, protectionScheme string, dataShards, parityShards, targetDataShards, targetParityShards int32) (uint32, error) {
-	res, err := d.db.ExecContext(ctx, "INSERT INTO vlog (uid, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards) VALUES (?, ?, ?, ?, ?, ?)", u[:], protectionScheme, dataShards, parityShards, targetDataShards, targetParityShards)
+	return d.MakeVlogInDomain(ctx, u, protectionScheme, dataShards, parityShards, targetDataShards, targetParityShards, nil, 0)
+}
+
+func (d *DB) MakeVlogInDomain(ctx context.Context, u uid.UID, protectionScheme string, dataShards, parityShards, targetDataShards, targetParityShards int32, domain []byte, requiredShards int) (uint32, error) {
+	if requiredShards < 0 || (len(domain) != 0 && requiredShards == 0) {
+		return 0, fmt.Errorf("scoped vlog requires a positive durable shard requirement")
+	}
+	if len(domain) != 0 && len(domain) != 32 {
+		return 0, fmt.Errorf("dedup domain must be empty or 32 bytes")
+	}
+	if domain == nil {
+		domain = []byte{}
+	}
+	res, err := d.db.ExecContext(ctx, "INSERT INTO vlog (uid, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards, dedup_domain, required_shards) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", u[:], protectionScheme, dataShards, parityShards, targetDataShards, targetParityShards, domain, requiredShards)
 	if err != nil {
 		return 0, fmt.Errorf("make vlog: %w", err)
 	}
@@ -96,8 +109,11 @@ type PlogInfo struct {
 }
 
 type VlogInfo struct {
+	MaintenanceOwned bool // persists after the originating job completes
 	ID               uint32
 	UID              uid.UID
+	DedupDomain      []byte
+	RequiredShards   int // immutable desired placement count, independent of surviving mappings
 	Length           int64
 	ProtectionScheme string
 	DataShards       int32
@@ -153,7 +169,7 @@ func (d *DB) PlogUID(ctx context.Context, plogID uint32) (uid.UID, error) {
 }
 
 func (d *DB) ListVlogs(ctx context.Context) ([]VlogInfo, error) {
-	rows, err := d.db.QueryContext(ctx, "SELECT id, uid, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards FROM vlog ORDER BY id")
+	rows, err := d.db.QueryContext(ctx, "SELECT id, uid, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards, dedup_domain, required_shards, maintenance_owned FROM vlog ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +178,7 @@ func (d *DB) ListVlogs(ctx context.Context) ([]VlogInfo, error) {
 	for rows.Next() {
 		var info VlogInfo
 		var rawUID []byte
-		if err := rows.Scan(&info.ID, &rawUID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards); err != nil {
+		if err := rows.Scan(&info.ID, &rawUID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards, &info.DedupDomain, &info.RequiredShards, &info.MaintenanceOwned); err != nil {
 			return nil, err
 		}
 		if info.UID, err = uid.FromBytes(rawUID); err != nil {
@@ -260,7 +276,12 @@ func (d *DB) VlogUsages(ctx context.Context) ([]VlogUsage, error) {
 }
 
 func (d *DB) SetVlogLength(ctx context.Context, vlogID uint32, length int64) error {
-	_, err := d.db.ExecContext(ctx, "UPDATE vlog SET length = ? WHERE id = ?", length, vlogID)
+	if length < 0 {
+		return fmt.Errorf("negative durable vlog length")
+	}
+	// Commits may finish their metadata updates out of order. An older durable
+	// prefix cannot retract a newer one already recorded in the catalog.
+	_, err := d.db.ExecContext(ctx, "UPDATE vlog SET length = MAX(length, ?) WHERE id = ?", length, vlogID)
 	return err
 }
 
@@ -355,7 +376,15 @@ func upsertChunkRefs(ctx context.Context, tx *sql.Tx, placements []ChunkPlacemen
 			sqlText.WriteString("(?, 1, ?, ?, ?, ?)")
 			args = append(args, p.Hash, p.VlogID, p.VaddrOffset, p.LogicalLen, p.CompressedLen)
 		}
-		sqlText.WriteString(" ON CONFLICT(hash) DO UPDATE SET refcount = refcount + 1")
+		// A dead row is not a dedup hit: the caller wrote and synced fresh bytes.
+		// Repointing it preserves any pinned old reader's content identity while
+		// preventing a stale, possibly lost location from being resurrected.
+		sqlText.WriteString(` ON CONFLICT(hash) DO UPDATE SET
+			vlog_id = CASE WHEN refcount = 0 THEN excluded.vlog_id ELSE vlog_id END,
+			vaddr_offset = CASE WHEN refcount = 0 THEN excluded.vaddr_offset ELSE vaddr_offset END,
+			logical_len = CASE WHEN refcount = 0 THEN excluded.logical_len ELSE logical_len END,
+			compressed_len = CASE WHEN refcount = 0 THEN excluded.compressed_len ELSE compressed_len END,
+			refcount = refcount + 1`)
 
 		if _, err := tx.ExecContext(ctx, sqlText.String(), args...); err != nil {
 			return fmt.Errorf("upsert chunk refs batch %d-%d: %w", start, end, err)
@@ -743,7 +772,8 @@ func (d *DB) CreateSnapshot(ctx context.Context, name string, createdAt int64) (
 		if err := rows.Scan(&path, &fileID, &mtime); err != nil {
 			return 0, err
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO snapshot_file (snapshot_id, path, file_id, mtime) VALUES (?, ?, ?, ?)", id, path, fileID, mtime); err != nil {
+		parent, name := splitPath(path)
+		if _, err := tx.ExecContext(ctx, "INSERT INTO snapshot_file (snapshot_id, path, file_id, mtime, parent, name) VALUES (?, ?, ?, ?, ?, ?)", id, path, fileID, mtime, parent, name); err != nil {
 			return 0, err
 		}
 		chunks, err := fileChunks(ctx, tx, fileID)
@@ -755,6 +785,9 @@ func (d *DB) CreateSnapshot(ctx context.Context, name string, createdAt int64) (
 		}
 	}
 	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO snapshot_dir(snapshot_id,path,parent,name,mtime) SELECT ?,path,parent,name,mtime FROM dir", id); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -769,6 +802,13 @@ func (d *DB) DeleteSnapshot(ctx context.Context, snapshotID uint64) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := deleteSnapshotTx(ctx, tx, snapshotID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func deleteSnapshotTx(ctx context.Context, tx *sql.Tx, snapshotID uint64) error {
 	rows, err := tx.QueryContext(ctx, "SELECT file_id FROM snapshot_file WHERE snapshot_id = ?", snapshotID)
 	if err != nil {
 		return err
@@ -793,7 +833,7 @@ func (d *DB) DeleteSnapshot(ctx context.Context, snapshotID uint64) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM snapshot WHERE id = ?", snapshotID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (d *DB) OpenSnapshotFile(ctx context.Context, snapshotID uint64, path string) (int64, error) {

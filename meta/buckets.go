@@ -2,6 +2,7 @@ package meta
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -19,6 +20,14 @@ type BucketPolicy struct {
 	ProtectionScheme string // "DUPLICATE", "EC", or "NONE"
 	DataShards       int
 	ParityShards     int
+}
+
+// DedupDomain scopes content identity to a bucket and its protection policy.
+// A policy change creates a new domain; snapshots retain their old identities.
+// Length-prefixing the bucket name makes the encoding unambiguous.
+func (p BucketPolicy) DedupDomain() []byte {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("rose content domain v1:%d:%s:%s:%d:%d", len(p.Name), p.Name, p.ProtectionScheme, p.DataShards, p.ParityShards)))
+	return sum[:]
 }
 
 // DefaultBucketPolicy is the scheme an unconfigured bucket falls back to: a

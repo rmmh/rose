@@ -598,6 +598,13 @@ func ReconstructECShard(dataShards, parityShards int, shards [][]byte) error {
 
 // Commit makes all physical writes issued through this virtual log durable.
 func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
+	_, err := v.CommitPrefix(ctx, txnID)
+	return err
+}
+
+// CommitPrefix returns the exact prefix made durable by this commit. Sampling
+// Length after Commit returns can accidentally include a later unsynced append.
+func (v *Vlog) CommitPrefix(ctx context.Context, txnID int64) (int64, error) {
 	v.writeMu.Lock()
 	defer v.writeMu.Unlock()
 	commit := func(opCtx context.Context, _ int, client PlogClient) error {
@@ -610,11 +617,14 @@ func (v *Vlog) Commit(ctx context.Context, txnID int64) error {
 	eligible := v.completeReplicaSnapshot()
 	if (v.scheme == "NONE" || v.scheme == "DUPLICATE") && eligible != nil {
 		if _, err := v.fanoutQuorumEligible(ctx, v.writeQuorum, eligible, commit); err != nil {
-			return err
+			return 0, err
 		}
-		return nil
+		return atomic.LoadInt64(&v.length), nil
 	}
-	return v.fanoutQuorum(ctx, v.writeQuorum, commit)
+	if err := v.fanoutQuorum(ctx, v.writeQuorum, commit); err != nil {
+		return 0, err
+	}
+	return atomic.LoadInt64(&v.length), nil
 }
 
 func (v *Vlog) Length() int64 { return atomic.LoadInt64(&v.length) }

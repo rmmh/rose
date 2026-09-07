@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// ReapAbandonedWriteOps finds prepared write operations that have no active
-// in-memory handles, and transitions them to the abandoned state (releasing
-// their vlog leases) if they have exceeded the ageThreshold.
+// ReapAbandonedWriteOps fences idle network handles, including readers, then
+// abandons prepared operations with no remaining active owner. Handle RPCs
+// renew activity; in-process adapters retain an explicit local owner.
 // It returns the count of operations abandoned, or an error.
 func (s *Server) ReapAbandonedWriteOps(ctx context.Context, ageThreshold time.Duration) (int, error) {
 	s.namespaceMu.Lock()
@@ -20,22 +20,39 @@ func (s *Server) ReapAbandonedWriteOps(ctx context.Context, ageThreshold time.Du
 	}
 
 	s.handlesMu.Lock()
-	handles := make([]*FileHandle, 0, len(s.handles))
-	for _, h := range s.handles {
-		handles = append(handles, h)
+	type entry struct {
+		id int64
+		h  *FileHandle
+	}
+	handles := make([]entry, 0, len(s.handles))
+	for id, h := range s.handles {
+		handles = append(handles, entry{id, h})
 	}
 	s.handlesMu.Unlock()
 
+	now := s.now()
 	activeIDs := make(map[int64]bool, len(handles))
-	for _, h := range handles {
+	expiredIDs := make(map[int64]bool)
+	for _, entry := range handles {
+		h := entry.h
 		h.stateMu.Lock()
-		if h.writeOpID != 0 {
+		if h.localOwners == 0 && now.Sub(h.lastUsed) > ageThreshold {
+			// The same state lock guards request renewal and this removal.
+			// Once removed, a request paused after lookup cannot revive the
+			// handle or report a successful mutation of an unpinned cache.
+			s.handlesMu.Lock()
+			delete(s.handles, entry.id)
+			s.handlesMu.Unlock()
+			s.releasePins(h.pinOwner)
+			if h.writeOpID != 0 {
+				expiredIDs[h.writeOpID] = true
+			}
+		} else if h.writeOpID != 0 {
 			activeIDs[h.writeOpID] = true
 		}
 		h.stateMu.Unlock()
 	}
 
-	now := time.Now()
 	reaped := 0
 
 	for _, op := range ops {
@@ -61,7 +78,7 @@ func (s *Server) ReapAbandonedWriteOps(ctx context.Context, ageThreshold time.Du
 			age = now.Sub(created)
 		}
 
-		if age > ageThreshold {
+		if expiredIDs[op.ID] || age > ageThreshold {
 			slog.Info("reaper abandoning write op", "id", op.ID, "created", created, "age", age)
 			if err := s.db.AbandonWriteOp(ctx, op.ID); err != nil {
 				return reaped, err

@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 
@@ -106,6 +105,14 @@ func (s *Server) readPlainChunkRecord(ctx context.Context, vlog *storage.Vlog, v
 	if err := s.decryptChunkPayload(ctx, vlogID, c.Hash, 0, record[storage.ChunkHeaderSize:]); err != nil {
 		return nil, err
 	}
+	info, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		return nil, err
+	}
+	sum := storage.ContentHash(info.DedupDomain, record[storage.ChunkHeaderSize:])
+	if !bytes.Equal(sum[:15], c.Hash) {
+		return nil, fmt.Errorf("chunk content hash mismatch: %w", storage.ErrBitrot)
+	}
 	return record, nil
 }
 
@@ -128,6 +135,10 @@ func (s *Server) encryptedChunkRecordValidator(ctx context.Context, vlogID uint3
 	if err != nil {
 		return nil, err
 	}
+	info, err := s.db.GetVlog(ctx, vlogID)
+	if err != nil {
+		return nil, err
+	}
 	hashCopy := append([]byte(nil), hash...)
 	return func(record []byte) bool {
 		if len(record) < storage.ChunkHeaderSize {
@@ -145,7 +156,22 @@ func (s *Server) encryptedChunkRecordValidator(ctx context.Context, vlogID uint3
 		if err := storage.ApplyAES128CTR(key, stream, storage.ChunkHeaderSize, payload); err != nil {
 			return false
 		}
-		sum := sha256.Sum256(payload)
+		sum := storage.ContentHash(info.DedupDomain, payload)
 		return bytes.Equal(sum[:15], hashCopy)
 	}, nil
+}
+
+// verifyProtectedChunk binds content verification and all-shard verification for
+// both namespace publication and maintenance repointing. Callers fence placement
+// changes, make the destination durable, and validate its required geometry.
+func (s *Server) verifyProtectedChunk(ctx context.Context, v *storage.Vlog, vlogID uint32, c meta.ChunkLoc) error {
+	plain, err := s.readPlainChunkRecord(ctx, v, vlogID, c)
+	if err != nil {
+		return err
+	}
+	expected, err := s.encryptPlainChunkRecord(ctx, vlogID, c.Hash, plain)
+	if err != nil {
+		return err
+	}
+	return v.VerifyAll(ctx, c.VaddrOffset, expected)
 }

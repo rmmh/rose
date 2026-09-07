@@ -1592,6 +1592,16 @@ func TestSweepStrayPlogFilesRemovesUnreferencedFiles(t *testing.T) {
 	if err := os.WriteFile(strayPath, []byte("orphaned copy"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	orphans := []string{strayPath, strayPath + ".undo", strayPath + ".undo.tmp", s.plogPath(2, 9998) + ".undo"}
+	for _, path := range orphans[1:] {
+		if err := os.WriteFile(path, []byte("orphaned recovery evidence"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A live placement owns its recovery sidecars even if recovery has not run.
+	if err := os.WriteFile(livePath+".undo.tmp", []byte("live recovery evidence"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	// A non-plog file in a disk root must be ignored entirely.
 	otherPath := filepath.Join(filepath.Dir(strayPath), "notaplog")
 	if err := os.WriteFile(otherPath, []byte("leave me"), 0644); err != nil {
@@ -1602,14 +1612,19 @@ func TestSweepStrayPlogFilesRemovesUnreferencedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if removed != 1 {
-		t.Fatalf("sweep removed %d files, want 1", removed)
+	if removed != len(orphans) {
+		t.Fatalf("sweep removed %d files, want %d", removed, len(orphans))
 	}
-	if _, err := os.Stat(strayPath); !os.IsNotExist(err) {
-		t.Fatalf("stray plog file survived the sweep (err=%v)", err)
+	for _, path := range orphans {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("stray plog file survived the sweep: %s (err=%v)", path, err)
+		}
 	}
 	if _, err := os.Stat(livePath); err != nil {
 		t.Fatalf("sweep deleted a catalog-referenced plog file: %v", err)
+	}
+	if _, err := os.Stat(livePath + ".undo.tmp"); err != nil {
+		t.Fatalf("sweep deleted a live recovery sidecar: %v", err)
 	}
 	if _, err := os.Stat(otherPath); err != nil {
 		t.Fatalf("sweep deleted a non-plog file: %v", err)

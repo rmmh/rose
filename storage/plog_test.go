@@ -469,17 +469,15 @@ func TestPlogTrailingBlockVerifiableAcrossRestart(t *testing.T) {
 		t.Fatalf("read of rotted trailing sector after restart = %v, want ErrBitrot", err)
 	}
 
-	// A torn write that left the trailer invalid (here, its magic clobbered) drops
-	// back to recomputing the hash from the (corrupt) bytes and cannot tell -- the
-	// gap the DB anchor in todo.md is meant to close.
+	// Losing the trailer cannot turn corrupted bytes into their own evidence.
 	corruptByte(t, path, trailerStart)
 	blind, err := OpenPlog(path, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer blind.Close()
-	if _, err := blind.Read(0, 3*SectorSize); err != nil {
-		t.Fatalf("with the trailer gone the corruption should be undetected, got %v", err)
+	if _, err := blind.Read(0, 3*SectorSize); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("unverified bytes with no trailer: got %v, want ErrBitrot", err)
 	}
 }
 
@@ -519,6 +517,12 @@ func TestPlogLostTrailerWithoutCatalogProofStaysCorrupt(t *testing.T) {
 	}
 	if _, err := reopened.Read(0, SectorSize); !errors.Is(err, ErrBitrot) {
 		t.Fatalf("read after unverifiable trailer loss = %v, want ErrBitrot", err)
+	}
+	if err := reopened.Commit(); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("commit must not re-sign unverified bytes: %v", err)
+	}
+	if _, err := reopened.Write(2, []byte("append")); !errors.Is(err, ErrBitrot) {
+		t.Fatalf("append must not seal unverified bytes: %v", err)
 	}
 }
 

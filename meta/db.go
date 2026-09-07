@@ -3,6 +3,8 @@ package meta
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -13,6 +15,7 @@ type DB struct {
 	db                  *sql.DB
 	chunkByHashStmt     *sql.Stmt
 	liveChunkByHashStmt *sql.Stmt
+	publicationFault    func(string) error // per-catalog injection, installed only by tests
 }
 
 // Open creates or opens a metadata database at the given path.
@@ -29,7 +32,16 @@ func OpenEphemeral() (*DB, error) {
 }
 
 func open(path string, durable bool) (*DB, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)")
+	dsn := path + "?_pragma=busy_timeout(10000)"
+	if durable {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		u := url.URL{Scheme: "file", Path: absolute, RawQuery: "_pragma=busy_timeout(10000)"}
+		dsn = u.String()
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite db: %w", err)
 	}
@@ -145,7 +157,15 @@ func initSchema(db *sql.DB, durable bool) error {
 			mtime INTEGER NOT NULL
 		);
 
-		CREATE TABLE IF NOT EXISTS snapshot (
+		CREATE TABLE IF NOT EXISTS snapshot_retention (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ continuous_ns INTEGER NOT NULL,
+ daily_ns INTEGER NOT NULL,
+ weekly_ns INTEGER NOT NULL,
+ CHECK(0 <= continuous_ns AND continuous_ns <= daily_ns AND daily_ns <= weekly_ns)
+);
+
+CREATE TABLE IF NOT EXISTS snapshot (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL UNIQUE,
 			created_at INTEGER NOT NULL
@@ -154,12 +174,25 @@ func initSchema(db *sql.DB, durable bool) error {
 		CREATE TABLE IF NOT EXISTS snapshot_file (
 			snapshot_id INTEGER NOT NULL REFERENCES snapshot(id) ON DELETE CASCADE,
 			path TEXT NOT NULL,
+            parent TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL DEFAULT '',
 			file_id INTEGER NOT NULL REFERENCES file(id),
 			mtime INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (snapshot_id, path)
 		);
 
-		CREATE TABLE IF NOT EXISTS chunk (
+		CREATE TABLE IF NOT EXISTS snapshot_dir (
+ snapshot_id INTEGER NOT NULL REFERENCES snapshot(id) ON DELETE CASCADE,
+ path TEXT NOT NULL,
+ parent TEXT NOT NULL,
+ name TEXT NOT NULL,
+ mtime INTEGER NOT NULL,
+ PRIMARY KEY(snapshot_id,path)
+);
+CREATE INDEX IF NOT EXISTS idx_snapshot_dir_parent ON snapshot_dir(snapshot_id,parent);
+CREATE INDEX IF NOT EXISTS idx_snapshot_file_parent ON snapshot_file(snapshot_id,parent);
+
+CREATE TABLE IF NOT EXISTS chunk (
 			hash BLOB PRIMARY KEY,
 			refcount INTEGER NOT NULL DEFAULT 0,
 			vlog_id INTEGER NOT NULL,
@@ -195,6 +228,9 @@ func initSchema(db *sql.DB, durable bool) error {
 		CREATE TABLE IF NOT EXISTS vlog (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			uid BLOB NOT NULL DEFAULT X'',
+			dedup_domain BLOB NOT NULL DEFAULT X'',
+            required_shards INTEGER NOT NULL DEFAULT 0 CHECK(required_shards >= 0),
+            maintenance_owned INTEGER NOT NULL DEFAULT 0 CHECK(maintenance_owned IN (0,1)),
 			length INTEGER NOT NULL DEFAULT 0,
 			protection_scheme TEXT NOT NULL,
 			data_shards INTEGER NOT NULL,
