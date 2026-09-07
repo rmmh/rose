@@ -657,3 +657,27 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   mismatches or operation errors. Full repository race verification passed with
   476 passing test events and four explicit opt-in skips; heavy chaos was checked
   separately above. Vet and whitespace checks passed.
+
+### Metadata ownership for retained retry results
+
+- Added `write_result_root`, an explicit immutable file-version root with a
+  Unix-nanosecond expiry deadline. `CommitWriteOpVersionWithRetention` publishes
+  the root, repeated chunk-occurrence references, terminal result, namespace,
+  and lease release in the same transaction. A committed retry neither adds a
+  second root nor extends the original deadline.
+- `ExpireWriteResults` atomically changes the operation to `expired`, releases
+  its reference occurrences, and deletes the root. Repeated expiry cannot
+  decrement twice. The operation row remains as a key fence; it cannot publish
+  again or silently become a new prepared intent.
+- The independent catalog checker includes retry roots in its recount and checks
+  that each root matches its committed operation's result. Regressions cover
+  unlink, snapshot deletion, GC, restart, exact expiry boundaries, repeated
+  chunks, idempotent publication, expiry rollback, and publication failure cuts.
+- This is metadata support, **not enabled server retention**. Production still
+  calls the existing non-retaining entry point. Selecting and exposing the
+  retention policy, wiring publication/expiry and active retry pins, enforcing
+  expiry at request admission, and bounded expired-key generations remain
+  required. The end-to-end historical retry bug is not yet fixed.
+- Full metadata race tests, the repository Go suite, vet, and whitespace checks
+  passed. Retained-root publication cuts verify rollback before commit and
+  retention after an injected lost post-commit reply.

@@ -217,6 +217,15 @@ CREATE TABLE IF NOT EXISTS chunk (
 			tail BLOB NOT NULL DEFAULT X''
 		);
 
+		-- Retry-result roots retain exact file bytes independently of namespace
+		-- heads and snapshots. Expiry removes the root, not the key tombstone.
+		CREATE TABLE IF NOT EXISTS write_result_root (
+			write_op_id INTEGER PRIMARY KEY REFERENCES write_op(id),
+			file_id INTEGER NOT NULL REFERENCES file(id),
+			expires_at INTEGER NOT NULL CHECK (expires_at > 0)
+		);
+		CREATE INDEX IF NOT EXISTS write_result_expiry ON write_result_root(expires_at);
+
 		-- A vlog may be appended by at most one nonterminal write operation.
 		CREATE TABLE IF NOT EXISTS vlog_lease (
 			vlog_id INTEGER PRIMARY KEY REFERENCES vlog(id) ON DELETE CASCADE,

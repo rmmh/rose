@@ -105,7 +105,7 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 	}
 	expected := map[string]int64{}
 	lengths := map[string]uint32{}
-	roots := `SELECT 'head:'||path,file_id FROM file_head UNION ALL SELECT 'snapshot:'||snapshot_id||':'||path,file_id FROM snapshot_file`
+	roots := `SELECT 'head:'||path,file_id FROM file_head UNION ALL SELECT 'snapshot:'||snapshot_id||':'||path,file_id FROM snapshot_file UNION ALL SELECT 'retry:'||write_op_id,file_id FROM write_result_root`
 	if err := scan(roots, func(r *sql.Rows) error {
 		var name string
 		var id int64
@@ -227,6 +227,20 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 		if v.required > 0 && counts[id] != v.required {
 			issue("protection_count", fmt.Sprintf("vlog/%d", id), fmt.Sprintf("mapped %d, required %d", counts[id], v.required))
 		}
+	}
+	if err := scan(`SELECT r.write_op_id,r.file_id,w.file_id,w.state FROM write_result_root r LEFT JOIN write_op w ON w.id=r.write_op_id`, func(r *sql.Rows) error {
+		var op, file int64
+		var result sql.NullInt64
+		var state sql.NullString
+		if err := r.Scan(&op, &file, &result, &state); err != nil {
+			return err
+		}
+		if !result.Valid || result.Int64 != file || !state.Valid || state.String != WriteOpCommitted {
+			issue("retry_result", fmt.Sprintf("write_op/%d", op), "retry root does not match a committed operation result")
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	if err := scan(`SELECT vl.vlog_id,vl.write_op_id,wo.state,v.maintenance_owned FROM vlog_lease vl LEFT JOIN write_op wo ON wo.id=vl.write_op_id LEFT JOIN vlog v ON v.id=vl.vlog_id`, func(r *sql.Rows) error {
 		var id, op int64

@@ -12,6 +12,7 @@ const (
 	WriteOpCommitted = "committed"
 	WriteOpAbandoned = "abandoned"
 	WriteOpCancelled = "cancelled"
+	WriteOpExpired   = "expired"
 )
 
 type WriteOp struct {
@@ -159,7 +160,23 @@ func (d *DB) finishPreparedWriteOp(ctx context.Context, id int64, state string) 
 // stored window chunks), and the bytes of any new chunk are already durable in
 // their vlogs before this is called. Repeating it after commit is a no-op that
 // returns the published file id, keeping Close idempotent by key.
+// This entry point does not retain a retry-result root; callers adopting a
+// retention policy must use CommitWriteOpVersionWithRetention instead.
 func (d *DB) CommitWriteOpVersion(ctx context.Context, opID int64, path string, mtime int64, placements []ChunkPlacement) (int64, error) {
+	return d.commitWriteOpVersion(ctx, opID, path, mtime, placements, 0)
+}
+
+// CommitWriteOpVersionWithRetention retains the immutable result's exact extent
+// occurrences until an explicit Unix-nanosecond deadline, in the publication
+// transaction. A committed retry cannot extend the original retention deadline.
+func (d *DB) CommitWriteOpVersionWithRetention(ctx context.Context, opID int64, path string, mtime int64, placements []ChunkPlacement, expiresAt int64) (int64, error) {
+	if expiresAt <= 0 {
+		return 0, fmt.Errorf("retry retention deadline must be positive")
+	}
+	return d.commitWriteOpVersion(ctx, opID, path, mtime, placements, expiresAt)
+}
+
+func (d *DB) commitWriteOpVersion(ctx context.Context, opID int64, path string, mtime int64, placements []ChunkPlacement, expiresAt int64) (int64, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -182,6 +199,18 @@ func (d *DB) CommitWriteOpVersion(ctx context.Context, opID int64, path string, 
 	}
 	if err := d.publicationCheckpoint("version-written"); err != nil {
 		return 0, err
+	}
+	if expiresAt != 0 {
+		chunks, err := fileChunks(ctx, tx, fileID)
+		if err != nil {
+			return 0, err
+		}
+		if err := adjustChunkRefs(ctx, tx, chunks, 1); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO write_result_root(write_op_id,file_id,expires_at) VALUES(?,?,?)", opID, fileID, expiresAt); err != nil {
+			return 0, err
+		}
 	}
 	var acknowledgedOffset int64
 	for _, placement := range placements {
