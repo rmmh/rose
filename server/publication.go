@@ -51,7 +51,7 @@ func (s *Server) rehomePublicationChunks(ctx context.Context, h *FileHandle, pla
 // canonical placements. The caller owns namespaceMu and the write-operation
 // lock. Topology/relocation and GC are fenced through the metadata transaction,
 // so a checked location cannot be failed, repointed or collected before publish.
-func (s *Server) publishPreparedVersion(ctx context.Context, opID int64, path string, mtime int64, planned []meta.ChunkPlacement) (int64, []meta.ChunkPlacement, error) {
+func (s *Server) publishPreparedVersion(ctx context.Context, opID int64, path string, mtime int64, planned []meta.ChunkPlacement, retainResult bool) (int64, []meta.ChunkPlacement, error) {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
 	s.pinMu.Lock()
@@ -135,7 +135,12 @@ func (s *Server) publishPreparedVersion(ctx context.Context, opID int64, path st
 	if err := s.publicationCheckpoint("placements-verified"); err != nil {
 		return 0, nil, err
 	}
-	id, err := s.db.CommitWriteOpVersion(ctx, opID, path, mtime, placements)
+	var id int64
+	if retainResult {
+		id, err = s.db.CommitWriteOpVersionWithRetention(ctx, opID, path, mtime, placements, s.now().Add(s.retryRetention).UnixNano())
+	} else {
+		id, err = s.db.CommitWriteOpVersion(ctx, opID, path, mtime, placements)
+	}
 	if err == nil {
 		err = s.publicationCheckpoint("namespace-published")
 	}

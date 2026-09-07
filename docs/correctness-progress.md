@@ -681,3 +681,25 @@ implementation and does not replace or reduce the plan's acceptance criteria.
 - Full metadata race tests, the repository Go suite, vet, and whitespace checks
   passed. Retained-root publication cuts verify rollback before commit and
   retention after an injected lost post-commit reply.
+
+### Server retry-result retention and admission
+
+- Enabled durable result roots for client-supplied operation keys, with a
+  24-hour default and positive `SetRetryRetention` / `-retry-retention` settings
+  for future publications. Anonymous writes do not promise durable keyed retry
+  results. Existing stored deadlines survive restart and policy changes.
+- Retry Open now loads and pins the winning operation's historical file instead
+  of the current namespace head. Open, Close, and maintenance expire roots and
+  fence expired keys. Active handle pins preserve readable bytes across expiry;
+  they cannot authorize returning an expired keyed result.
+- Added an end-to-end regression spanning overwrite, unlink, GC, compaction,
+  restart, matching retries, conflicting bytes, non-resurrection, expiry without
+  a maintenance pass, active-reader preservation, and final reclamation. It
+  passes; metadata references remain independently checkable.
+- Documented B15 and the concrete retention contract. This does not complete
+  bounded key generations/tombstone cleanup, obsolete file-row reclamation,
+  remote deadline advertisement, or all namespace-history cases.
+- Full repository tests, focused retry/publication/handle-expiry race checks,
+  vet, and whitespace checks passed. Additional race-tested assertions verify
+  the default deadline, rejection of zero retention, unchanged existing deadlines
+  after a policy increase, and expiry enforced by Close alone.

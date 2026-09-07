@@ -102,15 +102,16 @@ type Server struct {
 	maintRunMu sync.Mutex
 	// namespaceMu serializes path publication on Close with Open, Rename, and
 	// Unlink so an open writer cannot race an unlink and relink the name.
-	namespaceMu   sync.Mutex
-	handlesMu     sync.Mutex
-	handles       map[int64]*FileHandle
-	handleCounter int64
-	writeOpsMu    sync.Mutex
-	writeOps      map[int64]*operationLock
-	writeOpExpiry time.Duration
-	startTime     time.Time
-	now           func() time.Time // immutable after construction; injectable in deterministic tests
+	namespaceMu    sync.Mutex
+	handlesMu      sync.Mutex
+	handles        map[int64]*FileHandle
+	handleCounter  int64
+	writeOpsMu     sync.Mutex
+	writeOps       map[int64]*operationLock
+	writeOpExpiry  time.Duration
+	retryRetention time.Duration
+	startTime      time.Time
+	now            func() time.Time // immutable after construction; injectable in deterministic tests
 
 	// pinMu guards pinnedChunks. A pinned hash is either reused by an in-flight
 	// write operation or referenced by a live file handle. Reclamation -- gcLocked
@@ -130,6 +131,9 @@ const MaxVlogBytes int64 = 4 << 30
 
 // DefaultWriteOpExpiry is the duration after which an inactive prepared write operation is abandoned.
 const DefaultWriteOpExpiry = 1 * time.Hour
+
+// DefaultRetryRetention bounds byte retention for client-supplied operation keys.
+const DefaultRetryRetention = 24 * time.Hour
 
 func NewServer(db *meta.DB) *Server {
 	s := &Server{
@@ -154,6 +158,7 @@ func NewServer(db *meta.DB) *Server {
 		writeOps:           make(map[int64]*operationLock),
 		pinnedChunks:       make(map[int64]map[string]struct{}),
 		writeOpExpiry:      DefaultWriteOpExpiry,
+		retryRetention:     DefaultRetryRetention,
 		startTime:          time.Now(),
 		now:                time.Now,
 		handleCounter:      newHandleCounter(),

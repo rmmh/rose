@@ -265,6 +265,22 @@ node-only timestamps surviving close, and failed Create leaving no visible name
 or prepared operation. Required mounted FUSE tests passed with the race detector.
 This does not resolve the separate cross-adapter namespace/handle identity work.
 
+### B15 — P1: committed retries lose their result to namespace changes and GC
+
+Committed operations stored a historical file ID without retaining its chunks.
+Overwrite/unlink followed by GC or compaction could make retry validation fail.
+Retry Open also built its cache from the current path head, rather than the
+winning operation's version.
+
+Explicit client keys now acquire a durable retry-result root at publication,
+with a 24-hour default and a configurable positive retention period. Retry Open
+loads and pins the committed version. Expiry atomically releases the root and
+fences the key; Open and Close enforce expiry independently of maintenance.
+Tests cover namespace removal, GC, compaction, restart, compatible/conflicting
+retries, non-resurrection, and active-reader survival across expiry. Anonymous
+writes retain session semantics. Bounded expired-key generations and historical
+file-row reclamation remain architectural requirements.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

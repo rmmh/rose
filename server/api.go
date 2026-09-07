@@ -36,10 +36,11 @@ type FileHandle struct {
 	// write path without the handle's write-op lock and mutated by Rename (to
 	// retarget an open handle to its new name), so access goes through atomic
 	// load/store to stay race-free.
-	pathPtr    atomic.Pointer[string]
-	snapshotID uint64
-	writeOpID  int64
-	writeKey   string
+	pathPtr      atomic.Pointer[string]
+	snapshotID   uint64
+	writeOpID    int64
+	writeKey     string
+	retainResult bool // client supplied a stable operation key
 	// mtimeNs is an optional mtime override for an open write handle. FUSE can
 	// receive futimens before a newly-created file has a published namespace row.
 	mtimeNs  atomic.Int64
@@ -180,6 +181,9 @@ func (s *Server) AbortHandle(ctx context.Context, handle int64) error {
 func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	s.namespaceMu.Lock()
 	defer s.namespaceMu.Unlock()
+	if _, err := s.expireWriteResultsLocked(ctx); err != nil {
+		return nil, err
+	}
 	// Simple implementation
 	path := cleanPath(req.GetPath())
 	if path == "" {
@@ -230,10 +234,24 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 		if op.Path != path && !(op.State == meta.WriteOpCommitted && op.FileID == id) {
 			return nil, fmt.Errorf("write operation key is already bound to %q", op.Path)
 		}
-		if op.State == meta.WriteOpCancelled || op.State == meta.WriteOpAbandoned {
+		if op.State == meta.WriteOpCancelled || op.State == meta.WriteOpAbandoned || op.State == meta.WriteOpExpired {
 			return nil, fmt.Errorf("write operation key is %s", op.State)
 		}
 		h.writeOpID, h.writeKey = op.ID, op.IdempotencyKey
+		h.retainResult = true
+		if op.State == meta.WriteOpCommitted {
+			// A retry reads and validates the winning result, even after the
+			// namespace head has been overwritten or removed.
+			chunks, err = s.db.FileVersionChunks(ctx, op.FileID)
+			if err != nil {
+				return nil, err
+			}
+			h.id, h.chunks = op.FileID, chunks
+			h.openedMtime, err = s.db.FileVersionMtime(ctx, op.FileID)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if err := s.ensureRecoveryFileID(ctx, h, op); err != nil {
 			return nil, err
 		}
@@ -1038,6 +1056,7 @@ func (s *Server) ensureWriteOperation(ctx context.Context, h *FileHandle, handle
 		return err
 	}
 	h.writeOpID, h.writeKey = op.ID, key
+	h.retainResult = false
 	if err := s.ensureRecoveryFileID(ctx, h, op); err != nil {
 		return err
 	}
@@ -1209,6 +1228,9 @@ func (s *Server) FlushHandle(ctx context.Context, handle int64) error {
 func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, idempotencyKey string) error {
 	s.namespaceMu.Lock()
 	defer s.namespaceMu.Unlock()
+	if _, err := s.expireWriteResultsLocked(ctx); err != nil {
+		return err
+	}
 	s.handlesMu.Lock()
 	h, ok := s.handles[handle]
 	s.handlesMu.Unlock()
@@ -1263,6 +1285,9 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 	if err != nil {
 		return err
 	}
+	if op.State == meta.WriteOpExpired {
+		return fmt.Errorf("write operation key is expired")
+	}
 	var placements []meta.ChunkPlacement
 	var fileID int64
 	committedMtime := h.openedMtime
@@ -1281,7 +1306,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 			return err
 		}
 		committedMtime = h.mtimeOrNow()
-		fileID, placements, err = s.publishPreparedVersion(ctx, op.ID, h.path(), committedMtime, placements)
+		fileID, placements, err = s.publishPreparedVersion(ctx, op.ID, h.path(), committedMtime, placements, h.retainResult)
 		if err != nil {
 			return fmt.Errorf("publish write operation: %w", err)
 		}
@@ -1321,6 +1346,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		h.writeTouched = false
 		h.writeOpID = 0
 		h.writeKey = ""
+		h.retainResult = false
 		h.fileID64 = 0
 		h.mtimeNs.Store(0)
 		h.mtimeSet.Store(false)

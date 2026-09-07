@@ -40,6 +40,7 @@ var (
 	webdavAddr        = flag.String("webdav", "", "WebDAV listen address (e.g. :8080); empty disables it")
 	protection        = flag.String("protection", "", "Default protection for new buckets: \"N\" for N-way duplication, or \"N+K\" for erasure coding with N data and K parity shards (e.g. 3 or 3+2). Empty keeps the built-in 2-copy mirror.")
 	snapshotRetention = flag.String("snapshot-retention", "", "Persist snapshot retention as continuous,daily,weekly durations (e.g. 24h,720h,8760h); off disables expiration; empty keeps the saved policy")
+	retryRetention    = flag.Duration("retry-retention", server.DefaultRetryRetention, "Retain bytes for client-supplied operation keys for this positive duration after commit; existing deadlines are unchanged")
 	debug             = flag.Bool("debug", false, "Verbose logging: per-operation FUSE tracing and debug-level logs. Off by default; the per-op trace noticeably slows the write path.")
 )
 
@@ -148,6 +149,9 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 	roseServer := server.NewServerWithDiskRoots(db, diskRoots)
+	if err := roseServer.SetRetryRetention(*retryRetention); err != nil {
+		log.Fatal(err)
+	}
 	if pol, ok, err := parseProtection(*protection); err != nil {
 		log.Fatal(err)
 	} else if ok {

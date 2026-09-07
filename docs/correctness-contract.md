@@ -37,6 +37,23 @@ retaining the referenced version's bytes for that period. Expired keys cannot be
 silently reused as new operations. Session expiration must fence a handle before
 releasing its pins or leases; an operation's retry record may outlive its session.
 
+New results for client-supplied `Open.operation_key` values retain their exact
+version for 24 hours after publication by default. `-retry-retention` (or
+`SetRetryRetention`) accepts a positive duration for future publications; changing
+it does not alter stored deadlines. Anonymous writes use session semantics and
+do not acquire a durable retry-result root. Flush ends the keyed operation; later
+writes on that handle start a new anonymous operation as before.
+
+Maintenance, Open, and Close expire elapsed roots using server time, including
+the exact deadline. Expired keys are fenced even when maintenance has not run.
+A retry Open pins the winning version rather than the current path head. Those
+pins keep its bytes readable after root expiry until the handle is released or
+reaped, but Close cannot return an expired keyed result. A successful historical
+retry does not restore an overwritten or unlinked namespace entry. Expired-key
+tombstones currently remain indefinitely; bounded key generations are still
+required. The configured policy must be supplied again on restart for future
+results; existing results keep their persisted absolute deadlines.
+
 Network handles become eligible for expiration after one hour without a handle
 request by default (configurable by `SetWriteOpExpiry`). Read, Write, Getattr,
 Truncate, handle mtime updates, and Flush renew activity. The reaper and requests
