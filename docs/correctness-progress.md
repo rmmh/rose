@@ -736,3 +736,23 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   not complete bounded key generations or namespace identity semantics.
 - Full repository tests, full metadata race tests, focused handle-retention race
   tests, vet, and whitespace checks passed.
+
+### Model retry retention, reader ownership, and expiry progress
+
+- Added `RoseRetryRetention`, a bounded model of exact ordered extent references,
+  independent retry-result roots, namespace/snapshot roots, tombstones, deadline
+  admission, reader pins, GC, and process loss of volatile ownership. An
+  independent requested-result record checks that retries pin the winning version.
+- A separate liveness configuration requires roots to expire under weakly fair
+  clock and expiry scheduling. It imposes no fairness on reader release and makes
+  no unconditional physical reclamation claim.
+- Added the two complete configurations to fast evidence collection/CI and a
+  positive-plus-mutation make target. The CI timeout now accommodates seven
+  five-minute configuration limits plus setup. Runtime correspondence and omitted
+  layers are explicit; the original large EC run remains live and incomplete.
+- Both retention configurations completed: 29,980 generated / 5,531 distinct
+  states, depth 13. All seven fast configurations passed with archived source
+  hashes and complete TLC evidence. Seven safety mutations and two fairness
+  mutations produced their expected invariant or temporal violations.
+- The public `make -C tla retry-mutations` target, evidence-parser tests, workflow
+  YAML parsing, and whitespace checks passed. No Go implementation changed.

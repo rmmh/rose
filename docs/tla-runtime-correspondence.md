@@ -154,3 +154,44 @@ and rejects safety violations, parser errors, and timeouts as successful evidenc
 This proves conditional progress only for the bounded plog abstraction. Runtime
 scheduling refinement, maintenance/lease-expiry liveness, and composition with the
 catalog and placement models remain open.
+
+## Retry-result retention
+
+`RoseRetryRetention` models the newly implemented retry-root layer separately
+from physical durability and namespace-tree design. It has two immutable ordered
+versions (one repeats a chunk), one path head, one snapshot, two reader owners,
+and three clock ticks. Publication and expiry update reference counts
+incrementally; `ExactReferences` independently recounts each root's extent
+occurrences. The requested result identity is recorded separately from the
+version actually pinned by Open, exposing a retry that incorrectly opens the
+current head.
+
+| Model action/state | Runtime boundary |
+| --- | --- |
+| `Publish`, result root, head and references | `CommitWriteOpVersionWithRetention` transaction; physical bytes are assumed verified and durable before this action |
+| `Unlink`, `Snapshot`, `DropSnapshot` | Namespace/snapshot root changes and exact chunk-occurrence reference transfer |
+| `Expire` | `ExpireWriteResults`: decrement references, remove the result root, retain an expired key tombstone atomically |
+| `OpenRetry`, `RetryMutation` | Deadline admission plus winning-version pinning; state/deadline are read together for mutations |
+| `pins`, `Close`, `Crash` | Handle-owned chunk pins, release/expiry, and loss of volatile ownership on process exit |
+| `GC` | Reclaim only zero-reference chunks with no reader/preparation owner |
+
+Safety has no fairness assumptions. It checks exact references, root/result
+agreement, readable namespace/snapshot/result roots and pinned versions, correct
+retry result identity, no expired admission, and no reuse of an expired key.
+The separate `LiveSpec` adds weak fairness for clock progress and each expiry
+action. Under these assumptions every retained result root eventually expires.
+Clients need not release handles, so eventual physical reclamation is not claimed.
+`Close` models ownership release only; keyed result/mutation admission is the
+separate `RetryMutation` action.
+
+`make -C tla retry-mutations` runs both positive configurations and sensitivity
+checks: omit a result root, lose a repeated expiry reference, ignore reader pins,
+omit either deadline guard, reuse an expired key, open the current head on retry,
+or remove either clock/expiry fairness. Parser errors and timeouts do not count
+as detected violations.
+
+This is a bounded abstraction, not a runtime refinement proof. It assumes atomic
+SQLite transactions and prior physical durability; it omits append preparation,
+partial-byte retries, range geometry, multiple paths, mutable namespace identity,
+placement/repair, wall-clock rollback, and the unfinished bounded-key generation
+protocol. Existing prefix and placement models remain separate obligations.

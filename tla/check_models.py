@@ -16,6 +16,8 @@ FAST = [
     ("RoseTxnCommit", "RoseTxnCommit"),
     ("RoseTxnCommit", "RoseTxnCommitGlobal"),
     ("RoseSnapshotGC", "RoseSnapshotGC"),
+    ("RoseRetryRetention", "RoseRetryRetention"),
+    ("RoseRetryRetention", "RoseRetryRetentionLive"),
 ]
 LARGE = [
     ("RoseMetadata", "RoseMetadata"),

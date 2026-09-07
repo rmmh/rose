@@ -7,7 +7,8 @@ make -C tla check-fast
 ```
 
 This checks prefix safety, conditional prefix liveness, both transaction
-configurations, and the small snapshot/owner-pin configuration. It also tests the
+configurations, the small snapshot/owner-pin configuration, and retry-retention
+safety and conditional liveness. It also tests the
 evidence parser. It does not run the large placement or retention state spaces,
 Go tests, or the separate mutation and coverage checks.
 
@@ -52,6 +53,7 @@ make -C tla snapshot-coverage
 make -C tla snapshot-mutations
 make -C tla prefix-mutations
 make -C tla prefix-liveness
+make -C tla retry-mutations
 ```
 
 ## Repository CI

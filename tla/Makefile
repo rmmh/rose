@@ -48,3 +48,12 @@ check-fast: test-evidence
 
 check-large: test-evidence
 	python3 check_models.py --tier large --timeout 43200
+
+.PHONY: test-retry-retention retry-mutations
+
+test-retry-retention:
+	java -Xmx512m -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RoseRetryRetention.cfg RoseRetryRetention.tla
+	java -Xmx512m -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RoseRetryRetentionLive.cfg RoseRetryRetention.tla
+
+retry-mutations: test-retry-retention
+	python3 check_retry_mutations.py
