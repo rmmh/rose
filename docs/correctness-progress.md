@@ -604,3 +604,17 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   fault accounting need further investigation; the audit plan records this
   evidence. The new scheduled job exposes this outstanding failure rather than
   treating it as passing or optional coverage.
+
+### Reprotect abandoned file tails
+
+- Fixed B13: lease-free scoped tails no longer indefinitely defer relocation.
+  Remount discards abandoned scoped tails by reconciling to the catalog prefix,
+  while preserving leased file tails and uncommitted raw tails.
+- Added regressions for active lease deferral, abort followed by repair without
+  restart, old plaintext preservation, resumed publication, and raw-tail
+  protection. Restoring the old relocation guard produces the expected failure.
+- The full server suite and focused reprotection/lease/node-return race checks
+  passed. The full repository run exposed a separate FUSE timestamp failure
+  during an actual mount under escalated execution; that run is failed, not
+  passing verification. The audit records the `futimes` EIO for follow-up.
+  Chaos ownership cleanup/completion accounting remains unfinished.

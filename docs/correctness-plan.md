@@ -233,6 +233,23 @@ changes. Tests assert stable job rows and ownership markers, plus successful
 identical retries and independent destinations. This is destination ownership
 fencing, not a substitute for the outstanding disk-placement generation protocol.
 
+### B13 — P1: abandoned file tails indefinitely defer reprotection
+
+File writes can append beyond the published catalog prefix and then be aborted
+or expired. Although cancellation releases their durable leases, relocation used
+the mounted length alone to infer an active writer and deferred forever. A
+failed disk could therefore keep referenced data degraded and freeze new
+publication even after all affected clients had abandoned their operations.
+
+Relocation now uses durable lease ownership for scoped file vlogs. The raw RPC
+path retains its extra-tail guard because raw writes have no file-operation
+lease. Remount likewise preserves a scoped tail only while a lease owns it;
+otherwise it reconciles to the catalog prefix that repair actually regenerated.
+The regression proves active file leases still defer repair, abort permits repair
+without restart, old plaintext survives, new publication resumes, and an
+uncommitted raw tail remains protected. Restoring the previous relocation guard
+makes the regression fail at the deferred-repair assertion.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or
@@ -254,6 +271,10 @@ fencing, not a substitute for the outstanding disk-placement generation protocol
   semantics in the harness, then determine which remaining failures are runtime
   defects. Do not weaken the strict publication gate or suppress these errors
   merely to obtain a passing run.
+- After correcting platform-specific mount options, a full suite executed real
+  FUSE mounts under escalated execution and exposed `TestFuseTouchStyleCreateAndSetTimesBeforeClose`:
+  `futimes` on a newly created, still-open file returns EIO. This is an outstanding
+  adapter failure. Earlier sandbox skips did not validate this behavior.
 
 ## Architectural mismatches and follow-up risks
 

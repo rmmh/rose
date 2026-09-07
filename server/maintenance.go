@@ -1123,8 +1123,9 @@ func removePlog(plogs []meta.PlogOnDisk, plogID uint32) []meta.PlogOnDisk {
 
 // vlogRelocationDeferredLocked reports whether a vlog has unpublished client
 // writes. File RPCs retain a durable lease until Close; raw vlog RPCs instead
-// leave the mounted cursor ahead of the catalog until CommitVlog. Moving either
-// vlog would remount it against an incomplete catalog length.
+// leave the mounted cursor ahead of the catalog until CommitVlog. Once a scoped
+// file vlog has no lease, any extra tail belongs to abandoned writes and must not
+// prevent repair of its published prefix indefinitely.
 func (s *Server) vlogRelocationDeferredLocked(ctx context.Context, vlogID uint32) (bool, error) {
 	if s.activeVlogOps[vlogID] != 0 {
 		return true, nil
@@ -1141,7 +1142,7 @@ func (s *Server) vlogRelocationDeferredLocked(ctx context.Context, vlogID uint32
 	if err != nil {
 		return false, err
 	}
-	return vlog.Length() > info.Length, nil
+	return len(info.DedupDomain) == 0 && vlog.Length() > info.Length, nil
 }
 
 // setDiskStateLocked persists a disk transition and updates the cache. The
@@ -1297,10 +1298,19 @@ func (s *Server) remountVlogLocked(ctx context.Context, vlogID uint32) error {
 	// A writer may already have appended an uncommitted tail beyond the catalog
 	// length. File writes advertise that ownership with a durable lease, while
 	// the raw WriteVlog/CommitVlog RPC pair does not. Either way, a topology
-	// remount must preserve the mounted append cursor or reconciliation will
-	// truncate bytes the client has already written.
+	// remount must preserve an owned append cursor. A scoped tail without a lease
+	// is abandoned and must not enlarge the prefix expected from a repaired shard.
 	if current := s.vlogs[vlogID]; current != nil && current.Length() > info.Length {
-		info.Length = current.Length()
+		preserve := len(info.DedupDomain) == 0
+		if !preserve {
+			preserve, err = s.db.VlogLeased(ctx, vlogID)
+			if err != nil {
+				return err
+			}
+		}
+		if preserve {
+			info.Length = current.Length()
+		}
 	}
 	vlog, err := s.mountVlogLocked(ctx, info)
 	if err != nil {
