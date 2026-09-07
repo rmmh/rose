@@ -232,12 +232,24 @@ func (s *Server) ReprotectDisk(ctx context.Context, diskID uint32) error {
 		return fmt.Errorf("reprotect: disk %d is %s, only failed or draining disks are reprotected", diskID, s.diskState[diskID])
 	}
 
-	job, err := s.db.GetOrCreateReprotectJob(ctx, diskID)
+	plogs, err := s.db.PlogsOnDisk(ctx, diskID)
 	if err != nil {
 		return err
 	}
-
-	plogs, err := s.db.PlogsOnDisk(ctx, diskID)
+	if len(plogs) == 0 {
+		// Empty failed disks remain in the driver's scan. Reuse their completed
+		// outcome instead of creating one terminal row on every maintenance pass.
+		// An interrupted final step may still need its existing job completed.
+		job, exists, err := s.db.LatestDiskJob(ctx, meta.JobReprotect, diskID)
+		if err != nil {
+			return err
+		}
+		if exists && job.State == meta.JobRunning {
+			return s.db.MarkJobDone(ctx, job.ID)
+		}
+		return nil
+	}
+	job, err := s.db.GetOrCreateReprotectJob(ctx, diskID)
 	if err != nil {
 		return err
 	}

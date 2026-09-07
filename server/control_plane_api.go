@@ -199,7 +199,13 @@ func (s *Server) StartReprotect(ctx context.Context, req *pb.StartReprotectReque
 		return nil, err
 	}
 	if exists && previous.State == meta.JobDone {
-		return &pb.MaintenanceJobResponse{JobId: uint64(previous.ID)}, nil
+		plogs, err := s.db.PlogsOnDisk(ctx, req.GetDiskId())
+		if err != nil {
+			return nil, err
+		}
+		if len(plogs) == 0 {
+			return &pb.MaintenanceJobResponse{JobId: uint64(previous.ID)}, nil
+		}
 	}
 	job, err := s.db.GetOrCreateReprotectJob(ctx, req.GetDiskId())
 	if err != nil {

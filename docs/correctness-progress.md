@@ -756,3 +756,21 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   mutations produced their expected invariant or temporal violations.
 - The public `make -C tla retry-mutations` target, evidence-parser tests, workflow
   YAML parsing, and whitespace checks passed. No Go implementation changed.
+
+### Reprotect job growth and repeated failure cycles
+
+- Fixed B17: scanning an empty failed disk no longer creates one completed job
+  per pass. A running job whose last shard already moved is still finalized;
+  subsequent passes preserve that completed row.
+- StartReprotect now checks current source mappings before returning an old
+  completed job. A disk that returns, gains new shards, and fails again receives
+  a new repair job; retries after that repair return its completion.
+- Regressions verify zero growth over repeated empty scans, recovery of an
+  interrupted final step, distinct jobs for two actual failure cycles, stable
+  current-result retries, and retained plaintext. Running the tests against the
+  previous implementation exposes both expected failures.
+- General terminal-job reclamation and generation-based stale-completion fencing
+  remain separate requirements; this fix removes idle work and the observed
+  repeated-failure shortcut.
+- Full repository tests, focused reprotection/recovery race tests, vet, and
+  whitespace checks passed.

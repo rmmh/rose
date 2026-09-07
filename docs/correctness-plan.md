@@ -295,6 +295,22 @@ run without a reaper; removing the deadline check makes all three operations
 incorrectly succeed. Root reclamation remains a separate maintenance/admission
 transaction, so rejecting a mutation does not itself invalidate an open reader.
 
+### B17 — P2: reprotection creates idle jobs and reuses stale completion
+
+The background driver continues scanning failed disks after their shards have
+been reprotected. Each empty pass previously created and completed another job,
+so terminal metadata grew even with no new workload. Separately, StartReprotect
+returned the most recent completed job without checking whether the disk had
+returned, acquired new shards, and failed again.
+
+An empty pass now completes an existing running job if necessary and otherwise
+returns without creating a row. The RPC reuses a completed result only when the
+source has no mapped shards; a new failure with shards starts new work. Tests
+cover repeated idle passes, interrupted finalization, two failure cycles, stable
+retries of the current completion, and readable data across both cycles. The
+previous implementation fails both new regressions. This avoids idle metadata
+growth but does not replace terminal-job retention or placement generations.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or
