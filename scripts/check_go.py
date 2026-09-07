@@ -8,7 +8,7 @@ import subprocess
 import time
 
 
-def test_evidence(lines, returncode):
+def test_evidence(lines, returncode, require_no_skips=False):
     packages = {}
     tests = {}
     malformed = False
@@ -33,6 +33,7 @@ def test_evidence(lines, returncode):
                 and all(action in ("pass", "skip") for action in packages.values())
                 and all(action in ("pass", "skip") for action in tests.values()))
     status = ("failed" if returncode != 0 or failed or "fail" in packages.values()
+              or (require_no_skips and (skipped or "skip" in packages.values()))
               else "passed" if complete else "incomplete")
     return dict(status=status, packages=packages, passed_tests=len(passed),
                 skipped_tests=skipped, failed_tests=failed,
@@ -42,7 +43,8 @@ def test_evidence(lines, returncode):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("test", "race", "vet"))
+    parser.add_argument("mode", choices=("test", "race", "vet", "mount", "chaos"))
+    parser.add_argument("--seed", type=int, default=1, help="seed for opt-in chaos")
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args()
     output = args.output_dir.resolve()
@@ -53,8 +55,17 @@ def main():
     command = (["go", "vet", "./..."] if args.mode == "vet" else
                ["go", "test", "-json", "-count=1", "-timeout=180s"]
                + (["-race"] if args.mode == "race" else []) + ["./..."])
+    environment = {"ROSE_NO_RAMDISK": "1", "ROSE_CHAOS": "0"}
+    if args.mode == "mount":
+        command = ["go", "test", "-json", "-count=1", "-race", "-timeout=180s", "./fuse"]
+        environment["ROSE_REQUIRE_FUSE"] = "1"
+    elif args.mode == "chaos":
+        command = ["go", "test", "-json", "-count=1", "-race", "-timeout=180s",
+                   "-run", "^TestChaos$", "./server"]
+        environment.update(ROSE_CHAOS="1", ROSE_CHAOS_SEED=str(args.seed),
+                           ROSE_CHAOS_DURATION="30s")
     report = dict(mode=args.mode, command=command, status="incomplete",
-                  environment={"ROSE_NO_RAMDISK": "1", "ROSE_CHAOS": "0"})
+                  environment=environment)
     report_path = output / "results.json"
 
     def save():
@@ -77,7 +88,8 @@ def main():
         report["status"] = "passed" if result.returncode == 0 else "failed"
     else:
         with (output / "stdout.log").open() as log:
-            report.update(test_evidence(log, result.returncode))
+            report.update(test_evidence(log, result.returncode,
+                                        require_no_skips=args.mode in ("mount", "chaos")))
     save()
     summary = [f"Go {args.mode}: {report['status']}"]
     if args.mode != "vet":

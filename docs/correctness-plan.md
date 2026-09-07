@@ -233,6 +233,28 @@ changes. Tests assert stable job rows and ownership markers, plus successful
 identical retries and independent destinations. This is destination ownership
 fencing, not a substitute for the outstanding disk-placement generation protocol.
 
+## Verification defects found while implementing CI
+
+- The FUSE helper passed macFUSE-only options to Linux and skipped all mount or
+  handshake errors. Options are now platform-specific, and required-mount mode
+  fails instead of skipping. Cleanup is registered before the handshake check.
+  Successful mounted execution still requires a capable host.
+- Chaos candidate selection opened live plogs writable. Following introduction
+  of undo recovery, this could replay a live writer's pending journal and
+  truncate its file behind the mounted handle. Selection now uses read-only
+  `InspectPlog`; storage regressions assert that inspection cannot replay undo.
+- The newly enabled 30-second race-enabled chaos run with seed 1 currently
+  **fails**. After the inspection fix, the observed run verified 19 committed
+  files with zero read mismatches, but reported 98 unexpected degraded-write
+  errors and one bitrot injection with no observed repair. These are outstanding
+  failures, not successful chaos verification. `ReprotectDisk` can return nil
+  after deferring leased/busy vlogs, while the injector treats return as complete
+  and clears its active-fault flag. Failed Close attempts also retain retryable
+  writers. Establish explicit maintenance completion and writer-abandonment
+  semantics in the harness, then determine which remaining failures are runtime
+  defects. Do not weaken the strict publication gate or suppress these errors
+  merely to obtain a passing run.
+
 ## Architectural mismatches and follow-up risks
 
 1. **There is no single executable commit protocol shared with simulation.**

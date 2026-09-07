@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"syscall"
 	"testing"
@@ -47,7 +48,7 @@ func retryNoSys(t *testing.T, what string, op func() error) {
 }
 
 // mountRose mounts a fresh Rose filesystem at a temp dir, skipping the test if
-// the platform cannot establish a FUSE mount (e.g. macFUSE not installed in CI).
+// the platform cannot establish a FUSE mount unless ROSE_REQUIRE_FUSE=1.
 func mountRose(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -64,25 +65,23 @@ func mountRose(t *testing.T) string {
 	}
 	root := rosefuse.NewRoseRoot(srv)
 	ttl := time.Duration(0)
+	mountOptions := fuse.MountOptions{FsName: "rose-test"}
+	if runtime.GOOS == "darwin" {
+		// Suppress macFUSE's private AppleDouble and xattr probes. These
+		// options must not be passed to Linux fusermount.
+		mountOptions.Options = []string{"noappledouble", "noapplexattr"}
+	}
 	fuseServer, err := gofuse.Mount(mnt, root, &gofuse.Options{
-		MountOptions: fuse.MountOptions{
-			FsName: "rose-test",
-			// macFUSE otherwise probes AppleDouble (._*) sidecars and xattrs on
-			// every op, emitting macFUSE-private opcodes go-fuse does not implement
-			// (surfacing as spurious ENOSYS). These are no-ops on Linux.
-			Options: []string{"noappledouble", "noapplexattr"},
-		},
+		MountOptions:    mountOptions,
 		EntryTimeout:    &ttl,
 		AttrTimeout:     &ttl,
 		NegativeTimeout: &ttl,
 	})
 	if err != nil {
+		if os.Getenv("ROSE_REQUIRE_FUSE") == "1" {
+			t.Fatalf("required FUSE mount unavailable: %v", err)
+		}
 		t.Skipf("FUSE mount unavailable: %v", err)
-	}
-	// Wait for the kernel INIT handshake to finish; operations issued before it
-	// completes get spurious ENOSYS/ENOTSUP on macFUSE.
-	if err := fuseServer.WaitMount(); err != nil {
-		t.Skipf("FUSE mount did not settle: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := fuseServer.Unmount(); err != nil {
@@ -90,6 +89,13 @@ func mountRose(t *testing.T) string {
 			_ = fuseServer.Unmount()
 		}
 	})
+	// Register cleanup before checking the handshake, including its failure path.
+	if err := fuseServer.WaitMount(); err != nil {
+		if os.Getenv("ROSE_REQUIRE_FUSE") == "1" {
+			t.Fatalf("required FUSE mount did not settle: %v", err)
+		}
+		t.Skipf("FUSE mount did not settle: %v", err)
+	}
 	return mnt
 }
 

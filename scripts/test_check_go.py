@@ -33,6 +33,14 @@ class EvidenceTests(unittest.TestCase):
         for extra in (dict(Action="fail"), dict(Action="fail", Test="TestBad")):
             self.assertEqual(test_evidence(good + events(extra), 0)["status"], "failed")
 
+    def test_required_coverage_rejects_skips(self):
+        good = events(dict(Action="pass", Test="TestGood"), dict(Action="pass"))
+        self.assertEqual(test_evidence(good, 0, require_no_skips=True)["status"], "passed")
+        for skipped in (dict(Action="skip", Test="TestMount"), dict(Action="skip")):
+            with self.subTest(skipped=skipped):
+                self.assertEqual(test_evidence(good + events(skipped), 0,
+                                               require_no_skips=True)["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()

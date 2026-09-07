@@ -1,0 +1,43 @@
+name: Scheduled runtime correctness
+
+on:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    name: Required ${{ matrix.mode }} coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [mount, chaos]
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install Linux mount helper
+        if: matrix.mode == 'mount'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3
+      - name: Run required coverage
+        run: python3 scripts/check_go.py '${{ matrix.mode }}' --seed '${{ github.run_number }}' --output-dir '${{ runner.temp }}/runtime-evidence'
+      - name: Archive outcomes, configuration, and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: required-${{ matrix.mode }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-evidence
+          if-no-files-found: error
+          retention-days: 14

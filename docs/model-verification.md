@@ -70,7 +70,7 @@ python3 scripts/check_go.py race --output-dir /tmp/rose-go-race
 python3 scripts/check_go.py vet --output-dir /tmp/rose-go-vet
 ```
 
-The runner disables RAM disks and opt-in heavy chaos, disables test-result caching,
+The ordinary runner modes disable RAM disks and opt-in heavy chaos, disable test-result caching,
 and gives each Go test binary 180 seconds. It records the command, Go version,
 revision, dirty worktree, duration, exit code, package outcomes, test counts,
 failed tests, and every skipped test. Raw stdout/stderr and a concise summary are
@@ -87,7 +87,34 @@ review. CI service cancellation or setup failure can prevent artifact upload and
 must not be interpreted as completed verification.
 
 The fast-model job allows five minutes per complete configuration. The large tier
-is not substituted into that timeout and is not yet scheduled in CI. Scheduled
-large models, chaos/scale tests, capability-required mount tests, and deterministic
-trace replay remain requirements of the correctness plan. Adding this workflow
-does not establish that GitHub has executed it or that those omitted suites pass.
+is not substituted into that timeout and is not yet scheduled in CI.
+
+## Scheduled runtime checks
+
+`.github/workflows/scheduled-correctness.yml` defines weekly and manual jobs for
+required FUSE mounts and opt-in chaos, both with the race detector. Reproduce them
+with:
+
+```sh
+python3 scripts/check_go.py mount --output-dir /tmp/rose-required-mount
+python3 scripts/check_go.py chaos --seed 1 --output-dir /tmp/rose-chaos
+```
+
+Mount mode sets `ROSE_REQUIRE_FUSE=1`: a failed mount or initialization handshake
+fails the test. It requires a host with a usable `/dev/fuse` and mount helper.
+The scheduled Linux job installs `fuse3`; installation alone does not prove the
+host can mount. Ordinary Go tests retain their optional mount behavior. The test
+helper only supplies macFUSE-specific options on macOS and registers unmount
+cleanup before checking the initialization handshake.
+
+Chaos mode runs `TestChaos` for 30 seconds with an explicit recorded seed. CI uses
+its workflow run number, so rerunning the same run preserves the seed; another
+weekly run selects a different seed. The test requires faults, reads, and writes,
+then checks retained data after faults settle. The seed reproduces random choices,
+not a deterministic concurrent execution schedule or minimized trace.
+
+Both required modes reject every test or package skip and reject empty execution.
+Results and logs use the same artifact format and retention as ordinary jobs.
+Scheduled large models, scale tests, and deterministic trace replay remain open.
+Authored workflows do not establish that GitHub has executed them or that a
+capability-dependent suite has passed.

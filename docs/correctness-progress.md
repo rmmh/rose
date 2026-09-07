@@ -578,3 +578,29 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   five fast TLC configurations using the workflow's five-minute per-model limit.
   YAML parsing and whitespace checks passed; hosted workflow execution remains
   unverified.
+
+### Required mount and scheduled chaos coverage
+
+- Added weekly/manual runtime jobs for FUSE and opt-in chaos, both under the race
+  detector. Chaos records an explicit seed and a 30-second duration. Required
+  modes reject skipped tests/packages as well as empty or incomplete execution.
+- Corrected the mount test helper: macFUSE options are now restricted to macOS,
+  and unmount cleanup is registered before the initialization-handshake check.
+  `ROSE_REQUIRE_FUSE=1` turns mount/handshake errors into failures. Ordinary runs
+  preserve capability-aware skips.
+- Local required-mount execution failed all five mount tests with zero skips,
+  as expected on this host without `/dev/fuse`; this proves failure reporting,
+  not successful mount coverage. Ordinary FUSE tests passed with capability skips.
+  Successful mounted execution and the new hosted jobs remain unverified.
+- The first scheduled-command chaos run exposed destructive inspection of live
+  plogs: candidate selection used writable open, which can replay pending undo.
+  It now uses `InspectPlog`. Storage/FUSE race tests and the four evidence-parser
+  regressions passed. The storage undo regression already verifies read-only
+  inspection leaves pending writes untouched.
+- Both 30-second seed-1 chaos runs failed and are recorded as failures. After
+  fixing inspection, the run verified 19 committed files with no read mismatches
+  but reported 98 unexpected degraded-write errors and a bitrot repair miss.
+  Deferred maintenance completion, abandoned retryable writers, and concurrent
+  fault accounting need further investigation; the audit plan records this
+  evidence. The new scheduled job exposes this outstanding failure rather than
+  treating it as passing or optional coverage.
