@@ -484,3 +484,21 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   destination until restart; immediate bounded cleanup and ambiguous SQLite
   commit outcomes still require work. The tested process-crash gap is now
   reclaimable without exposing its destination to ordinary writers.
+
+### Immediate assignment-error cleanup
+
+- Promotion and both compaction paths now share destination assignment and
+  cleanup. On an error, a cancellation-independent transaction conditionally
+  retires only that destination if it is still empty, unleased, unreferenced by
+  chunks, and unclaimed by any job. Mounted state and files are removed only after
+  this catalog decision commits. A successful assignment with a lost reply is
+  retained because its durable job reference disqualifies it from cleanup.
+- Tests repeat unassigned failures and cancellation five times without restart,
+  checking stable catalog/mount counts and deleted physical files. A simulated
+  post-assignment lost reply retains mounted files and accepts an identical retry.
+  The existing process-crash promotion cases still pass through the shared path.
+- Full Go suite, focused metadata/maintenance race tests, vet, and whitespace
+  checks passed. Returned assignment errors no longer require restart to reclaim
+  ordinary abandoned destinations. Cleanup errors themselves retain evidence or
+  leave catalog-free files for the stray sweep; actual SQLite VFS ambiguous errors
+  and filesystem failure permutations remain verification obligations.

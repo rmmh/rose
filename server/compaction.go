@@ -136,7 +136,7 @@ func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 		if err != nil {
 			return fmt.Errorf("compact: provision destination: %w", err)
 		}
-		if err := s.db.SetJobDest(ctx, job.ID, destID); err != nil {
+		if err := s.assignMaintenanceDestinationLocked(ctx, job.ID, destID); err != nil {
 			return err
 		}
 	} else {
@@ -256,7 +256,7 @@ func (s *Server) compactECVlogLocked(ctx context.Context, sourceID uint32, sourc
 			if err != nil {
 				return fmt.Errorf("compact: provision destination EC vlog: %w", err)
 			}
-			if err := s.db.SetJobDest(ctx, job.ID, destID); err != nil {
+			if err := s.assignMaintenanceDestinationLocked(ctx, job.ID, destID); err != nil {
 				return err
 			}
 		} else {

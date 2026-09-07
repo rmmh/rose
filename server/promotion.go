@@ -124,10 +124,7 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 		if err != nil {
 			return false, fmt.Errorf("promote: provision destination EC vlog: %w", err)
 		}
-		if err := s.maintenanceCheckpoint("maintenance-provisioned"); err != nil {
-			return false, err
-		}
-		if err := s.db.SetJobDest(ctx, job.ID, destID); err != nil {
+		if err := s.assignMaintenanceDestinationLocked(ctx, job.ID, destID); err != nil {
 			return false, err
 		}
 	} else {
