@@ -260,12 +260,17 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 		}
 	}
 	ack := int64(0)
+	deadline := int64(0)
 	if h.writeOpID != 0 {
 		op, err := s.db.WriteOpByKey(ctx, h.writeKey)
 		if err != nil {
 			return nil, err
 		}
 		ack = op.AcknowledgedOffset
+		deadline, err = s.db.WriteResultDeadline(ctx, op.ID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	s.replacePinsLocked(h.pinOwner, chunks)
 	s.handlesMu.Lock()
@@ -273,7 +278,7 @@ func (s *Server) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRespons
 	s.handlesMu.Unlock()
 
 	slog.Info("Open", "handle", hid, "id", id, "path", path)
-	return &pb.OpenResponse{Handle: hid, AcknowledgedOffset: ack}, nil
+	return &pb.OpenResponse{Handle: hid, AcknowledgedOffset: ack, RetryExpiresAtNs: deadline}, nil
 }
 
 func (s *Server) OpenSnapshot(ctx context.Context, req *pb.OpenSnapshotRequest) (*pb.OpenResponse, error) {
@@ -1211,10 +1216,11 @@ func (s *Server) provisionForPolicyLocked(ctx context.Context, pol meta.BucketPo
 }
 
 func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResponse, error) {
-	if err := s.finishHandle(ctx, req.GetHandle(), true, req.GetIdempotencyKey()); err != nil {
+	deadline, err := s.finishHandle(ctx, req.GetHandle(), true, req.GetIdempotencyKey())
+	if err != nil {
 		return nil, err
 	}
-	return &pb.CloseResponse{}, nil
+	return &pb.CloseResponse{RetryExpiresAtNs: deadline}, nil
 }
 
 // FlushHandle publishes the current write cache for an open handle without
@@ -1222,53 +1228,57 @@ func (s *Server) Close(ctx context.Context, req *pb.CloseRequest) (*pb.CloseResp
 // file descriptor, so later writes may still arrive on the same open file
 // description.
 func (s *Server) FlushHandle(ctx context.Context, handle int64) error {
-	return s.finishHandle(ctx, handle, false, "")
+	_, err := s.finishHandle(ctx, handle, false, "")
+	return err
 }
 
-func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, idempotencyKey string) error {
+func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, idempotencyKey string) (int64, error) {
 	s.namespaceMu.Lock()
 	defer s.namespaceMu.Unlock()
 	if _, err := s.expireWriteResultsLocked(ctx); err != nil {
-		return err
+		return 0, err
 	}
 	s.handlesMu.Lock()
 	h, ok := s.handles[handle]
 	s.handlesMu.Unlock()
 	if !ok {
 		if idempotencyKey == "" {
-			return fmt.Errorf("invalid handle")
+			return 0, fmt.Errorf("invalid handle")
 		}
 		op, err := s.db.WriteOpByKey(ctx, idempotencyKey)
 		if err != nil {
-			return err
+			return 0, err
 		}
-		if op.State == meta.WriteOpCommitted || op.State == meta.WriteOpCancelled {
-			return nil
+		if op.State == meta.WriteOpCommitted {
+			return s.db.WriteResultDeadline(ctx, op.ID)
 		}
-		return fmt.Errorf("write operation %q has no active handle", idempotencyKey)
+		if op.State == meta.WriteOpCancelled {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("write operation %q has no active handle", idempotencyKey)
 	}
 	h.stateMu.Lock()
 	defer h.stateMu.Unlock()
 	h.lastUsed = s.now()
 	if h.writeOpID != 0 && idempotencyKey != "" && idempotencyKey != h.writeKey {
-		return fmt.Errorf("close idempotency key does not match the write operation")
+		return 0, fmt.Errorf("close idempotency key does not match the write operation")
 	}
 	if h.unlinked && h.writeOpID != 0 {
 		// Flush must not make an unlinked name visible, but the handle remains
 		// usable until Release/Close. The final close abandons its unpublished
 		// intent and releases every reclamation/lease hold.
 		if !remove {
-			return nil
+			return 0, nil
 		}
 		if err := s.db.CancelWriteOp(ctx, h.writeOpID); err != nil {
-			return err
+			return 0, err
 		}
 		s.releasePins(h.writeOpID)
 		s.handlesMu.Lock()
 		delete(s.handles, handle)
 		s.handlesMu.Unlock()
 		s.releasePins(h.pinOwner)
-		return nil
+		return 0, nil
 	}
 	if h.writeOpID == 0 {
 		if remove {
@@ -1277,16 +1287,16 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 			s.handlesMu.Unlock()
 			s.releasePins(h.pinOwner)
 		}
-		return nil
+		return 0, nil
 	}
 	unlock := s.writeOperationLock(h.writeOpID)
 	defer unlock()
 	op, err := s.db.WriteOpByKey(ctx, h.writeKey)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if op.State == meta.WriteOpExpired {
-		return fmt.Errorf("write operation key is expired")
+		return 0, fmt.Errorf("write operation key is expired")
 	}
 	var placements []meta.ChunkPlacement
 	var fileID int64
@@ -1294,40 +1304,44 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 	if op.State != meta.WriteOpCommitted {
 		if h.cache == nil {
 			if err := s.buildCache(ctx, h); err != nil {
-				return err
+				return 0, err
 			}
 		}
 		placements, err = s.finalizeCache(ctx, h)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		placements, err = s.rehomePublicationChunks(ctx, h, placements)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		committedMtime = h.mtimeOrNow()
 		fileID, placements, err = s.publishPreparedVersion(ctx, op.ID, h.path(), committedMtime, placements, h.retainResult)
 		if err != nil {
-			return fmt.Errorf("publish write operation: %w", err)
+			return 0, fmt.Errorf("publish write operation: %w", err)
 		}
 	} else {
 		fileID = op.FileID
 		placements, err = s.db.FileVersionChunks(ctx, fileID)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if h.writeTouched {
 			if err := s.validateCommittedRetry(ctx, h, op, placements); err != nil {
-				return err
+				return 0, err
 			}
 		}
 		committedMtime, err = s.db.FileVersionMtime(ctx, fileID)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if h.mtimeSet.Load() && h.mtimeNs.Load() != committedMtime {
-			return fmt.Errorf("conflicting mtime retry for committed write operation %q", h.writeKey)
+			return 0, fmt.Errorf("conflicting mtime retry for committed write operation %q", h.writeKey)
 		}
+	}
+	deadline, err := s.db.WriteResultDeadline(ctx, op.ID)
+	if err != nil {
+		return 0, err
 	}
 	// Release preparation pins on both the first success and a successful retry
 	// after the database committed but its reply was lost. The committed version
@@ -1352,7 +1366,7 @@ func (s *Server) finishHandle(ctx context.Context, handle int64, remove bool, id
 		h.mtimeSet.Store(false)
 		s.replacePins(h.pinOwner, placements)
 	}
-	return nil
+	return deadline, nil
 }
 
 func (s *Server) validateCommittedRetry(ctx context.Context, h *FileHandle, op meta.WriteOp, placements []meta.ChunkPlacement) error {

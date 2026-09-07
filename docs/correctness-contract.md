@@ -54,6 +54,13 @@ tombstones currently remain indefinitely; bounded key generations are still
 required. The configured policy must be supplied again on restart for future
 results; existing results keep their persisted absolute deadlines.
 
+`OpenResponse.retry_expires_at_ns` and `CloseResponse.retry_expires_at_ns` expose
+the stored exclusive deadline in Unix nanoseconds. Zero means the response has
+no retained committed result, including a newly prepared Open or an anonymous
+operation. The first keyed Close advertises the committed deadline; later retry
+Open and Close responses return that same value, including a Close retry without
+the original handle. A policy change does not extend the returned deadline.
+
 Network handles become eligible for expiration after one hour without a handle
 request by default (configurable by `SetWriteOpExpiry`). Read, Write, Getattr,
 Truncate, handle mtime updates, and Flush renew activity. The reaper and requests

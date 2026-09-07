@@ -128,7 +128,11 @@ func TestRetryRetentionDefaultDeadlineAndCloseAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Close(ctx, &pb.CloseRequest{Handle: h.Handle}); err != nil {
+	if h.RetryExpiresAtNs != 0 {
+		t.Fatal("prepared Open advertised a committed deadline")
+	}
+	closed, err := s.Close(ctx, &pb.CloseRequest{Handle: h.Handle})
+	if err != nil {
 		t.Fatal(err)
 	}
 	var deadline int64
@@ -138,8 +142,15 @@ func TestRetryRetentionDefaultDeadlineAndCloseAdmission(t *testing.T) {
 	if deadline != now.Add(DefaultRetryRetention).UnixNano() {
 		t.Fatal("default deadline differs from contract")
 	}
+	if closed.RetryExpiresAtNs != deadline {
+		t.Fatal("Close did not advertise the stored deadline")
+	}
 	if err := s.SetRetryRetention(48 * time.Hour); err != nil {
 		t.Fatal(err)
+	}
+	again, err := s.Close(ctx, &pb.CloseRequest{Handle: h.Handle, IdempotencyKey: "deadline"})
+	if err != nil || again.GetRetryExpiresAtNs() != deadline {
+		t.Fatalf("lost-reply retry deadline=%v err=%v", again, err)
 	}
 	now = now.Add(DefaultRetryRetention)
 	// No Open or maintenance call intervenes: Close itself must enforce the

@@ -130,8 +130,11 @@ type OpenResponse struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	Handle             int64                  `protobuf:"varint,1,opt,name=handle,proto3" json:"handle,omitempty"`
 	AcknowledgedOffset int64                  `protobuf:"varint,2,opt,name=acknowledged_offset,json=acknowledgedOffset,proto3" json:"acknowledged_offset,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Stored exclusive retry deadline, Unix nanoseconds. Zero means no retained
+	// committed result yet (including anonymous and snapshot handles).
+	RetryExpiresAtNs int64 `protobuf:"varint,3,opt,name=retry_expires_at_ns,json=retryExpiresAtNs,proto3" json:"retry_expires_at_ns,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *OpenResponse) Reset() {
@@ -174,6 +177,13 @@ func (x *OpenResponse) GetHandle() int64 {
 func (x *OpenResponse) GetAcknowledgedOffset() int64 {
 	if x != nil {
 		return x.AcknowledgedOffset
+	}
+	return 0
+}
+
+func (x *OpenResponse) GetRetryExpiresAtNs() int64 {
+	if x != nil {
+		return x.RetryExpiresAtNs
 	}
 	return 0
 }
@@ -1471,9 +1481,12 @@ func (x *CloseRequest) GetIdempotencyKey() string {
 }
 
 type CloseResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Stored exclusive retry deadline, Unix nanoseconds. Zero means this Close
+	// has no retained keyed result. A retry reports the original deadline.
+	RetryExpiresAtNs int64 `protobuf:"varint,1,opt,name=retry_expires_at_ns,json=retryExpiresAtNs,proto3" json:"retry_expires_at_ns,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *CloseResponse) Reset() {
@@ -1504,6 +1517,13 @@ func (x *CloseResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use CloseResponse.ProtoReflect.Descriptor instead.
 func (*CloseResponse) Descriptor() ([]byte, []int) {
 	return file_proto_rose_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *CloseResponse) GetRetryExpiresAtNs() int64 {
+	if x != nil {
+		return x.RetryExpiresAtNs
+	}
+	return 0
 }
 
 // Vlog requests
@@ -2736,10 +2756,11 @@ const file_proto_rose_proto_rawDesc = "" +
 	"\x10proto/rose.proto\x12\arose.v1\"F\n" +
 	"\vOpenRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12#\n" +
-	"\roperation_key\x18\x02 \x01(\tR\foperationKey\"W\n" +
+	"\roperation_key\x18\x02 \x01(\tR\foperationKey\"\x86\x01\n" +
 	"\fOpenResponse\x12\x16\n" +
 	"\x06handle\x18\x01 \x01(\x03R\x06handle\x12/\n" +
-	"\x13acknowledged_offset\x18\x02 \x01(\x03R\x12acknowledgedOffset\"V\n" +
+	"\x13acknowledged_offset\x18\x02 \x01(\x03R\x12acknowledgedOffset\x12-\n" +
+	"\x13retry_expires_at_ns\x18\x03 \x01(\x03R\x10retryExpiresAtNs\"V\n" +
 	"\fWriteRequest\x12\x16\n" +
 	"\x06handle\x18\x01 \x01(\x03R\x06handle\x12\x16\n" +
 	"\x06buffer\x18\x02 \x01(\fR\x06buffer\x12\x16\n" +
@@ -2811,8 +2832,9 @@ const file_proto_rose_proto_rawDesc = "" +
 	"\x04path\x18\x02 \x01(\tR\x04path\"O\n" +
 	"\fCloseRequest\x12\x16\n" +
 	"\x06handle\x18\x01 \x01(\x03R\x06handle\x12'\n" +
-	"\x0fidempotency_key\x18\x02 \x01(\tR\x0eidempotencyKey\"\x0f\n" +
-	"\rCloseResponse\"\x84\x01\n" +
+	"\x0fidempotency_key\x18\x02 \x01(\tR\x0eidempotencyKey\">\n" +
+	"\rCloseResponse\x12-\n" +
+	"\x13retry_expires_at_ns\x18\x01 \x01(\x03R\x10retryExpiresAtNs\"\x84\x01\n" +
 	"\x0fMakeVlogRequest\x12+\n" +
 	"\x11protection_scheme\x18\x01 \x01(\tR\x10protectionScheme\x12\x1f\n" +
 	"\vdata_shards\x18\x02 \x01(\x05R\n" +

@@ -5,6 +5,14 @@ import (
 	"fmt"
 )
 
+// WriteResultDeadline returns the stored exclusive deadline, or zero when this
+// operation has no retained result root. It does not extend retention.
+func (d *DB) WriteResultDeadline(ctx context.Context, opID int64) (int64, error) {
+	var deadline int64
+	err := d.db.QueryRowContext(ctx, "SELECT COALESCE((SELECT expires_at FROM write_result_root WHERE write_op_id=?),0)", opID).Scan(&deadline)
+	return deadline, err
+}
+
 // ExpireWriteResults releases elapsed retry roots and fences their keys in one
 // transaction. It does not delete historical operation rows or reuse keys.
 // A deadline equal to now is expired. Calling it again cannot decrement twice.

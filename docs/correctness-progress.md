@@ -703,3 +703,20 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   vet, and whitespace checks passed. Additional race-tested assertions verify
   the default deadline, rejection of zero retention, unchanged existing deadlines
   after a policy increase, and expiry enforced by Close alone.
+
+### Advertise stored retry deadlines through RPC
+
+- Added `retry_expires_at_ns` to Open and Close responses and regenerated the Go
+  protobuf bindings. The value is the stored exclusive Unix-nanosecond deadline;
+  zero means no retained committed result. Prepared and anonymous operations do
+  not advertise a deadline they have not acquired.
+- Close reads the deadline while publication remains serialized, before
+  releasing its ownership state. First success, a same-handle retry, and a
+  lost-handle keyed retry return the original stored deadline. Retry Open exposes
+  the same deadline independently of the current retention configuration.
+- Race-tested regressions compare responses with the catalog deadline, verify a
+  policy increase cannot extend it, and exercise serialization through real
+  in-process gRPC. This completes basic remote deadline advertisement; bounded
+  expired-key generations and the wider protocol/model obligations remain open.
+- Full repository tests, focused retention/deadline race tests, vet, and
+  whitespace checks passed.
