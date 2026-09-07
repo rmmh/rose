@@ -618,3 +618,18 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   during an actual mount under escalated execution; that run is failed, not
   passing verification. The audit records the `futimes` EIO for follow-up.
   Chaos ownership cleanup/completion accounting remains unfinished.
+
+### Publish FUSE Create before acknowledging the new name
+
+- Fixed B14 by publishing the initial file through the existing flush protocol
+  during Create, while retaining the handle for later writes. A failed initial
+  publication aborts its preparation and is returned to the caller.
+- The new mount-independent regression fails on the previous implementation
+  because Getattr cannot see the new name. It now verifies immediate visibility,
+  a timestamp update with no supplied FUSE handle, and timestamp preservation on
+  close. A second regression checks rejection during known degradation leaves no
+  visible name or prepared operation.
+- Required FUSE mounts passed under escalated execution with the race detector,
+  including the formerly failing timestamp test. Adapter regressions and vet
+  passed, followed by the full repository Go suite. This resolves the observed Create failure; broader cross-adapter
+  namespace identity and notifications remain open.

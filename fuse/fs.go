@@ -274,13 +274,17 @@ func (d *RoseDir) Create(ctx context.Context, name string, flags uint32, mode ui
 		return nil, nil, 0, syscall.ENOENT
 	}
 	childPath := join(d.ref.path, name)
-	// Bind a write operation up front so the file is published on Close even if
-	// nothing is written (e.g. `touch`); otherwise a zero-write handle closes
-	// without ever creating a file head.
+	// Publish the initial file before returning Create. Node-only operations
+	// such as timestamp updates and lookups must see the name while its original
+	// handle remains open. Flush keeps that handle available for later writes.
 	key := fmt.Sprintf("fuse-create-%s-%s", childPath, uid.New())
 	resp, err := d.srv.Open(ctx, &pb.OpenRequest{Path: childPath, OperationKey: key})
 	if err != nil {
 		return nil, nil, 0, opErrno(ctx, err)
+	}
+	if err := d.srv.FlushHandle(ctx, resp.Handle); err != nil {
+		cleanupErr := d.srv.AbortHandle(context.WithoutCancel(ctx), resp.Handle)
+		return nil, nil, 0, opErrno(ctx, errors.Join(err, cleanupErr))
 	}
 	out.Mode = fuse.S_IFREG | mode
 	out.Owner = mountOwner

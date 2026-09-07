@@ -250,6 +250,21 @@ without restart, old plaintext survives, new publication resumes, and an
 uncommitted raw tail remains protected. Restoring the previous relocation guard
 makes the regression fail at the deferred-repair assertion.
 
+### B14 — P2: FUSE Create leaves the new name unpublished until close
+
+`RoseDir.Create` registered an open write operation but deferred its initial
+publication until Flush/Close. Path-based operations could not find the file
+while its creating descriptor remained open. The mounted timestamp regression
+exposed this as EIO from `futimes`; a mount-independent test reproduces the missing
+name and dispatches a node-only timestamp update explicitly.
+
+Create now publishes the initial file through `FlushHandle` before returning,
+retaining the same handle for subsequent writes. Publication failure aborts the
+preparation and returns an error. Regressions verify immediate visibility,
+node-only timestamps surviving close, and failed Create leaving no visible name
+or prepared operation. Required mounted FUSE tests passed with the race detector.
+This does not resolve the separate cross-adapter namespace/handle identity work.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or
@@ -272,9 +287,8 @@ makes the regression fail at the deferred-repair assertion.
   defects. Do not weaken the strict publication gate or suppress these errors
   merely to obtain a passing run.
 - After correcting platform-specific mount options, a full suite executed real
-  FUSE mounts under escalated execution and exposed `TestFuseTouchStyleCreateAndSetTimesBeforeClose`:
-  `futimes` on a newly created, still-open file returns EIO. This is an outstanding
-  adapter failure. Earlier sandbox skips did not validate this behavior.
+  FUSE mounts under escalated execution and exposed B14. The corrected required
+  mount run passes; earlier sandbox skips did not validate this behavior.
 
 ## Architectural mismatches and follow-up risks
 
