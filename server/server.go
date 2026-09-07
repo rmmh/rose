@@ -121,6 +121,7 @@ type Server struct {
 	pinMu            sync.Mutex
 	pinnedChunks     map[int64]map[string]struct{}
 	publicationFault func(string) error // installed before requests by fault tests
+	maintenanceFault func(string) error // installed before maintenance by fault tests
 }
 
 // MaxVlogBytes is the 32-bit byte-addressable virtual-log boundary described

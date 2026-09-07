@@ -420,3 +420,26 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   guard mutation produced its expected regression.
 - This is an implementation checkpoint, not completion of the correctness plan.
   The remaining requirements above and the incomplete EC TLC run remain open.
+
+### EC promotion process-crash batch
+
+- Added six process-exit checkpoints covering destination assignment, EC shard
+  commit, durable-prefix recording, individual chunk relocation, job completion,
+  and source retirement. The row-writing checkpoints also sit in the coding
+  helper shared with EC compaction; this batch directly exercises promotion.
+- The fixture uses two distinct records, each exactly twenty stripe rows, in a
+  3+1 layout with 64-byte test columns. It checks that both chunks are selected,
+  so the first relocation checkpoint interrupts a partially moved source rather
+  than an already-complete single-chunk operation.
+- Recovery checks both live files and their snapshot, completes residual
+  maintenance, requires the staging source and running job to disappear, and
+  validates every destination shard/codeword through `verifyProtectedChunk`.
+  A second restart checks that both live and snapshot plaintext remain exact.
+- Corrected the promotion comments: an interrupted relocation can leave chunks
+  split between verified EC destinations and intact staging locations. It does
+  not necessarily leave every chunk at its original location.
+- Full Go suite, promotion/compaction race tests, vet, and whitespace checks
+  passed. These are process-crash tests with small stripe geometry; power-loss,
+  inter-shard failures, repair/compaction interruption, and production-size stripe
+  coverage remain separate requirements. No completion claim is made for the
+  full EC durability protocol or runtime/model refinement.

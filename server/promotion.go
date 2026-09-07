@@ -45,8 +45,9 @@ func (s *Server) PromoteStaging(ctx context.Context) (int, error) {
 // promoted anything.
 //
 // Crash safety mirrors compaction: the coded rows are made durable in the EC
-// vlog before any chunk row is repointed, so an interruption leaves every chunk
-// resolving to its intact replicated copy in staging and the job re-runs.
+// vlog before any chunk row is repointed. An interruption can leave a mixture
+// of verified EC locations and intact staging locations; the job resumes from
+// the chunks still in staging.
 func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool, error) {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
@@ -133,12 +134,17 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 		}
 	}
 
-	// Reading each chunk back from the replicated staging vlog heals bitrot in
-	// passing (the read verifies sector hashes against a surviving copy).
+	if err := s.maintenanceCheckpoint("promotion-destination"); err != nil {
+		return false, err
+	}
+	// Read verified bytes from a surviving staging copy before encoding them.
 	if err := s.writeChunksAsRows(ctx, job.ID, source, dest, destID, live[:count], padded); err != nil {
 		return false, fmt.Errorf("promote: %w", err)
 	}
 	if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
+		return false, err
+	}
+	if err := s.maintenanceCheckpoint("promotion-job-done"); err != nil {
 		return false, err
 	}
 
@@ -151,8 +157,18 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 			}
 			return false, err
 		}
+		if err := s.maintenanceCheckpoint("promotion-source-retired"); err != nil {
+			return false, err
+		}
 	}
 	return true, nil
+}
+
+func (s *Server) maintenanceCheckpoint(stage string) error {
+	if s.maintenanceFault != nil {
+		return s.maintenanceFault(stage)
+	}
+	return nil
 }
 
 // writeChunksAsRows reads the given live chunks from source in order,
@@ -160,8 +176,9 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 // rows to the EC dest under txnID, makes them durable, and reparents each chunk
 // at its new location. It is the shared coding step of promotion (staging ->
 // EC) and EC compaction (EC -> EC): the coded rows are durable before any chunk
-// is repointed, so a crash leaves every chunk resolving to its old, intact
-// location and the job re-runs. padded must be the chunks' total byte length
+// is repointed. A crash can leave some chunks at their verified destination and
+// others at the intact source; the job resumes the remaining moves. padded must
+// be the chunks' total byte length
 // rounded up to a stripe-row boundary. The caller must hold vlogMu.
 func (s *Server) writeChunksAsRows(ctx context.Context, txnID int64, source, dest *storage.Vlog, destID uint32, chunks []meta.ChunkLoc, padded int64) error {
 	buf := make([]byte, 0, padded)
@@ -191,7 +208,13 @@ func (s *Server) writeChunksAsRows(ctx context.Context, txnID int64, source, des
 	if err != nil {
 		return fmt.Errorf("commit EC vlog %d: %w", destID, err)
 	}
+	if err := s.maintenanceCheckpoint("ec-rows-synced"); err != nil {
+		return err
+	}
 	if err := s.db.SetVlogLength(ctx, destID, durableLength); err != nil {
+		return err
+	}
+	if err := s.maintenanceCheckpoint("ec-prefix-recorded"); err != nil {
 		return err
 	}
 	for i, c := range chunks {
@@ -200,6 +223,9 @@ func (s *Server) writeChunksAsRows(ctx context.Context, txnID int64, source, des
 		}
 		if err := s.db.RelocateChunk(ctx, c.Hash, destID, base+offsets[i]); err != nil {
 			return fmt.Errorf("reparent chunk: %w", err)
+		}
+		if err := s.maintenanceCheckpoint("ec-chunk-relocated"); err != nil {
+			return err
 		}
 	}
 	return nil
