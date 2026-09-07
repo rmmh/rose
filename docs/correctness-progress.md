@@ -443,3 +443,19 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   inter-shard failures, repair/compaction interruption, and production-size stripe
   coverage remain separate requirements. No completion claim is made for the
   full EC durability protocol or runtime/model refinement.
+
+### Maintenance destination ownership batch
+
+- Found and fixed B12: `SetJobDest` could replace an already-established job
+  destination, assign another job's output, or use its own source as destination.
+  Assignment now performs an atomic conditional update, permitting identical
+  running-job retries while rejecting conflicting, terminal, missing, zero, and
+  self-referential claims. Ownership marking rolls back with any rejected claim.
+- Independent row assertions check both destination IDs and ownership markers.
+  Focused metadata/promotion/compaction race tests passed. Full Go tests and vet
+  also passed before this checkpoint was committed.
+- A separate provisioning-to-assignment gap remains: failure after creating an
+  empty destination but before attaching it to the job can leave an orphan vlog.
+  Atomic creation/assignment or resumable cleanup must address that window.
+  Stable job destinations do not implement disk/shard placement epochs or bound
+  historical job metadata.

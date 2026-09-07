@@ -223,7 +223,13 @@ func (d *DB) getOrCreateDiskJob(ctx context.Context, kind string, targetDisk, de
 	return Job{ID: id, Kind: kind, State: JobRunning, TargetDisk: targetDisk, DestDisk: destDisk}, nil
 }
 
+// SetJobDest claims a destination once. Identical retries are allowed, but a
+// stale caller cannot replace an established destination or share one owned by
+// another job (including a completed job whose output is still live).
 func (d *DB) SetJobDest(ctx context.Context, jobID int64, destVlog uint32) error {
+	if destVlog == 0 {
+		return fmt.Errorf("maintenance destination must be nonzero")
+	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -236,12 +242,16 @@ func (d *DB) SetJobDest(ctx context.Context, jobID int64, destVlog uint32) error
 	if n, err := res.RowsAffected(); err != nil || n != 1 {
 		return fmt.Errorf("maintenance destination %d does not exist", destVlog)
 	}
-	res, err = tx.ExecContext(ctx, "UPDATE job SET dest_vlog=? WHERE id=? AND state=?", destVlog, jobID, JobRunning)
+	res, err = tx.ExecContext(ctx, `UPDATE job SET dest_vlog=?
+		WHERE id=? AND state=? AND target_vlog<>?
+		AND (dest_vlog=0 OR dest_vlog=?)
+		AND NOT EXISTS (SELECT 1 FROM job owner WHERE owner.dest_vlog=? AND owner.id<>?)`,
+		destVlog, jobID, JobRunning, destVlog, destVlog, destVlog, jobID)
 	if err != nil {
 		return err
 	}
 	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		return fmt.Errorf("running maintenance job %d does not exist", jobID)
+		return fmt.Errorf("maintenance job %d cannot claim destination %d: missing, terminal, conflicting, or self-referential ownership", jobID, destVlog)
 	}
 	return tx.Commit()
 }

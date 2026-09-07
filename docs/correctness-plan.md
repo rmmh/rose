@@ -218,6 +218,21 @@ staging log and one whose live chunks are promoted to EC, checking that an
 unlinked reader remains readable and the source is retired after reader Close.
 Removing the shared guard reproduces the premature-retirement failure.
 
+### B12 — P1: maintenance destination assignment can overwrite ownership
+
+`SetJobDest` previously updated any running job unconditionally and marked the
+destination maintenance-owned. It accepted replacing a job's established
+destination, assigning the same destination to two jobs, and assigning the source
+as its own destination. Such states undermine the exclusive append ownership and
+stable recovery target assumed by compaction and promotion.
+
+Assignment now atomically requires an unset or identical destination, rejects
+another job's ownership (including a completed job's output), and rejects a
+self-reference or zero destination. Rejected assignments roll back both catalog
+changes. Tests assert stable job rows and ownership markers, plus successful
+identical retries and independent destinations. This is destination ownership
+fencing, not a substitute for the outstanding disk-placement generation protocol.
+
 ## Architectural mismatches and follow-up risks
 
 1. **There is no single executable commit protocol shared with simulation.**
