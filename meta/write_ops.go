@@ -23,6 +23,7 @@ type WriteOp struct {
 	FileID             int64
 	AcknowledgedOffset int64
 	Tail               []byte
+	RetryExpiresAt     int64 // zero when no retained result root exists
 }
 
 // CreateWriteOp records the client's stable write intent before any bytes are
@@ -35,8 +36,7 @@ func (d *DB) CreateWriteOp(ctx context.Context, key, path string) (WriteOp, erro
 	}
 	res, err := d.db.ExecContext(ctx, "INSERT INTO write_op (idempotency_key, path, state, created_at) VALUES (?, ?, ?, ?)", key, path, WriteOpPrepared, time.Now().UnixNano())
 	if err != nil {
-		var op WriteOp
-		lookupErr := d.db.QueryRowContext(ctx, "SELECT id, idempotency_key, path, state, file_id, acknowledged_offset, tail FROM write_op WHERE idempotency_key = ?", key).Scan(&op.ID, &op.IdempotencyKey, &op.Path, &op.State, &op.FileID, &op.AcknowledgedOffset, &op.Tail)
+		op, lookupErr := d.WriteOpByKey(ctx, key)
 		if lookupErr != nil {
 			return WriteOp{}, fmt.Errorf("create write op: %w", err)
 		}
@@ -51,7 +51,10 @@ func (d *DB) CreateWriteOp(ctx context.Context, key, path string) (WriteOp, erro
 
 func (d *DB) WriteOpByKey(ctx context.Context, key string) (WriteOp, error) {
 	var op WriteOp
-	err := d.db.QueryRowContext(ctx, "SELECT id, idempotency_key, path, state, file_id, acknowledged_offset, tail FROM write_op WHERE idempotency_key = ?", key).Scan(&op.ID, &op.IdempotencyKey, &op.Path, &op.State, &op.FileID, &op.AcknowledgedOffset, &op.Tail)
+	// State and deadline come from one SQL snapshot: expiry cannot be observed
+	// as an old committed state paired with an already-deleted result root.
+	err := d.db.QueryRowContext(ctx, `SELECT w.id,w.idempotency_key,w.path,w.state,w.file_id,w.acknowledged_offset,w.tail,COALESCE(r.expires_at,0)
+		FROM write_op w LEFT JOIN write_result_root r ON r.write_op_id=w.id WHERE w.idempotency_key=?`, key).Scan(&op.ID, &op.IdempotencyKey, &op.Path, &op.State, &op.FileID, &op.AcknowledgedOffset, &op.Tail, &op.RetryExpiresAt)
 	if err != nil {
 		return WriteOp{}, err
 	}

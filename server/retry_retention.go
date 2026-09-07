@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/rmmh/rose/meta"
 )
 
 // SetRetryRetention changes the retention period of future explicit-key results.
@@ -16,6 +18,23 @@ func (s *Server) SetRetryRetention(d time.Duration) error {
 	defer s.vlogMu.Unlock()
 	s.retryRetention = d
 	return nil
+}
+
+// writeOpForMutation admits a request against one state/deadline snapshot.
+// Reclamation remains separate: denying an expired mutation does not drop the
+// active handle's pins or prevent reading its already-open immutable version.
+func (s *Server) writeOpForMutation(ctx context.Context, key string) (meta.WriteOp, error) {
+	op, err := s.db.WriteOpByKey(ctx, key)
+	if err != nil {
+		return op, err
+	}
+	if op.State == meta.WriteOpExpired || op.RetryExpiresAt > 0 && s.now().UnixNano() >= op.RetryExpiresAt {
+		return op, fmt.Errorf("write operation key is expired")
+	}
+	if op.State != meta.WriteOpPrepared && op.State != meta.WriteOpCommitted {
+		return op, fmt.Errorf("write operation is %s", op.State)
+	}
+	return op, nil
 }
 
 // ExpireWriteResults releases elapsed retry roots. Active handle pins continue

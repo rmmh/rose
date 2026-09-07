@@ -720,3 +720,19 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   expired-key generations and the wider protocol/model obligations remain open.
 - Full repository tests, focused retention/deadline race tests, vet, and
   whitespace checks passed.
+
+### Fence expired mutations on existing retry handles
+
+- Fixed B16: existing keyed handles now reject Write, handle Truncate, and handle
+  timestamp updates admitted at or after the stored retry deadline, even when
+  maintenance and other Open/Close calls have not expired the root yet.
+- Write-operation lookup returns state and deadline from one joined SQL snapshot.
+  A concurrent expiry cannot produce an old committed state paired with a
+  missing deadline. Rejection leaves handle cache, timestamp, and read pins
+  untouched; previously opened immutable bytes remain readable.
+- Exact-deadline regressions pass under the race detector. Removing the deadline
+  predicate makes all three expired mutations succeed, and the regressions fail
+  at their expected assertions. This adds mutation admission coverage; it does
+  not complete bounded key generations or namespace identity semantics.
+- Full repository tests, full metadata race tests, focused handle-retention race
+  tests, vet, and whitespace checks passed.

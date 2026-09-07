@@ -587,7 +587,7 @@ func (s *Server) writeHandle(ctx context.Context, req *pb.WriteRequest, h *FileH
 	}
 	unlock := s.writeOperationLock(h.writeOpID)
 	defer unlock()
-	op, err := s.db.WriteOpByKey(ctx, h.writeKey)
+	op, err := s.writeOpForMutation(ctx, h.writeKey)
 	if err != nil {
 		return nil, err
 	}
@@ -914,6 +914,9 @@ func (s *Server) setHandleMtime(ctx context.Context, handle int64, mtime int64, 
 		return fmt.Errorf("handle refers to an unlinked file")
 	}
 	if h.writeOpID != 0 {
+		if _, err := s.writeOpForMutation(ctx, h.writeKey); err != nil {
+			return err
+		}
 		h.mtimeNs.Store(mtime)
 		h.mtimeSet.Store(true)
 		return nil
@@ -1801,6 +1804,9 @@ func (s *Server) Truncate(ctx context.Context, req *pb.TruncateRequest) (*pb.Tru
 		}
 		unlock := s.writeOperationLock(h.writeOpID)
 		defer unlock()
+		if _, err := s.writeOpForMutation(ctx, h.writeKey); err != nil {
+			return nil, err
+		}
 		if h.cache == nil {
 			if err := s.buildCache(ctx, h); err != nil {
 				return nil, err

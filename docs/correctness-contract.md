@@ -61,6 +61,12 @@ operation. The first keyed Close advertises the committed deadline; later retry
 Open and Close responses return that same value, including a Close retry without
 the original handle. A policy change does not extend the returned deadline.
 
+Write, handle Truncate, and handle timestamp updates also check operation state
+and deadline before mutating or acknowledging a keyed request. This admission
+check does not depend on an expiry sweep. It reads state and deadline from one
+catalog snapshot, rejecting requests admitted at or after the deadline while
+leaving the already-open version readable through its existing pins.
+
 Network handles become eligible for expiration after one hour without a handle
 request by default (configurable by `SetWriteOpExpiry`). Read, Write, Getattr,
 Truncate, handle mtime updates, and Flush renew activity. The reaper and requests

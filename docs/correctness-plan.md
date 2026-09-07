@@ -281,6 +281,20 @@ retries, non-resurrection, and active-reader survival across expiry. Anonymous
 writes retain session semantics. Bounded expired-key generations and historical
 file-row reclamation remain architectural requirements.
 
+### B16 — P2: existing retry handles bypass deadline admission on mutation
+
+After retention was enabled, Open/Close and maintenance enforced expiry, but an
+already-open retry handle could still acknowledge identical Write bytes after
+the deadline if no expiry sweep had run. Handle Truncate and timestamp updates
+also accepted expired requests and could mutate their local caches.
+
+Mutation admission now checks state and the retained deadline from one SQL
+snapshot. It rejects expired Write, Truncate, and timestamp updates before
+changing handle state, without releasing valid read pins. Exact-deadline tests
+run without a reaper; removing the deadline check makes all three operations
+incorrectly succeed. Root reclamation remains a separate maintenance/admission
+transaction, so rejecting a mutation does not itself invalidate an open reader.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or
