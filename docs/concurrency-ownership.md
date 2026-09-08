@@ -81,6 +81,12 @@ its transaction rejects live chunks and running destination ownership, and cance
 scrub jobs superseded by source removal. Physical cleanup follows catalog removal.
 These orderings close lookup-to-pin and check-to-delete gaps.
 
+GC also deletes a bounded batch of unowned immutable file-version rows. Its single
+SQL deletion rechecks namespace/snapshot/retry roots and prepared/committed
+operation references. It does not change chunk refcounts: root removal already
+did so. Handles cache their extents and mtime; removing an expired version row
+does not remove their independent content pins or require taking handle locks.
+
 ## Preconditions for reducing broad lock scope
 
 Bulk publication sync, repair, compaction, and scrub currently retain topology

@@ -1085,6 +1085,11 @@ func (s *Server) gcLocked(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Version rows have independent durable roots. Bound deletion work per pass;
+	// cached handle extents and their content pins survive version-row collection.
+	if _, err := s.db.GCFileVersions(ctx, 1000); err != nil {
+		return len(collected), err
+	}
 	return len(collected), nil
 }
 

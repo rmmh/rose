@@ -872,3 +872,19 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   resumes after inspection. Pointer snapshots alone would not preserve lifetime.
 - Full repository tests, vet, and whitespace checks passed. The lock document is
   an audited implementation contract, not a claim of exhaustive deadlock proof.
+
+### Reclaim unowned immutable file versions
+
+- Added atomic, bounded version collection to ordinary GC, with indexed owner
+  lookups for namespace heads, snapshots, retry roots, and prepared/committed
+  operations. Each pass removes at most 1,000 rows; deletion does not repeat chunk
+  reference decrements already performed when roots were removed.
+- Metadata tests cover each owner, expiry, batch limits, repeated collection, and
+  transaction rollback on deletion failure. The server retention/restart test now
+  verifies an expired unowned version row disappears while an open reader retains
+  its original bytes through content pins. Previous GC fails that assertion.
+- Legacy committed operation references remain conservative owners. Historical
+  operations/jobs and bounded key generations still need retirement policies;
+  this change does not silently narrow their existing retry semantics.
+- Full repository tests, focused metadata/reader-retention race tests, vet, and
+  whitespace checks passed.

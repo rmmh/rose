@@ -93,6 +93,17 @@ func TestRetainedRetrySurvivesNamespaceGCAndRestart(t *testing.T) {
 	if _, err := s.GC(ctx); err != nil {
 		t.Fatal(err)
 	}
+	op, err := s.db.WriteOpByKey(ctx, "stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var versionExists bool
+	if err := s.db.GetDB().QueryRow("SELECT EXISTS(SELECT 1 FROM file WHERE id=?)", op.FileID).Scan(&versionExists); err != nil {
+		t.Fatal(err)
+	}
+	if versionExists {
+		t.Fatal("GC retained expired unowned version metadata")
+	}
 	got, err = s.Read(ctx, &pb.ReadRequest{Handle: reader.Handle, Length: int64(len(want))})
 	if err != nil || !bytes.Equal(got.GetBuffer(), want) {
 		t.Fatalf("expiry lost active reader bytes: %v", err)

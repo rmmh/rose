@@ -457,13 +457,16 @@ copy of the map's pointers.
    amplify metadata work severely.
 
 4. **Version and retry metadata grow without a reclamation policy.**
-   Old `file` rows survive overwrite/unlink, terminal `write_op` rows survive, and
-   the `writeOps` mutex map has no eviction. Chunk GC does not reclaim these.
-   Committed retry records refer to historical file IDs without themselves
-   retaining the corresponding chunks. Decide how long byte-for-byte retry
-   validation remains supported after overwrite/unlink and GC; either retain the
-   necessary data or store an adequate immutable request/result digest and an
-   explicit expiry contract.
+   Operation lock entries now retire when their holders/waiters leave. Explicit
+   keyed results retain bytes until their advertised deadline through durable
+   roots; expiry leaves a key tombstone. GC now deletes up to 1,000 unowned `file`
+   rows per pass, preserving heads, snapshots, retry roots, and versions needed
+   by prepared/committed operation rows. Open handles cache their version metadata
+   and retain content pins independently, so expired unowned rows can be collected
+   while those readers remain open. Terminal `write_op` rows and maintenance
+   history still survive indefinitely. Legacy committed operations without retry
+   deadlines conservatively retain version rows; bounded operation generations,
+   tombstones, and a complete legacy retirement policy remain unfinished.
 
 5. **Recovery performs maintenance before the final hash-recovery pass.**
    `server/server.go:482` resumes durable jobs before calling `RecoverHashes`.

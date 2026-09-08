@@ -332,6 +332,11 @@ CREATE TABLE IF NOT EXISTS chunk (
 		-- per table returns exactly the immediate children, O(children) rather than
 		-- O(subtree).
 		CREATE INDEX IF NOT EXISTS idx_file_head_parent ON file_head(parent);
+		CREATE INDEX IF NOT EXISTS idx_file_head_version ON file_head(file_id);
+		CREATE INDEX IF NOT EXISTS idx_snapshot_file_version ON snapshot_file(file_id);
+		CREATE INDEX IF NOT EXISTS idx_write_result_version ON write_result_root(file_id);
+		CREATE INDEX IF NOT EXISTS idx_write_op_live_version ON write_op(file_id)
+			WHERE state IN ('prepared','committed');
 		CREATE INDEX IF NOT EXISTS idx_dir_parent ON dir(parent);
 	`)
 	if err != nil {
