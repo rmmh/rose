@@ -787,3 +787,19 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   late-I/O completion fencing.
 - Full repository tests, focused metadata/server replacement and reprotection
   race tests, vet, and whitespace checks passed.
+
+### Atomic vlog-job creation and independent ownership checking
+
+- Fixed B19: compaction, promotion, and scrub-repair job creation now share a
+  transaction across lookup and insert. The database additionally enforces one
+  running job per kind/source vlog with a partial unique index; completed history
+  does not prevent a new pass.
+- Concurrent regressions converge on one job, preserve independent sources, and
+  permit later passes. Direct duplicate insertion is rejected, while the read-only
+  checker reports duplicate owners if the index is absent. The previous code
+  accepted duplicate rows and returned different IDs in the concurrent test.
+- This strengthens the catalog boundary independently of the server's broader
+  vlog lock. Cross-kind conflicts, historical-job reclamation, and placement
+  generations remain open requirements.
+- Full repository tests, full metadata race tests, focused ownership regressions,
+  vet, and whitespace checks passed.

@@ -327,6 +327,23 @@ identical retries, and verifies rejected requests add no catalog rows. The
 previous implementation acknowledges both conflicting requests. Placement epochs
 and delayed storage-completion fencing remain separate requirements.
 
+### B19 — P2: vlog job lookup and creation permit duplicate ownership
+
+The catalog helpers for compaction, promotion, and scrub repair performed their
+lookup and insert as separate statements. The single-connection pool serializes
+statements, but concurrent callers can both observe no job and then insert
+different running owners. Production maintenance usually holds the broader vlog
+lock; the catalog boundary did not independently provide its get-or-create
+guarantee.
+
+The three helpers now share a transaction covering lookup and creation. A partial
+unique index enforces one running job per kind/source vlog while permitting
+completed history and later passes. The checker independently reports duplicate
+owners in catalogs without that constraint. Concurrent, direct-insertion, and
+checker regressions pass; the previous implementation both accepted duplicate
+rows and returned distinct job IDs to concurrent callers. Cross-kind maintenance
+interactions and placement-generation fencing remain separate obligations.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

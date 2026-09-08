@@ -315,6 +315,9 @@ CREATE TABLE IF NOT EXISTS chunk (
 			dest_disk INTEGER NOT NULL DEFAULT 0,   -- replace: the disk to move onto
 			created_at INTEGER NOT NULL
 		);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_job_running_vlog
+			ON job(kind,target_vlog)
+			WHERE state='running' AND kind IN ('compact','promote','scrubrepair');
 
 		-- Reverse lookups for the control plane: a plog -> the vlog shard it backs,
 		-- and a disk -> the plogs it holds.  Without these, PlogsOnDisk and the

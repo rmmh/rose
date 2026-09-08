@@ -46,8 +46,8 @@ func openInspectionCatalog(path string) (*sql.DB, error) {
 }
 
 // CheckCatalog independently decodes ordered extent occurrences and traverses
-// live-head/snapshot roots in one read transaction. It does not use chunkHashes,
-// adjustChunkRefs, or the namespace backfill code being checked. This covers
+// namespace, snapshot, and retry-result roots in one read transaction. It does
+// not use chunkHashes, adjustChunkRefs, or the namespace backfill code being checked. This covers
 // catalog structure; physical disk contents and volatile owners require the
 // server-level portion of the consistency checker.
 func (d *DB) CheckCatalog(ctx context.Context) ([]ConsistencyIssue, error) {
@@ -294,6 +294,17 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 				issue("namespace_parent", e.scope+":"+e.path, "parent directory is absent")
 			}
 		}
+	}
+	if err := scan(`SELECT kind,target_vlog,COUNT(*) FROM job WHERE state='running' AND kind IN ('compact','promote','scrubrepair') GROUP BY kind,target_vlog HAVING COUNT(*)>1`, func(r *sql.Rows) error {
+		var kind string
+		var target, count int64
+		if err := r.Scan(&kind, &target, &count); err != nil {
+			return err
+		}
+		issue("duplicate_job_owner", fmt.Sprintf("vlog/%d", target), fmt.Sprintf("%d running %s jobs", count, kind))
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	if err := scan(`SELECT j.id,j.dest_vlog,v.maintenance_owned FROM job j LEFT JOIN vlog v ON v.id=j.dest_vlog WHERE j.state='running' AND j.dest_vlog!=0`, func(r *sql.Rows) error {
 		var id, dest int64

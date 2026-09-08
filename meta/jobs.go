@@ -45,26 +45,7 @@ func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 // creating one if none exists. Reusing an in-flight job is what lets a crashed
 // rewrite resume against the same destination vlog instead of orphaning it.
 func (d *DB) GetOrCreateCompactionJob(ctx context.Context, targetVlog uint32) (Job, error) {
-	j, err := scanJob(d.db.QueryRowContext(ctx,
-		"SELECT "+jobColumns+" FROM job WHERE kind = ? AND state = ? AND target_vlog = ?",
-		JobCompact, JobRunning, targetVlog))
-	if err == nil {
-		return j, nil
-	}
-	if err != sql.ErrNoRows {
-		return Job{}, err
-	}
-	res, err := d.db.ExecContext(ctx,
-		"INSERT INTO job (kind, state, target_vlog, created_at) VALUES (?, ?, ?, ?)",
-		JobCompact, JobRunning, targetVlog, time.Now().UnixNano())
-	if err != nil {
-		return Job{}, fmt.Errorf("create compaction job: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Job{}, err
-	}
-	return Job{ID: id, Kind: JobCompact, State: JobRunning, TargetVlog: targetVlog}, nil
+	return d.getOrCreateVlogJob(ctx, JobCompact, targetVlog)
 }
 
 // GetOrCreatePromoteJob returns the running promotion job for a staging vlog,
@@ -73,26 +54,7 @@ func (d *DB) GetOrCreateCompactionJob(ctx context.Context, targetVlog uint32) (J
 // EC vlog instead of orphaning it: the staged chunks still resolve to the
 // replicated staging vlog until their rows are reparented, so the job re-runs.
 func (d *DB) GetOrCreatePromoteJob(ctx context.Context, stagingVlog uint32) (Job, error) {
-	j, err := scanJob(d.db.QueryRowContext(ctx,
-		"SELECT "+jobColumns+" FROM job WHERE kind = ? AND state = ? AND target_vlog = ?",
-		JobPromote, JobRunning, stagingVlog))
-	if err == nil {
-		return j, nil
-	}
-	if err != sql.ErrNoRows {
-		return Job{}, err
-	}
-	res, err := d.db.ExecContext(ctx,
-		"INSERT INTO job (kind, state, target_vlog, created_at) VALUES (?, ?, ?, ?)",
-		JobPromote, JobRunning, stagingVlog, time.Now().UnixNano())
-	if err != nil {
-		return Job{}, fmt.Errorf("create promotion job: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Job{}, err
-	}
-	return Job{ID: id, Kind: JobPromote, State: JobRunning, TargetVlog: stagingVlog}, nil
+	return d.getOrCreateVlogJob(ctx, JobPromote, stagingVlog)
 }
 
 // GetOrCreateScrubRepairJob returns the running scrub-repair job for a vlog,
@@ -100,26 +62,43 @@ func (d *DB) GetOrCreatePromoteJob(ctx context.Context, stagingVlog uint32) (Job
 // crash mid-repair resume by re-scrubbing the same vlog and rebuilding whatever
 // shards are still corrupt, rather than leaving a detected-bad shard unhealed.
 func (d *DB) GetOrCreateScrubRepairJob(ctx context.Context, targetVlog uint32) (Job, error) {
-	j, err := scanJob(d.db.QueryRowContext(ctx,
-		"SELECT "+jobColumns+" FROM job WHERE kind = ? AND state = ? AND target_vlog = ?",
-		JobScrubRepair, JobRunning, targetVlog))
+	return d.getOrCreateVlogJob(ctx, JobScrubRepair, targetVlog)
+}
+
+// Keep lookup and insertion on one transaction-owned connection. Serializing
+// individual SQL statements does not serialize a concurrent get-or-create pair.
+func (d *DB) getOrCreateVlogJob(ctx context.Context, kind string, targetVlog uint32) (Job, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Job{}, err
+	}
+	defer tx.Rollback()
+	j, err := scanJob(tx.QueryRowContext(ctx,
+		"SELECT "+jobColumns+" FROM job WHERE kind=? AND state=? AND target_vlog=?",
+		kind, JobRunning, targetVlog))
 	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return Job{}, err
+		}
 		return j, nil
 	}
 	if err != sql.ErrNoRows {
 		return Job{}, err
 	}
-	res, err := d.db.ExecContext(ctx,
-		"INSERT INTO job (kind, state, target_vlog, created_at) VALUES (?, ?, ?, ?)",
-		JobScrubRepair, JobRunning, targetVlog, time.Now().UnixNano())
+	result, err := tx.ExecContext(ctx,
+		"INSERT INTO job(kind,state,target_vlog,created_at) VALUES(?,?,?,?)",
+		kind, JobRunning, targetVlog, time.Now().UnixNano())
 	if err != nil {
-		return Job{}, fmt.Errorf("create scrub-repair job: %w", err)
+		return Job{}, fmt.Errorf("create %s job: %w", kind, err)
 	}
-	id, err := res.LastInsertId()
+	id, err := result.LastInsertId()
 	if err != nil {
 		return Job{}, err
 	}
-	return Job{ID: id, Kind: JobScrubRepair, State: JobRunning, TargetVlog: targetVlog}, nil
+	if err := tx.Commit(); err != nil {
+		return Job{}, err
+	}
+	return Job{ID: id, Kind: kind, State: JobRunning, TargetVlog: targetVlog}, nil
 }
 
 // FinishRunningScrubRepairJob closes the crash window where every bad shard was
