@@ -860,3 +860,15 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   crash coverage), vet, and whitespace checks passed. Deliberately skipping
   verification and recording an incorrect prefix each fail the independent
   protocol oracle; both mutations were reverted after checking sensitivity.
+
+### Audit lock order and retain scrub client ownership
+
+- Added `docs/concurrency-ownership.md` covering audited acquisition edges,
+  registry lock discipline, handle/pin/lease/job/result ownership, publication
+  and retirement intervals, and prerequisites for moving I/O outside broad locks.
+- Fixed B23: full scrub holds topology ownership across map traversal and client
+  inspection. A paused scrub allows old compaction to retire its backing client;
+  the regression now passes under the race detector and verifies maintenance
+  resumes after inspection. Pointer snapshots alone would not preserve lifetime.
+- Full repository tests, vet, and whitespace checks passed. The lock document is
+  an audited implementation contract, not a claim of exhaustive deadlock proof.

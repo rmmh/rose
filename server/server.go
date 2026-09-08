@@ -1098,6 +1098,10 @@ type VlogScrub struct {
 // sequential integrity pass the README describes; callers can use the reported
 // corrupt shards to schedule repair from surviving redundancy.
 func (s *Server) Scrub() ([]VlogScrub, error) {
+	// Keep both map membership and backing clients alive throughout inspection.
+	// Copying the map alone would still let maintenance close a client's plog.
+	s.vlogMu.Lock()
+	defer s.vlogMu.Unlock()
 	out := make([]VlogScrub, 0, len(s.vlogs))
 	for id, vlog := range s.vlogs {
 		shards, err := vlog.Scrub()

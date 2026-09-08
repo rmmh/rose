@@ -388,6 +388,16 @@ verify the original bytes. Both paths fail those regressions on the previous
 implementation. Permanent data loss still needs an explicit operational policy;
 this change preserves pending work and does not label it successful.
 
+### B23 — P1: full scrub does not retain mounted storage ownership
+
+`Server.Scrub` iterated the mounted-vlog map without `vlogMu` and used its plog
+clients while maintenance could remove map entries and close the backing files.
+The inspection now retains topology ownership through its full pass. A paused-I/O
+regression shows the previous code completing compaction while scrub still holds
+its source client; the fixed path defers retirement until inspection finishes.
+Reducing this broad lock requires an explicit client lifetime hold, not merely a
+copy of the map's pointers.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or
@@ -487,6 +497,10 @@ this change preserves pending work and does not label it successful.
    topology locks across bulk I/O. Document lock order and ownership first, then
    move expensive work outside broad locks using generation-checked transitions.
    Exposed raw plog/vlog RPCs must obey the same ownership contract as file writes.
+   The audited acquisition edges, resource release rules, and prerequisites for
+   reducing broad lock scope are now recorded in
+   [concurrency-ownership.md](concurrency-ownership.md). Placement generations and
+   general unlocked-I/O completion fencing remain unfinished.
 
 9. **Distribution and encryption claims need precise boundaries.**
    Nodes currently represent fault domains in one server owning local disk roots,
