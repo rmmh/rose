@@ -418,11 +418,15 @@ this change preserves pending work and does not label it successful.
 
 ## Architectural mismatches and follow-up risks
 
-1. **There is no single executable commit protocol shared with simulation.**
-   `durability.Coordinator` is only referenced by its own tests. Production uses
-   `finishHandle` and the storage methods directly. The claim in
-   `docs/deterministic-simulation-design.md` that the coordinator is shared is
-   currently false. Testing a separate ideal coordinator cannot catch B1–B4.
+1. **The shared publication stepper still needs a complete simulator.**
+   The original `durability.Coordinator` was referenced only by its own tests;
+   testing that separate ideal coordinator could not catch B1–B4. It has now been
+   replaced by the actual publication sequence used through
+   `server.preparedPublication`: admission, exact prefix sync/recording, canonical
+   placement verification, and atomic namespace/result publication. Protocol fault
+   tests and real server crash tests drive the same sequence. Disk/catalog effects,
+   append preparation, clock, and ownership still need cloneable simulation
+   adapters; this extraction alone does not establish full runtime exploration.
 
 2. **Strict durability has conflicting definitions.**
    `RoseTxnCommit` and `transaction-commit-design.md` require all configured shards

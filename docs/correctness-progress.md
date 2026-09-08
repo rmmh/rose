@@ -839,3 +839,24 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   repaired reads preserve the original payload. Both old paths prematurely
   completed the job; the fixed regressions pass under the race detector.
 - Full repository tests, vet, and whitespace checks passed.
+
+### Share the actual publication protocol with scheduled tests
+
+- Replaced the separate ideal shard-record coordinator with the production file
+  publication sequence. `publishPreparedVersion` now drives the shared stepper
+  through an adapter for admission, exact prefix sync/recording, canonical
+  placement verification, and SQLite namespace/result publication.
+- Existing namespace/operation/vlog/pin ownership and crash checkpoint names are
+  preserved. Failed invocations stop; ambiguous publication errors are resolved
+  through durable operation retries rather than resuming stale control state.
+- Replaced idealized transaction interleaving tests with independent ordering
+  checks at every effect failure and checkpoint, including zero-lease publication,
+  an advancing append cursor after sync, and post-publication failure. Real server
+  publication and retry tests now execute the same protocol code.
+- Rewrote the simulation design to distinguish this implemented boundary from
+  remaining cloneable disk/catalog/clock/ownership state, preparation transitions,
+  multi-writer exploration, trace minimization, and reduction validation.
+- Full repository tests, full race tests (including existing publication process
+  crash coverage), vet, and whitespace checks passed. Deliberately skipping
+  verification and recording an incorrect prefix each fail the independent
+  protocol oracle; both mutations were reverted after checking sensitivity.

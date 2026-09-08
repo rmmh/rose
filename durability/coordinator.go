@@ -1,184 +1,121 @@
-// Package durability contains the transaction ordering shared by production
-// storage adapters and deterministic durability simulation.
+// Package durability contains the publication ordering used by the server and
+// deterministic scheduling tests. Storage and catalog effects belong to adapters.
 package durability
 
-import (
-	"context"
-	"errors"
-	"fmt"
-)
+import "context"
 
-var ErrInjectedCrash = errors.New("injected crash")
+// Publication supplies effects under one caller-owned namespace, topology and
+// pin ownership interval. Sync returns the exact durable prefix, never a later
+// sample of an append cursor. Verify resolves and checks every final placement.
+// Publish is the atomic namespace/result/root transaction. An adapter must keep
+// verification valid until Publish completes.
+type Publication interface {
+	Admit(context.Context) ([]uint32, error)
+	Sync(context.Context, uint32) (int64, error)
+	RecordPrefix(context.Context, uint32, int64) error
+	Verify(context.Context) error
+	Publish(context.Context) error
+}
 
 type Point string
 
 const (
-	AfterBegin            Point = "after-begin"
-	AfterPrepare          Point = "after-prepare"
-	AfterDiskSync         Point = "after-disk-sync"
-	BeforeMetadataPublish Point = "before-metadata-publish"
-	AfterMetadataPublish  Point = "after-metadata-publish"
-	BeforeAcknowledgement Point = "before-acknowledgement"
+	ShardsSynced       Point = "shards-synced"
+	PrefixRecorded     Point = "prefix-recorded"
+	PlacementsVerified Point = "placements-verified"
+	NamespacePublished Point = "namespace-published"
 )
 
-// Hook is a deterministic scheduling/fault boundary. Production uses a nil
-// hook; simulations may return ErrInjectedCrash at any boundary.
 type Hook func(Point) error
 
-type PreparedRecord struct {
-	TxnID string
-	Shard int
-	Data  []byte
-}
-
-type Disk interface {
-	ID() string
-	Prepare(context.Context, PreparedRecord) error
-	Sync(context.Context) error
-}
-
-type Placement struct {
-	DiskID string
-	Shard  int
-}
-
-// Metadata is the single authoritative publication point. Publish must be an
-// atomic, durable SQLite transaction in the production adapter.
-type Metadata interface {
-	Begin(context.Context, string) error
-	Publish(context.Context, string, []Placement) error
-}
-
-type ShardWrite struct {
-	Disk  Disk
-	Shard int
-	Data  []byte
-}
-
-type Coordinator struct {
-	Metadata Metadata
-	Hook     Hook
-}
-
-type transactionPhase uint8
+type phase uint8
 
 const (
-	phaseBegin transactionPhase = iota
-	phasePrepare
-	phaseSync
-	phaseBeforePublish
-	phasePublish
-	phaseAcknowledge
-	phaseDone
+	admit phase = iota
+	syncPrefix
+	recordPrefix
+	verify
+	publish
+	done
 )
 
-// Transaction is a cloneable, one-boundary-at-a-time commit state machine.
-// Production drives it to completion with Commit; deterministic tests choose
-// which transaction's next Step executes.
+// Transaction stores protocol control state only. Copying it does not clone the
+// adapter's disk/catalog state or its ownership; a simulator must clone those too.
+// An error terminates this invocation. Recovery/retry starts a new transaction
+// from durable catalog state, including ambiguous publication outcomes.
 type Transaction struct {
-	ID         string
-	Writes     []ShardWrite
-	placements []Placement
-	phase      transactionPhase
-	index      int
+	phase  phase
+	vlogs  []uint32
+	index  int
+	prefix int64
+	err    error
 }
 
-func (c Coordinator) yield(point Point) error {
-	if c.Hook == nil {
-		return nil
-	}
-	return c.Hook(point)
+func (t *Transaction) Done() bool { return t.phase == done }
+
+// Coordinator executes the same protocol in production and scheduled tests.
+// Its zero-valued Transaction starts at admission; each Step performs one effect.
+type Coordinator struct {
+	Publication Publication
+	Hook        Hook
 }
 
-// Start validates strict, unique placement before any side effect occurs.
-func (c Coordinator) Start(txnID string, writes []ShardWrite) (*Transaction, error) {
-	if c.Metadata == nil {
-		return nil, errors.New("metadata is required")
-	}
-	if len(writes) == 0 {
-		return nil, errors.New("at least one shard is required")
-	}
-	seenDisks := make(map[string]struct{}, len(writes))
-	seenShards := make(map[int]struct{}, len(writes))
-	placements := make([]Placement, 0, len(writes))
-	for _, write := range writes {
-		if write.Disk == nil {
-			return nil, errors.New("shard disk is required")
-		}
-		if _, ok := seenDisks[write.Disk.ID()]; ok {
-			return nil, fmt.Errorf("duplicate disk placement: %s", write.Disk.ID())
-		}
-		if _, ok := seenShards[write.Shard]; ok {
-			return nil, fmt.Errorf("duplicate shard placement: %d", write.Shard)
-		}
-		seenDisks[write.Disk.ID()] = struct{}{}
-		seenShards[write.Shard] = struct{}{}
-		placements = append(placements, Placement{DiskID: write.Disk.ID(), Shard: write.Shard})
-	}
-	return &Transaction{ID: txnID, Writes: append([]ShardWrite(nil), writes...), placements: placements}, nil
-}
-
-func (t *Transaction) Done() bool { return t.phase == phaseDone }
-
-// Step executes exactly one deterministic transaction boundary.
 func (c Coordinator) Step(ctx context.Context, t *Transaction) error {
-	if t == nil || t.Done() {
+	if t.err != nil {
+		return t.err
+	}
+	if t.Done() {
 		return nil
 	}
+	var point Point
 	switch t.phase {
-	case phaseBegin:
-		if err := c.Metadata.Begin(ctx, t.ID); err != nil {
-			return err
+	case admit:
+		var ids []uint32
+		ids, t.err = c.Publication.Admit(ctx)
+		if t.err == nil {
+			t.vlogs = append([]uint32(nil), ids...)
+			t.phase = syncPrefix
+			if len(ids) == 0 {
+				t.phase = verify
+			}
 		}
-		t.phase = phasePrepare
-		return c.yield(AfterBegin)
-	case phasePrepare:
-		write := t.Writes[t.index]
-		if err := write.Disk.Prepare(ctx, PreparedRecord{TxnID: t.ID, Shard: write.Shard, Data: write.Data}); err != nil {
-			return err
+	case syncPrefix:
+		t.prefix, t.err = c.Publication.Sync(ctx, t.vlogs[t.index])
+		if t.err == nil {
+			t.phase, point = recordPrefix, ShardsSynced
 		}
-		t.index++
-		if t.index == len(t.Writes) {
-			t.phase, t.index = phaseSync, 0
+	case recordPrefix:
+		t.err = c.Publication.RecordPrefix(ctx, t.vlogs[t.index], t.prefix)
+		if t.err == nil {
+			t.index++
+			t.phase, point = syncPrefix, PrefixRecorded
+			if t.index == len(t.vlogs) {
+				t.phase = verify
+			}
 		}
-		return c.yield(AfterPrepare)
-	case phaseSync:
-		write := t.Writes[t.index]
-		if err := write.Disk.Sync(ctx); err != nil {
-			return err
+	case verify:
+		t.err = c.Publication.Verify(ctx)
+		if t.err == nil {
+			t.phase, point = publish, PlacementsVerified
 		}
-		t.index++
-		if t.index == len(t.Writes) {
-			t.phase, t.index = phaseBeforePublish, 0
+	case publish:
+		t.err = c.Publication.Publish(ctx)
+		if t.err == nil {
+			t.phase, point = done, NamespacePublished
 		}
-		return c.yield(AfterDiskSync)
-	case phaseBeforePublish:
-		t.phase = phasePublish
-		return c.yield(BeforeMetadataPublish)
-	case phasePublish:
-		if err := c.Metadata.Publish(ctx, t.ID, t.placements); err != nil {
-			return err
-		}
-		t.phase = phaseAcknowledge
-		return c.yield(AfterMetadataPublish)
-	case phaseAcknowledge:
-		t.phase = phaseDone
-		return c.yield(BeforeAcknowledgement)
-	default:
-		return fmt.Errorf("unknown transaction phase %d", t.phase)
 	}
+	if t.err == nil && point != "" && c.Hook != nil {
+		t.err = c.Hook(point)
+	}
+	return t.err
 }
 
-// Commit implements strict full-protection publication by driving the same
-// stepper used by deterministic simulation to completion. A crash after
-// Publish but before acknowledgement is intentionally ambiguous to the caller.
-func (c Coordinator) Commit(ctx context.Context, txnID string, writes []ShardWrite) error {
-	txn, err := c.Start(txnID, writes)
-	if err != nil {
-		return err
-	}
-	for !txn.Done() {
-		if err := c.Step(ctx, txn); err != nil {
+// Commit drives the stepper while the caller retains the adapter's ownership.
+// Success means publication, not that a client has received its response.
+func (c Coordinator) Commit(ctx context.Context) error {
+	t := new(Transaction)
+	for !t.Done() {
+		if err := c.Step(ctx, t); err != nil {
 			return err
 		}
 	}

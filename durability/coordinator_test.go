@@ -2,326 +2,148 @@ package durability
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-type simulatedDisk struct {
-	id       string
-	volatile map[string]PreparedRecord
-	durable  map[string]PreparedRecord
+var injected = errors.New("injected boundary failure")
+
+// Effects intentionally do not enforce protocol ordering. The test oracle
+// independently checks that the stepper never exposes an unsafe publication.
+type publicationEffects struct {
+	ids                      []uint32
+	cursor, synced, recorded map[uint32]int64
+	verified, published      bool
+	calls                    int
+	failAt                   int
 }
 
-func newSimulatedDisk(id string) *simulatedDisk {
-	return &simulatedDisk{id: id, volatile: map[string]PreparedRecord{}, durable: map[string]PreparedRecord{}}
+func newEffects(ids []uint32) *publicationEffects {
+	p := &publicationEffects{ids: ids, cursor: map[uint32]int64{}, synced: map[uint32]int64{}, recorded: map[uint32]int64{}}
+	for _, id := range ids {
+		p.cursor[id] = int64(id) * 11
+	}
+	return p
 }
-
-func (d *simulatedDisk) ID() string { return d.id }
-
-func recordKey(record PreparedRecord) string { return fmt.Sprintf("%s/%d", record.TxnID, record.Shard) }
-
-func (d *simulatedDisk) Prepare(_ context.Context, record PreparedRecord) error {
-	d.volatile[recordKey(record)] = record
-	return nil
-}
-
-func (d *simulatedDisk) Sync(context.Context) error {
-	for key, record := range d.volatile {
-		d.durable[key] = record
-		delete(d.volatile, key)
+func (p *publicationEffects) effect() error {
+	p.calls++
+	if p.calls == p.failAt {
+		return injected
 	}
 	return nil
 }
-
-func (d *simulatedDisk) Crash() { d.volatile = map[string]PreparedRecord{} }
-
-type simulatedMetadata struct {
-	state     map[string]string
-	published map[string][]Placement
-	diskByID  map[string]*simulatedDisk
-}
-
-func newSimulatedMetadata(disks []*simulatedDisk) *simulatedMetadata {
-	diskByID := make(map[string]*simulatedDisk, len(disks))
-	for _, disk := range disks {
-		diskByID[disk.id] = disk
+func (p *publicationEffects) Admit(context.Context) ([]uint32, error) { return p.ids, p.effect() }
+func (p *publicationEffects) Sync(_ context.Context, id uint32) (int64, error) {
+	if err := p.effect(); err != nil {
+		return 0, err
 	}
-	return &simulatedMetadata{state: map[string]string{}, published: map[string][]Placement{}, diskByID: diskByID}
+	p.synced[id] = p.cursor[id]
+	// Simulate the cursor moving after sync. Only the returned prefix is durable.
+	p.cursor[id]++
+	return p.synced[id], nil
 }
-
-func (m *simulatedMetadata) Begin(_ context.Context, txnID string) error {
-	m.state[txnID] = "open"
+func (p *publicationEffects) RecordPrefix(_ context.Context, id uint32, prefix int64) error {
+	if err := p.effect(); err != nil {
+		return err
+	}
+	p.recorded[id] = prefix
 	return nil
 }
-
-func (m *simulatedMetadata) Publish(_ context.Context, txnID string, placements []Placement) error {
-	for _, placement := range placements {
-		disk := m.diskByID[placement.DiskID]
-		if disk == nil {
-			return fmt.Errorf("unknown disk %q", placement.DiskID)
-		}
-		if _, ok := disk.durable[fmt.Sprintf("%s/%d", txnID, placement.Shard)]; !ok {
-			return fmt.Errorf("placement %s/%d is not durable", placement.DiskID, placement.Shard)
-		}
+func (p *publicationEffects) Verify(context.Context) error {
+	if err := p.effect(); err != nil {
+		return err
 	}
-	m.state[txnID] = "published"
-	m.published[txnID] = append([]Placement(nil), placements...)
+	p.verified = true
 	return nil
 }
-
-func (m *simulatedMetadata) Recover(txnID string) {
-	if m.state[txnID] != "published" {
-		m.state[txnID] = "abandoned"
+func (p *publicationEffects) Publish(context.Context) error {
+	if err := p.effect(); err != nil {
+		return err
 	}
+	p.published = true
+	return nil
 }
-
-func (m *simulatedMetadata) IsPublished(txnID string) bool { return m.state[txnID] == "published" }
-
-func permutations(disks []*simulatedDisk) [][]*simulatedDisk {
-	if len(disks) == 0 {
-		return [][]*simulatedDisk{{}}
-	}
-	var out [][]*simulatedDisk
-	for i, disk := range disks {
-		rest := append([]*simulatedDisk(nil), disks[:i]...)
-		rest = append(rest, disks[i+1:]...)
-		for _, tail := range permutations(rest) {
-			out = append(out, append([]*simulatedDisk{disk}, tail...))
-		}
-	}
-	return out
-}
-
-func numberedDisks(count int) []*simulatedDisk {
-	disks := make([]*simulatedDisk, 0, count)
-	for i := 1; i <= count; i++ {
-		disks = append(disks, newSimulatedDisk(fmt.Sprintf("d%d", i)))
-	}
-	return disks
-}
-
-func disksByID(disks []*simulatedDisk) map[string]*simulatedDisk {
-	byID := make(map[string]*simulatedDisk, len(disks))
-	for _, disk := range disks {
-		byID[disk.id] = disk
-	}
-	return byID
-}
-
-func writesForOrder(order []*simulatedDisk, byID map[string]*simulatedDisk) []ShardWrite {
-	writes := make([]ShardWrite, 0, len(order))
-	for shard, disk := range order {
-		writes = append(writes, ShardWrite{Disk: byID[disk.id], Shard: shard + 1, Data: []byte{byte(shard)}})
-	}
-	return writes
-}
-
-func assertRecoveredTransactionSafe(t *testing.T, metadata *simulatedMetadata, byID map[string]*simulatedDisk, txnID string) {
+func checkSafe(t *testing.T, p *publicationEffects) {
 	t.Helper()
-	metadata.Recover(txnID)
-	if metadata.IsPublished(txnID) {
-		for _, placement := range metadata.published[txnID] {
-			_, ok := byID[placement.DiskID].durable[fmt.Sprintf("%s/%d", txnID, placement.Shard)]
-			assert.True(t, ok, "published placement lost after crash: txn=%s placement=%+v", txnID, placement)
+	for id, prefix := range p.recorded {
+		if prefix != p.synced[id] {
+			t.Fatalf("catalog prefix %d differs from synced %d", prefix, p.synced[id])
 		}
-		return
 	}
-	assert.Equal(t, "abandoned", metadata.state[txnID], "unpublished transaction was not abandoned: txn=%s", txnID)
-}
-
-func TestStrictCommitExhaustsCrashBarriersAndDiskOrders(t *testing.T) {
-	// Commit emits nine deterministic boundaries for three shards.  Explore a
-	// crash at each boundary, plus a successful run, across all 3! disk orders.
-	const barriers = 10
-	for _, order := range permutations([]*simulatedDisk{newSimulatedDisk("d1"), newSimulatedDisk("d2"), newSimulatedDisk("d3")}) {
-		for crashAt := 0; crashAt <= barriers; crashAt++ {
-			disks := numberedDisks(3)
-			byID := disksByID(disks)
-			writes := writesForOrder(order, byID)
-			metadata := newSimulatedMetadata(disks)
-			seen := 0
-			coordinator := Coordinator{Metadata: metadata, Hook: func(Point) error {
-				seen++
-				if crashAt != 0 && seen == crashAt {
-					return ErrInjectedCrash
-				}
-				return nil
-			}}
-			err := coordinator.Commit(context.Background(), "txn", writes)
-			if crashAt == 0 {
-				require.NoError(t, err, "successful order %v", order)
-			} else {
-				require.ErrorIs(t, err, ErrInjectedCrash, "order %v crash barrier %d", order, crashAt)
+	if p.verified || p.published {
+		for _, id := range p.ids {
+			if p.recorded[id] == 0 || p.recorded[id] != p.synced[id] {
+				t.Fatalf("validated before durable prefix recorded for %d", id)
 			}
-			for _, disk := range disks {
-				disk.Crash()
-			}
-			assertRecoveredTransactionSafe(t, metadata, byID, "txn")
 		}
+	}
+	if p.published && !p.verified {
+		t.Fatal("published without placement verification")
 	}
 }
 
-func TestStrictCommitCrashBarriersAcrossShardCounts(t *testing.T) {
-	for _, shardCount := range []int{1, 2, 4} {
-		barriers := 2*shardCount + 4
-		for _, order := range permutations(numberedDisks(shardCount)) {
-			for crashAt := 0; crashAt <= barriers; crashAt++ {
-				disks := numberedDisks(shardCount)
-				byID := disksByID(disks)
-				metadata := newSimulatedMetadata(disks)
-				seen := 0
-				coordinator := Coordinator{Metadata: metadata, Hook: func(Point) error {
-					seen++
-					if crashAt != 0 && seen == crashAt {
-						return ErrInjectedCrash
+func TestPublicationEveryEffectFailure(t *testing.T) {
+	for _, ids := range [][]uint32{nil, {1}, {2, 1}} {
+		effects := 3 + 2*len(ids)
+		for fail := 0; fail <= effects; fail++ {
+			t.Run(fmt.Sprintf("vlogs=%v/fail=%d", ids, fail), func(t *testing.T) {
+				p := newEffects(ids)
+				p.failAt = fail
+				c := Coordinator{Publication: p}
+				txn := new(Transaction)
+				var err error
+				for !txn.Done() {
+					err = c.Step(context.Background(), txn)
+					checkSafe(t, p)
+					if err != nil {
+						break
 					}
-					return nil
-				}}
-				err := coordinator.Commit(context.Background(), "txn", writesForOrder(order, byID))
-				if crashAt == 0 {
-					require.NoError(t, err, "%d shards successful order %v", shardCount, order)
-				} else {
-					require.ErrorIs(t, err, ErrInjectedCrash, "%d shards order %v crash barrier %d", shardCount, order, crashAt)
 				}
-				for _, disk := range disks {
-					disk.Crash()
+				if fail == 0 {
+					if err != nil || !p.published {
+						t.Fatalf("commit=%v published=%v", err, p.published)
+					}
+					return
 				}
-				assertRecoveredTransactionSafe(t, metadata, byID, "txn")
-			}
+				if !errors.Is(err, injected) || p.published {
+					t.Fatalf("failed commit=%v published=%v", err, p.published)
+				}
+				calls := p.calls
+				if !errors.Is(c.Step(context.Background(), txn), injected) || p.calls != calls {
+					t.Fatal("failed invocation continued executing effects")
+				}
+			})
 		}
 	}
 }
 
-func TestPostPublishCrashIsRecoveredAsPublished(t *testing.T) {
-	const shardCount = 2
-	for _, crashAt := range []int{2*shardCount + 3, 2*shardCount + 4} {
-		disks := numberedDisks(shardCount)
-		metadata := newSimulatedMetadata(disks)
-		seen := 0
-		coordinator := Coordinator{Metadata: metadata, Hook: func(Point) error {
-			seen++
-			if seen == crashAt {
-				return ErrInjectedCrash
+func TestPublicationHooksAndAmbiguousResult(t *testing.T) {
+	expected := []Point{ShardsSynced, PrefixRecorded, ShardsSynced, PrefixRecorded, PlacementsVerified, NamespacePublished}
+	for cut := 0; cut <= len(expected); cut++ {
+		p := newEffects([]uint32{1, 2})
+		var points []Point
+		c := Coordinator{Publication: p, Hook: func(point Point) error {
+			points = append(points, point)
+			checkSafe(t, p)
+			if len(points) == cut {
+				return injected
 			}
 			return nil
 		}}
-		err := coordinator.Commit(context.Background(), "txn", []ShardWrite{
-			{Disk: disks[0], Shard: 1, Data: []byte("a")},
-			{Disk: disks[1], Shard: 2, Data: []byte("b")},
-		})
-		require.ErrorIs(t, err, ErrInjectedCrash, "crash barrier %d", crashAt)
-		for _, disk := range disks {
-			disk.Crash()
-		}
-		metadata.Recover("txn")
-		assert.True(t, metadata.IsPublished("txn"), "crash barrier %d state=%q", crashAt, metadata.state["txn"])
-	}
-}
-
-func TestCoordinatorStepHookOrder(t *testing.T) {
-	disks := numberedDisks(2)
-	metadata := newSimulatedMetadata(disks)
-	var got []Point
-	coordinator := Coordinator{Metadata: metadata, Hook: func(point Point) error {
-		got = append(got, point)
-		return nil
-	}}
-	err := coordinator.Commit(context.Background(), "txn", []ShardWrite{
-		{Disk: disks[0], Shard: 1, Data: []byte("a")},
-		{Disk: disks[1], Shard: 2, Data: []byte("b")},
-	})
-	require.NoError(t, err)
-	want := []Point{
-		AfterBegin,
-		AfterPrepare,
-		AfterPrepare,
-		AfterDiskSync,
-		AfterDiskSync,
-		BeforeMetadataPublish,
-		AfterMetadataPublish,
-		BeforeAcknowledgement,
-	}
-	assert.Equal(t, want, got)
-}
-
-func TestCoordinatorStartRejectsInvalidPlacementsWithoutSideEffects(t *testing.T) {
-	disks := numberedDisks(2)
-	tests := []struct {
-		name   string
-		writes []ShardWrite
-	}{
-		{name: "empty"},
-		{name: "nil disk", writes: []ShardWrite{{Shard: 1, Data: []byte("a")}}},
-		{name: "duplicate disk", writes: []ShardWrite{
-			{Disk: disks[0], Shard: 1, Data: []byte("a")},
-			{Disk: disks[0], Shard: 2, Data: []byte("b")},
-		}},
-		{name: "duplicate shard", writes: []ShardWrite{
-			{Disk: disks[0], Shard: 1, Data: []byte("a")},
-			{Disk: disks[1], Shard: 1, Data: []byte("b")},
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			metadata := newSimulatedMetadata(disks)
-			coordinator := Coordinator{Metadata: metadata}
-			txn, err := coordinator.Start("txn", tt.writes)
-			require.Error(t, err)
-			assert.Nil(t, txn)
-			assert.Empty(t, metadata.state)
-			for _, disk := range disks {
-				assert.Empty(t, disk.volatile, "disk %s volatile side effects", disk.id)
-				assert.Empty(t, disk.durable, "disk %s durable side effects", disk.id)
+		err := c.Commit(context.Background())
+		if cut == 0 {
+			if err != nil || !reflect.DeepEqual(points, expected) {
+				t.Fatalf("hooks=%v err=%v", points, err)
 			}
-		})
-	}
-}
-
-func TestStrictCommitExhaustsTwoTransactionInterleavings(t *testing.T) {
-	// Each transaction has ten coordinator boundaries.  Execute every one of
-	// C(20, 10) scheduler choices against fresh virtual disks and metadata.
-	var schedules int
-	var explore func([]int, int, int)
-	explore = func(schedule []int, remainingA, remainingB int) {
-		if remainingA == 0 && remainingB == 0 {
-			schedules++
-			disks := []*simulatedDisk{newSimulatedDisk("d1"), newSimulatedDisk("d2"), newSimulatedDisk("d3")}
-			metadata := newSimulatedMetadata(disks)
-			writes := []ShardWrite{
-				{Disk: disks[0], Shard: 1, Data: []byte("a")},
-				{Disk: disks[1], Shard: 2, Data: []byte("b")},
-				{Disk: disks[2], Shard: 3, Data: []byte("c")},
+		} else {
+			if !errors.Is(err, injected) || !reflect.DeepEqual(points, expected[:cut]) {
+				t.Fatalf("cut=%d hooks=%v err=%v", cut, points, err)
 			}
-			coordinator := Coordinator{Metadata: metadata}
-			txnA, err := coordinator.Start("txn-a", writes)
-			require.NoError(t, err)
-			txnB, err := coordinator.Start("txn-b", writes)
-			require.NoError(t, err)
-			for _, choice := range schedule {
-				txn := txnA
-				if choice == 1 {
-					txn = txnB
-				}
-				require.NoError(t, coordinator.Step(context.Background(), txn), "schedule %v step txn %d", schedule, choice)
+			if p.published != (cut == len(expected)) {
+				t.Fatalf("cut=%d published=%v", cut, p.published)
 			}
-			assert.True(t, txnA.Done(), "schedule %v txn-a incomplete", schedule)
-			assert.True(t, txnB.Done(), "schedule %v txn-b incomplete", schedule)
-			assert.True(t, metadata.IsPublished("txn-a"), "schedule %v txn-a unpublished", schedule)
-			assert.True(t, metadata.IsPublished("txn-b"), "schedule %v txn-b unpublished", schedule)
-			return
-		}
-		if remainingA > 0 {
-			next := append(append([]int(nil), schedule...), 0)
-			explore(next, remainingA-1, remainingB)
-		}
-		if remainingB > 0 {
-			next := append(append([]int(nil), schedule...), 1)
-			explore(next, remainingA, remainingB-1)
 		}
 	}
-	explore(nil, 10, 10)
-	assert.Equal(t, 184756, schedules)
 }

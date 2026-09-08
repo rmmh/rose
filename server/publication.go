@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/rmmh/rose/durability"
 	"github.com/rmmh/rose/meta"
 	"github.com/rmmh/rose/storage"
 )
@@ -57,33 +58,48 @@ func (s *Server) publishPreparedVersion(ctx context.Context, opID int64, path st
 	s.pinMu.Lock()
 	defer s.pinMu.Unlock()
 
-	if err := s.publishedTopologyReadyLocked(ctx); err != nil {
-		return 0, nil, err
-	}
+	publication := &preparedPublication{s: s, opID: opID, path: path, mtime: mtime, planned: planned, retainResult: retainResult}
+	coordinator := durability.Coordinator{Publication: publication, Hook: func(point durability.Point) error {
+		return s.publicationCheckpoint(string(point))
+	}}
+	err := coordinator.Commit(ctx)
+	return publication.fileID, publication.placements, err
+}
 
-	leases, err := s.db.WriteOpLeases(ctx, opID)
-	if err != nil {
-		return 0, nil, err
+// preparedPublication adapts the actual file publication effects. The enclosing
+// call owns namespaceMu, the operation lock, vlogMu and pinMu for its lifetime.
+type preparedPublication struct {
+	s            *Server
+	opID         int64
+	path         string
+	mtime        int64
+	planned      []meta.ChunkPlacement
+	retainResult bool
+	placements   []meta.ChunkPlacement
+	fileID       int64
+}
+
+func (p *preparedPublication) Admit(ctx context.Context) ([]uint32, error) {
+	if err := p.s.publishedTopologyReadyLocked(ctx); err != nil {
+		return nil, err
 	}
-	for _, id := range leases {
-		v := s.vlogs[id]
-		if v == nil {
-			return 0, nil, fmt.Errorf("leased vlog %d is not mounted", id)
-		}
-		prefix, err := v.CommitPrefix(ctx, opID)
-		if err != nil {
-			return 0, nil, err
-		}
-		if err := s.publicationCheckpoint("shards-synced"); err != nil {
-			return 0, nil, err
-		}
-		if err := s.db.SetVlogLength(ctx, id, prefix); err != nil {
-			return 0, nil, err
-		}
-		if err := s.publicationCheckpoint("prefix-recorded"); err != nil {
-			return 0, nil, err
-		}
+	return p.s.db.WriteOpLeases(ctx, p.opID)
+}
+
+func (p *preparedPublication) Sync(ctx context.Context, id uint32) (int64, error) {
+	v := p.s.vlogs[id]
+	if v == nil {
+		return 0, fmt.Errorf("leased vlog %d is not mounted", id)
 	}
+	return v.CommitPrefix(ctx, p.opID)
+}
+
+func (p *preparedPublication) RecordPrefix(ctx context.Context, id uint32, prefix int64) error {
+	return p.s.db.SetVlogLength(ctx, id, prefix)
+}
+
+func (publication *preparedPublication) Verify(ctx context.Context) error {
+	s, path, planned := publication.s, publication.path, publication.planned
 
 	placements := make([]meta.ChunkPlacement, len(planned))
 	canonical := make(map[string]meta.ChunkPlacement)
@@ -98,53 +114,52 @@ func (s *Server) publishPreparedVersion(ctx context.Context, opID int64, path st
 		// planned fresh bytes. Validate the row the SQL upsert will retain.
 		fresh, found, err := s.db.LiveChunkByHash(ctx, p.Hash)
 		if err != nil {
-			return 0, nil, err
+			return err
 		}
 		if found {
 			p = fresh
 		}
 		info, err := s.db.GetVlog(ctx, p.VlogID)
 		if err != nil {
-			return 0, nil, err
+			return err
 		}
 		if !bytes.Equal(info.DedupDomain, domain) {
-			return 0, nil, fmt.Errorf("chunk %x belongs to a different bucket or protection policy", p.Hash)
+			return fmt.Errorf("chunk %x belongs to a different bucket or protection policy", p.Hash)
 		}
 		if p.LogicalLen < 0 || p.VaddrOffset < 0 ||
 			p.VaddrOffset > info.Length ||
 			int64(p.LogicalLen)+storage.ChunkHeaderSize > info.Length-p.VaddrOffset {
-			return 0, nil, fmt.Errorf("chunk %x extends beyond durable vlog %d prefix", p.Hash, p.VlogID)
+			return fmt.Errorf("chunk %x extends beyond durable vlog %d prefix", p.Hash, p.VlogID)
 		}
 		if err := s.requiredPlacementReadyLocked(ctx, info); err != nil {
-			return 0, nil, err
+			return err
 		}
 		ready, err := s.commitReadyLocked(ctx, p.VlogID)
 		if err != nil {
-			return 0, nil, err
+			return err
 		}
 		v := s.vlogs[p.VlogID]
 		if !ready || v == nil {
-			return 0, nil, fmt.Errorf("chunk %x is not protected for publication", p.Hash)
+			return fmt.Errorf("chunk %x is not protected for publication", p.Hash)
 		}
 		if err := s.verifyProtectedChunk(ctx, v, p.VlogID, meta.ChunkLoc{Hash: p.Hash, VaddrOffset: p.VaddrOffset, LogicalLen: p.LogicalLen}); err != nil {
-			return 0, nil, fmt.Errorf("verify published chunk %x: %w", p.Hash, err)
+			return fmt.Errorf("verify published chunk %x: %w", p.Hash, err)
 		}
 		canonical[key] = p
 		placements[i] = p
 	}
-	if err := s.publicationCheckpoint("placements-verified"); err != nil {
-		return 0, nil, err
-	}
-	var id int64
-	if retainResult {
-		id, err = s.db.CommitWriteOpVersionWithRetention(ctx, opID, path, mtime, placements, s.now().Add(s.retryRetention).UnixNano())
+	publication.placements = placements
+	return nil
+}
+
+func (p *preparedPublication) Publish(ctx context.Context) error {
+	var err error
+	if p.retainResult {
+		p.fileID, err = p.s.db.CommitWriteOpVersionWithRetention(ctx, p.opID, p.path, p.mtime, p.placements, p.s.now().Add(p.s.retryRetention).UnixNano())
 	} else {
-		id, err = s.db.CommitWriteOpVersion(ctx, opID, path, mtime, placements)
+		p.fileID, err = p.s.db.CommitWriteOpVersion(ctx, p.opID, p.path, p.mtime, p.placements)
 	}
-	if err == nil {
-		err = s.publicationCheckpoint("namespace-published")
-	}
-	return id, placements, err
+	return err
 }
 
 func (s *Server) publicationCheckpoint(stage string) error {
