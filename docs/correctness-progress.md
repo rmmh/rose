@@ -938,3 +938,22 @@ implementation and does not replace or reduce the plan's acceptance criteria.
 - Full repository tests, focused physical-inspection race tests, vet, and
   whitespace checks passed. The positive EC fixture uses reduced stripe geometry;
   it does not replace large-layout or exhaustive shard-loss verification.
+
+### Independently inspect stored redundancy
+
+- Physical inspection now compares every mirror over the recorded prefix and
+  verifies every complete EC codeword for vlogs holding referenced chunks.
+  The traversal is independent of production `Vlog.VerifyAll`, uses read-only
+  clients, and requires every copy/shard instead of reconstructing over absence.
+- Regressions reseal a divergent mirror or parity shard with valid physical
+  integrity metadata. Ordinary plaintext reconstruction still succeeds, but the
+  new checker reports lost redundancy. Both previous inspection paths miss this
+  condition. Before/after comparisons preserve the inconsistent physical evidence.
+- Positive and negative tests use mirror and reduced EC stripe fixtures. This
+  supplements plaintext identity and catalog protection counts; it does not
+  establish volatile-owner correctness, placement epochs, or exhaustive loss-budget
+  histories.
+- The mirror fixture uses a validly encrypted provenance-header difference so
+  concurrent read-winner selection cannot turn it into a plaintext failure.
+  Five repeated focused race runs, the full repository suite, vet, and whitespace
+  checks passed with that fixture.

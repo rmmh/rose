@@ -688,8 +688,9 @@ The current catalog checker independently checks protection geometry, staging
 requirements, and disjoint referenced record intervals as well as root/reference
 multiplicity. Physical inspection now reconstructs referenced plaintext through
 O_RDONLY clients, checks decrypted header geometry, and independently streams the
-full scoped content hash. Cross-shard replica/parity equivalence and volatile-owner
-inspection remain unfinished parts of the checker requirement.
+full scoped content hash. It also compares mirrors and verifies complete EC
+codewords across recorded prefixes of referenced vlogs. Volatile-owner inspection
+and exhaustive fault/placement-generation coverage remain unfinished.
 Keep this separate from repair so the checker can report evidence without changing
 the state it is diagnosing. Correct the stale README/TODO/design claims as the
 contract and implementation converge.

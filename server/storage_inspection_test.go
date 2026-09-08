@@ -217,6 +217,95 @@ func TestReadOnlyPlaintextInspectionOfMirrorAndEC(t *testing.T) {
 					t.Fatalf("inspection changed file %s: %v", path, err)
 				}
 			}
+			// Reseal inconsistent bytes with valid physical integrity metadata.
+			// The last copy/parity shard is unnecessary for the ordinary read,
+			// so plaintext readability alone cannot detect lost redundancy.
+			placement := auditPlacement(t, s, "bucket/file")
+			shards, err := db.VlogShardDisks(ctx, placement.VlogID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			victim := shards[len(shards)-1]
+			path := s.plogPath(victim.DiskID, victim.PlogID)
+			p, err := storage.OpenExistingPlog(path, victim.PlogID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := p.Read(0, int(p.LogicalLength()))
+			if err != nil {
+				p.Close()
+				t.Fatal(err)
+			}
+			if scheme == "DUPLICATE" {
+				// Reads race mirrors. Keep either winner's plaintext/header valid
+				// while changing record provenance on just one copy.
+				cluster, err := db.ClusterEncryption(ctx)
+				if err != nil {
+					p.Close()
+					t.Fatal(err)
+				}
+				info, err := db.GetVlog(ctx, placement.VlogID)
+				if err != nil {
+					p.Close()
+					t.Fatal(err)
+				}
+				key := storage.DeriveVlogKey(cluster.Key, info.UID)
+				header, err := storage.DecodeEncryptedChunkHeader(body[:storage.ChunkHeaderSize], key, placement.Hash)
+				if err != nil {
+					p.Close()
+					t.Fatal(err)
+				}
+				header.FileID++
+				encoded, err := header.EncodeEncrypted(key, placement.Hash)
+				if err != nil {
+					p.Close()
+					t.Fatal(err)
+				}
+				copy(body, encoded[:])
+			} else {
+				body[len(body)-1] ^= 1
+			}
+			if err := p.TruncateTo(0); err != nil {
+				p.Close()
+				t.Fatal(err)
+			}
+			if _, err := p.Write(0, body); err != nil {
+				p.Close()
+				t.Fatal(err)
+			}
+			if err := p.Commit(); err != nil {
+				p.Close()
+				t.Fatal(err)
+			}
+			if err := p.Verify(); err != nil {
+				p.Close()
+				t.Fatalf("fixture has invalid physical integrity: %v", err)
+			}
+			p.Close()
+			sealed, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			issues, err = meta.CheckStorageFiles(ctx, catalog, roots)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, issue := range issues {
+				if issue.Code == "vlog_protection" {
+					found = true
+				}
+				if issue.Code == "chunk_plaintext" || issue.Code == "plog_integrity" {
+					t.Fatalf("fixture did not isolate redundancy loss: %v", issues)
+				}
+			}
+			if !found {
+				t.Fatalf("missed inconsistent %s redundancy: %v", scheme, issues)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(sealed, after) {
+				t.Fatalf("inspection changed inconsistent evidence: %v", err)
+			}
 		})
 	}
 }

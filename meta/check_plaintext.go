@@ -126,6 +126,9 @@ func checkVlogPlaintext(ctx context.Context, tx *sql.Tx, roots map[uint32]string
 		add("plaintext_unverifiable", fmt.Sprintf("vlog/%d", id), err.Error())
 		return nil
 	}
+	if err := inspectStoredProtection(ctx, scheme, data, parity, length, clients); err != nil {
+		add("vlog_protection", fmt.Sprintf("vlog/%d", id), err.Error())
+	}
 	rows, err = tx.QueryContext(ctx, "SELECT hash,vaddr_offset,logical_len FROM chunk WHERE vlog_id=? AND refcount>0 ORDER BY vaddr_offset", id)
 	if err != nil {
 		return err
