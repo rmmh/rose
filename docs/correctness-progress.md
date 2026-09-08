@@ -829,3 +829,13 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   from the recovery job list. Both fail against the previous implementation and
   pass with the race detector after the fix.
 - Full repository tests, vet, and whitespace checks passed.
+
+### Preserve incomplete repair jobs until actual completion
+
+- Fixed B22 in both scrub and offline-shard repair: per-shard failures keep the
+  durable job running even when the aggregate call returns no top-level error.
+- Regressions with a temporarily unavailable healthy source verify three failed
+  attempts retain one job ID, source return permits completing that job, and
+  repaired reads preserve the original payload. Both old paths prematurely
+  completed the job; the fixed regressions pass under the race detector.
+- Full repository tests, vet, and whitespace checks passed.

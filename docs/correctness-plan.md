@@ -375,6 +375,19 @@ repeated retirement preserves the terminal result. Metadata fault injection and
 server compaction regressions cover both the atomic boundary and recovery's job
 list. This does not reclaim historical job rows or resolve unrepairable live data.
 
+### B22 — P2: repair marks unsuccessful attempts completed
+
+Both scrub repair and offline-shard repair returned individual failures in a
+result slice with a nil top-level error. Their callers checked only the error
+before marking the durable job done. An unavailable source quorum or failed
+regeneration therefore lost its pending recovery work; subsequent passes created
+new job rows despite making no progress. Both paths now retain the running job
+whenever any shard remains unrepaired. Regressions exercise three failed passes
+with a stable job ID, restore the healthy source, complete the same job, and
+verify the original bytes. Both paths fail those regressions on the previous
+implementation. Permanent data loss still needs an explicit operational policy;
+this change preserves pending work and does not label it successful.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

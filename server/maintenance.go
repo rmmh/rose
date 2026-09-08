@@ -602,7 +602,9 @@ func (s *Server) repairOneVlogLocked(ctx context.Context, vlogID uint32) (scrubb
 		return scrubbed, 0, nil, err
 	}
 	repaired, failures, err = s.repairVlogShardsLocked(ctx, info, corrupt)
-	if err != nil {
+	// Per-shard failures are returned as data, not necessarily as an error.
+	// Keep the durable job pending until every requested repair has succeeded.
+	if err != nil || len(failures) != 0 {
 		return scrubbed, repaired, failures, err
 	}
 	if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
@@ -741,7 +743,8 @@ func (s *Server) repairOfflineShardsOneVlogLocked(ctx context.Context, vlogID ui
 		return 0, nil, err
 	}
 	repaired, failures, err = s.repairVlogShardsLocked(ctx, info, offline)
-	if err != nil {
+	// An unavailable source or failed regeneration must retain resumable work.
+	if err != nil || len(failures) != 0 {
 		return repaired, failures, err
 	}
 	if err := s.db.MarkJobDone(ctx, job.ID); err != nil {
