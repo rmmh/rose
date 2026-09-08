@@ -134,11 +134,13 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 		scoped   bool
 	}
 	vlogs := map[int64]vlog{}
-	if err := scan("SELECT id,length,required_shards,length(dedup_domain) FROM vlog", func(r *sql.Rows) error {
+	if err := scan("SELECT id,length,required_shards,length(dedup_domain),protection_scheme,data_shards,parity_shards,target_data_shards,target_parity_shards FROM vlog", func(r *sql.Rows) error {
 		var id int64
 		var v vlog
 		var domain int
-		if err := r.Scan(&id, &v.length, &v.required, &domain); err != nil {
+		var scheme string
+		var data, parity, targetData, targetParity int64
+		if err := r.Scan(&id, &v.length, &v.required, &domain, &scheme, &data, &parity, &targetData, &targetParity); err != nil {
 			return err
 		}
 		v.scoped = domain != 0
@@ -146,8 +148,23 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 		if domain != 0 && domain != 32 {
 			issue("invalid_domain", fmt.Sprintf("vlog/%d", id), fmt.Sprintf("domain length %d", domain))
 		}
-		if v.length < 0 || (v.scoped && v.required <= 0) {
+		if v.length < 0 || v.required < 0 || (v.scoped && v.required == 0) {
 			issue("invalid_vlog", fmt.Sprintf("vlog/%d", id), "negative prefix or missing protection requirement")
+		}
+		geometryOK := false
+		switch scheme {
+		case "NONE":
+			geometryOK = data == 1 && parity == 0 && (v.required == 0 || v.required == 1)
+		case "DUPLICATE":
+			geometryOK = data == 1 && parity == 0
+		case "EC":
+			geometryOK = data > 0 && parity > 0 && (v.required == 0 || data == int64(v.required)-parity)
+		}
+		if !geometryOK {
+			issue("protection_geometry", fmt.Sprintf("vlog/%d", id), fmt.Sprintf("scheme %q geometry %d+%d requires %d shards", scheme, data, parity, v.required))
+		}
+		if (targetData != 0 || targetParity != 0) && (scheme != "DUPLICATE" || targetData <= 0 || targetParity <= 0 || (v.required > 0 && int64(v.required) <= targetParity)) {
+			issue("staging_geometry", fmt.Sprintf("vlog/%d", id), fmt.Sprintf("scheme %q has invalid EC target %d+%d", scheme, targetData, targetParity))
 		}
 		return nil
 	}); err != nil {
@@ -155,6 +172,11 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 	}
 	present := map[string]bool{}
 	referencedVlogs := map[int64]bool{}
+	type recordSpan struct {
+		start, end int64
+		hash       string
+	}
+	spans := map[int64][]recordSpan{}
 	if err := scan("SELECT hash,refcount,vlog_id,vaddr_offset,logical_len FROM chunk", func(r *sql.Rows) error {
 		var hash []byte
 		var refs, id, offset, n int64
@@ -181,6 +203,8 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 			issue("missing_vlog", object, fmt.Sprintf("vlog %d is absent", id))
 		} else if offset < 0 || n < 0 || offset > v.length || n > v.length-offset-storage.ChunkHeaderSize {
 			issue("extent_bounds", object, fmt.Sprintf("offset %d length %d exceeds durable prefix %d", offset, n, v.length))
+		} else if expected[key] > 0 {
+			spans[id] = append(spans[id], recordSpan{offset, offset + n + storage.ChunkHeaderSize, key})
 		}
 		return nil
 	}); err != nil {
@@ -189,6 +213,23 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 	for hash := range expected {
 		if !present[hash] {
 			issue("missing_chunk", fmt.Sprintf("chunk/%x", hash), "referenced extent has no canonical placement")
+		}
+	}
+	for id, records := range spans {
+		sort.Slice(records, func(i, j int) bool {
+			if records[i].start != records[j].start {
+				return records[i].start < records[j].start
+			}
+			return records[i].hash < records[j].hash
+		})
+		var previous recordSpan
+		for i, record := range records {
+			if i > 0 && record.start < previous.end {
+				issue("overlapping_records", fmt.Sprintf("vlog/%d", id), fmt.Sprintf("chunks %x and %x have overlapping stored records", previous.hash, record.hash))
+			}
+			if i == 0 || record.end > previous.end {
+				previous = record
+			}
 		}
 	}
 	counts := map[int64]int{}

@@ -684,6 +684,10 @@ skips must remain visible and must not be labeled verification success.
 
 Provide a read-only consistency checker for exact chunk references, extent bounds,
 canonical placements, protection, lease/job ownership, and catalog/disk agreement.
+The current catalog checker independently checks protection geometry, staging
+requirements, and disjoint referenced record intervals as well as root/reference
+multiplicity. Full plaintext authentication and volatile-owner inspection remain
+unfinished parts of the checker requirement.
 Keep this separate from repair so the checker can report evidence without changing
 the state it is diagnosing. Correct the stale README/TODO/design claims as the
 contract and implementation converge.

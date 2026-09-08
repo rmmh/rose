@@ -3,6 +3,8 @@ package meta
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"github.com/rmmh/rose/uid"
 	"os"
 	"path/filepath"
 	"testing"
@@ -35,6 +37,61 @@ func checkerFixture(t *testing.T) (*DB, string) {
 	return db, path
 }
 
+func TestCatalogCheckerAcceptsProtectionGeometry(t *testing.T) {
+	for _, tc := range []struct {
+		scheme                                 string
+		data, parity, targetData, targetParity int32
+		required                               int
+	}{
+		{"NONE", 1, 0, 0, 0, 1}, {"DUPLICATE", 1, 0, 0, 0, 3}, {"EC", 2, 1, 0, 0, 3}, {"DUPLICATE", 1, 0, 2, 1, 2},
+	} {
+		db, err := OpenEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.MakeVlogInDomain(context.Background(), uid.New(), tc.scheme, tc.data, tc.parity, tc.targetData, tc.targetParity, nil, tc.required); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		issues, err := db.CheckCatalog(context.Background())
+		db.Close()
+		if err != nil || len(issues) != 0 {
+			t.Fatalf("valid geometry=%+v issues=%v err=%v", tc, issues, err)
+		}
+	}
+}
+
+func TestCatalogCheckerRecordOverlap(t *testing.T) {
+	for _, offset := range []int64{0, 1, 66, 67} {
+		t.Run(fmt.Sprint(offset), func(t *testing.T) {
+			db, _ := checkerFixture(t)
+			// The fixture already references its first record twice in both a
+			// head and snapshot. Multiplicity is valid; a distinct stored record
+			// must start beyond that record's 64-byte header plus 3-byte payload.
+			p := ChunkPlacement{Hash: bytes.Repeat([]byte{2}, 15), VlogID: 1, VaddrOffset: offset, LogicalLen: 3, CompressedLen: 3}
+			if _, err := db.CommitFile(context.Background(), "other", 1, []ChunkPlacement{p}); err != nil {
+				t.Fatal(err)
+			}
+			issues, err := db.CheckCatalog(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, issue := range issues {
+				if issue.Code == "overlapping_records" {
+					found = true
+				}
+			}
+			if found != (offset < 67) {
+				t.Fatalf("offset=%d overlap=%v issues=%v", offset, found, issues)
+			}
+			if offset == 67 && len(issues) != 0 {
+				t.Fatalf("adjacent records rejected: %v", issues)
+			}
+		})
+	}
+}
+
 func TestCatalogCheckerFindsInjectedCorruption(t *testing.T) {
 	for _, tc := range []struct{ name, sql, code string }{
 		{"namespace index", "UPDATE file_head SET name='wrong'", "namespace_index"},
@@ -49,6 +106,11 @@ func TestCatalogCheckerFindsInjectedCorruption(t *testing.T) {
 		{"mapping loss", "DELETE FROM vlog_plog", "protection_count"},
 		{"missing plog", "DELETE FROM plog", "missing_plog"},
 		{"shard index", "UPDATE vlog_plog SET shard_idx=2", "shard_index"},
+		{"unknown protection", "UPDATE vlog SET protection_scheme='unknown'", "protection_geometry"},
+		{"mirror geometry", "UPDATE vlog SET protection_scheme='DUPLICATE',data_shards=2", "protection_geometry"},
+		{"EC requirement", "UPDATE vlog SET protection_scheme='EC',data_shards=2,parity_shards=1", "protection_geometry"},
+		{"staging target", "UPDATE vlog SET protection_scheme='DUPLICATE',target_data_shards=2", "staging_geometry"},
+		{"staging copies", "UPDATE vlog SET protection_scheme='DUPLICATE',target_data_shards=2,target_parity_shards=1", "staging_geometry"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, _ := checkerFixture(t)

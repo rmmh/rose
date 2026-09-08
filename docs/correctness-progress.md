@@ -900,3 +900,20 @@ implementation and does not replace or reduce the plan's acceptance criteria.
 - Catalog key custody, historical logs, stream identity/nonce uniqueness, and
   record authentication remain separate review obligations.
 - Full repository tests, vet, and whitespace checks passed.
+
+### Check protection geometry and disjoint referenced records
+
+- Extended the independent catalog checker to report unknown protection schemes,
+  invalid mirror/EC geometry, incompatible required-shard counts, and malformed
+  or underprotected EC staging targets. Legacy unscoped rows with no recorded
+  requirement retain their existing interpretation.
+- Added a sorted interval check for distinct referenced chunk records, including
+  their stored headers. Repeated occurrences of one canonical chunk remain valid;
+  distinct adjacent records pass, while equal or overlapping positions fail.
+  Unreferenced garbage locations are not treated as live interval owners.
+- Corruption regressions fail against the previous checker. Positive geometry
+  fixtures and adjacency/multiplicity controls guard against rejecting valid
+  catalogs. This covers catalog geometry, not plaintext authentication or achieved
+  physical protection under arbitrary disk faults.
+- Full repository tests, focused checker race tests, vet, and whitespace checks
+  passed.
