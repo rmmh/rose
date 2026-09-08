@@ -888,3 +888,15 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   this change does not silently narrow their existing retry semantics.
 - Full repository tests, focused metadata/reader-retention race tests, vet, and
   whitespace checks passed.
+
+### Remove encryption keys from bootstrap logging
+
+- Fixed B24: catalog creation no longer emits the persisted cluster encryption
+  key to stderr. The key-stability regression also omits keys from failure output.
+- A subprocess test captures bootstrap output and compares it with persisted key
+  representations without echoing captured output or key material. The previous
+  bootstrap fails this test; the fixed bootstrap and identity tests pass under
+  the race detector. Key derivation and persisted identity are unchanged.
+- Catalog key custody, historical logs, stream identity/nonce uniqueness, and
+  record authentication remain separate review obligations.
+- Full repository tests, vet, and whitespace checks passed.

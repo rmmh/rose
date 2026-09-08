@@ -62,7 +62,7 @@ func TestClusterIdentitySingleton(t *testing.T) {
 		t.Fatal(err)
 	}
 	if encAgain.Key != enc.Key {
-		t.Fatalf("cluster encryption key changed across reopen: %s -> %s", enc.Formatted, encAgain.Formatted)
+		t.Fatal("cluster encryption key changed across reopen")
 	}
 }
 

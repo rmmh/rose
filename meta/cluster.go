@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/rmmh/rose/storage"
@@ -17,15 +16,12 @@ import (
 func bootstrapCluster(db *sql.DB) error {
 	u := uid.New()
 	key := uid.New()
-	res, err := db.Exec(
+	_, err := db.Exec(
 		`INSERT OR IGNORE INTO cluster (id, uid, encryption_key, encryption_alg, format_version, feature_flags, created_at)
 		 VALUES (1, ?, ?, ?, ?, 0, ?)`,
 		u[:], key[:], storage.VlogEncryptionAlgorithm, storage.PlogFormatVersion, time.Now().UnixNano())
 	if err != nil {
 		return fmt.Errorf("bootstrap cluster identity: %w", err)
-	}
-	if n, err := res.RowsAffected(); err == nil && n == 1 {
-		fmt.Fprintf(os.Stderr, "rose cluster encryption key: %s\n", FormatClusterKey(key))
 	}
 	return nil
 }

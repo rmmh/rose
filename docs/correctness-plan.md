@@ -398,6 +398,18 @@ its source client; the fixed path defers retirement until inspection finishes.
 Reducing this broad lock requires an explicit client lifetime hold, not merely a
 copy of the map's pointers.
 
+### B24 — P1: cluster bootstrap emits the encryption key to ordinary logs
+
+Creating a catalog printed the formatted cluster encryption key directly to
+stderr. Startup, service, and test logs therefore received the same key material
+used to derive per-vlog encryption keys. Bootstrap now persists the key without
+printing it; an identity-test failure message also no longer includes old/new
+keys. A subprocess regression compares captured output with the actual persisted
+key's raw, formatted, base32, and hex representations without including key
+material in assertion output. The previous implementation fails this regression.
+This fixes new bootstrap output, not key custody of the catalog itself, historical
+log contents, nonce uniqueness, or record authentication.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or
