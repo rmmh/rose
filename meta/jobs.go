@@ -249,6 +249,15 @@ func (d *DB) VlogHasRunningJob(ctx context.Context, id uint32) (bool, error) {
 	return held, err
 }
 
+// VlogIsRunningDestination prevents a rewrite from moving or retiring another
+// job's output before that job has finished using its durable destination ID.
+// Shard repair may still restore this vlog in place.
+func (d *DB) VlogIsRunningDestination(ctx context.Context, id uint32) (bool, error) {
+	var held bool
+	err := d.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM job WHERE state=? AND dest_vlog=?)", JobRunning, id).Scan(&held)
+	return held, err
+}
+
 // FinishRunningPromoteJob marks any running promotion job for a staging vlog
 // done, reporting whether one existed. Promotion resumed after a crash that had
 // already reparented enough chunks to drop the staging vlog below a full stripe
@@ -395,6 +404,13 @@ func (d *DB) RetireVlog(ctx context.Context, vlogID uint32) ([]PlogInfo, error) 
 }
 
 func retireVlogTx(ctx context.Context, tx *sql.Tx, vlogID uint32) ([]PlogInfo, error) {
+	var destinationHeld bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM job WHERE state=? AND dest_vlog=?)", JobRunning, vlogID).Scan(&destinationHeld); err != nil {
+		return nil, err
+	}
+	if destinationHeld {
+		return nil, fmt.Errorf("refusing to retire vlog %d owned as a running job destination", vlogID)
+	}
 	var liveRemaining int
 	if err := tx.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM chunk WHERE vlog_id = ? AND refcount > 0", vlogID).Scan(&liveRemaining); err != nil {

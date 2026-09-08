@@ -803,3 +803,17 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   generations remain open requirements.
 - Full repository tests, full metadata race tests, focused ownership regressions,
   vet, and whitespace checks passed.
+
+### Preserve running maintenance destinations across other rewrite passes
+
+- Fixed B20: compaction and promotion defer when their proposed source is another
+  running job's destination. Catalog deletion checks the same durable ownership
+  within its transaction. In-place shard repair remains admissible; completed
+  jobs release the rewrite hold.
+- Regressions cover both rewrite paths against an assigned empty staging output:
+  repeated passes preserve its catalog and physical files, direct deletion is
+  rejected, the original job resumes, and its output can be compacted afterward.
+  Running the regressions against the previous implementation reproduces deletion
+  of the running destination.
+- Full repository tests, maintenance/compaction/promotion/reprotection race tests,
+  vet, and whitespace checks passed.

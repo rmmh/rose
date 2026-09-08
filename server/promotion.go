@@ -51,6 +51,9 @@ func (s *Server) PromoteStaging(ctx context.Context) (int, error) {
 func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool, error) {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
+	if held, err := s.db.VlogIsRunningDestination(ctx, stagingID); err != nil || held {
+		return false, err
+	}
 
 	busy, err := s.vlogRelocationDeferredLocked(ctx, stagingID)
 	if err != nil {

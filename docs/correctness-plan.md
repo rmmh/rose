@@ -344,6 +344,25 @@ checker regressions pass; the previous implementation both accepted duplicate
 rows and returned distinct job IDs to concurrent callers. Cross-kind maintenance
 interactions and placement-generation fencing remain separate obligations.
 
+### B20 — P1: a rewrite can retire another running job's destination
+
+After destination assignment, a failed or interrupted maintenance pass leaves a
+running job holding that vlog ID. Compaction could treat the destination as an
+ordinary source, relocate its chunks, and retire it. Promotion could likewise
+retire an empty staging destination. The original job then repeatedly fails to
+resume because its persisted destination no longer exists. The broad vlog lock
+serializes individual passes but does not preserve ownership between passes.
+
+Compaction and promotion now defer when their proposed source is a running job's
+destination. Catalog retirement independently rejects deletion of such a vlog in
+the deletion transaction. Terminal jobs release this hold; shard repair remains
+allowed because restoring the destination in place can be necessary for the
+owning job to complete. Regressions reproduce deletion in both rewrite paths on
+the previous code, preserve catalog and physical destination files on repeated
+passes, reject direct catalog deletion, resume the original job, and reclaim its
+output after completion. This does not establish placement-generation fencing or
+exclude every interaction between jobs sharing a source.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

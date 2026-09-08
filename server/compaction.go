@@ -90,6 +90,9 @@ func (s *Server) compactLocked(ctx context.Context, policy CompactionPolicy) (in
 func (s *Server) CompactVlog(ctx context.Context, sourceID uint32) error {
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
+	if held, err := s.db.VlogIsRunningDestination(ctx, sourceID); err != nil || held {
+		return err
+	}
 	busy, err := s.vlogRelocationDeferredLocked(ctx, sourceID)
 	if err != nil {
 		return fmt.Errorf("compact: check lease for vlog %d: %w", sourceID, err)
