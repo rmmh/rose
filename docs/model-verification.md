@@ -8,7 +8,8 @@ make -C tla check-fast
 
 This checks prefix safety, conditional prefix liveness, both transaction
 configurations, the small snapshot/owner-pin configuration, and retry-retention
-safety and conditional liveness. It also tests the
+safety and conditional liveness, and maintenance ownership safety and conditional
+job/retirement liveness. It also tests the
 evidence parser. It does not run the large placement or retention state spaces,
 Go tests, or the separate mutation and coverage checks.
 

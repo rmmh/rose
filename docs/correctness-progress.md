@@ -957,3 +957,26 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   concurrent read-winner selection cannot turn it into a plaintext failure.
   Five repeated focused race runs, the full repository suite, vet, and whitespace
   checks passed with that fixture.
+
+### Model maintenance ownership and conditional completion
+
+- Added a bounded compaction/promotion model with durable destination ownership,
+  copy-before-repoint ordering, canonical source rechecking, two independent I/O
+  holders, source retirement, and process loss of volatile holds. It represents
+  compaction's retire-before-done and promotion's done-before-retire orderings.
+- Safety checks reader/published bytes and running destination lifetime. Separate
+  conditional liveness requires fair job steps, reader release, and retirement;
+  it makes no progress promise under indefinite holds or unavailable allocation.
+- Added both configurations to fast evidence collection and CI, plus a public
+  positive-and-mutation target. The CI timeout now accommodates nine per-model
+  five-minute limits plus setup. The existing large EC run remains separate.
+- The runtime correspondence table states which steps abstract successful sync,
+  atomic catalog transitions, finite never-reused identities, and one content
+  location. It does not substitute for torn-write, placement-generation, full
+  namespace, or destructive disk-loss histories.
+- Final safety and liveness configurations each completed with 4,303 generated /
+  956 distinct states, depth 13. All nine fast configurations passed with archived
+  source/tool hashes and complete TLC results. Four safety and three temporal
+  mutations produced their expected counterexamples.
+- The public maintenance make target, evidence-parser tests, workflow YAML
+  parsing, and whitespace checks passed. No Go implementation changed.

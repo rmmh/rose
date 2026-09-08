@@ -57,3 +57,12 @@ test-retry-retention:
 
 retry-mutations: test-retry-retention
 	python3 check_retry_mutations.py
+
+.PHONY: test-maintenance maintenance-mutations
+
+test-maintenance:
+	java -Xmx512m -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RoseMaintenance.cfg RoseMaintenance.tla
+	java -Xmx512m -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RoseMaintenanceLive.cfg RoseMaintenance.tla
+
+maintenance-mutations: test-maintenance
+	python3 check_maintenance_mutations.py

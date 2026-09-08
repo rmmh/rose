@@ -18,6 +18,8 @@ FAST = [
     ("RoseSnapshotGC", "RoseSnapshotGC"),
     ("RoseRetryRetention", "RoseRetryRetention"),
     ("RoseRetryRetention", "RoseRetryRetentionLive"),
+    ("RoseMaintenance", "RoseMaintenance"),
+    ("RoseMaintenance", "RoseMaintenanceLive"),
 ]
 LARGE = [
     ("RoseMetadata", "RoseMetadata"),

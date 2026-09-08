@@ -195,3 +195,40 @@ SQLite transactions and prior physical durability; it omits append preparation,
 partial-byte retries, range geometry, multiple paths, mutable namespace identity,
 placement/repair, wall-clock rollback, and the unfinished bounded-key generation
 protocol. Existing prefix and placement models remain separate obligations.
+
+## Maintenance destination and I/O ownership
+
+`RoseMaintenance` is a bounded common rewrite layer: compaction and promotion
+jobs, three never-reused vlog identities, one published content identity, and two
+independent in-flight reader holds. It complements prefix durability and retry
+roots rather than claiming to model their internal transitions.
+
+| Action / state | Runtime correspondence | Abstraction boundary |
+| --- | --- | --- |
+| `Begin` / `dest` | Destination provisioning, `SetJobDest`, rewrite admission's `VlogIsRunningDestination` | Assignment is atomic here; runtime process-crash and ambiguous-assignment tests cover its multiple physical/catalog boundaries. |
+| `Copy` / `durable` | Compaction copy or promotion row encoding, sync, and protection verification | One successful durable copy; partial/torn writes and disk loss are delegated to lower-layer models/tests. |
+| `Repoint` / `location` | Canonical live-chunk enumeration and `RelocateChunk` | One content identity replaces ordered extent batches. A source with no remaining live content does not repoint stale work. |
+| `Finish` | `MarkJobDone` / finish-on-recovery helpers | Job 1 completes after source retirement, as compaction does; job 2 may complete first, as promotion does. |
+| `Retire` | `retireVlogLocked`, catalog `RetireVlog`, physical cleanup | No published content, I/O reader, or running destination owner may remain; cleanup is atomic here. |
+| `ReadBegin` / `ReadEnd` | `resolveVlog` / `activeVlogOps` / `endVlogOp` | Short physical I/O holds, not indefinite open-handle pins; namespace/snapshot roots are represented by the single canonical content location. |
+| `Crash` | Process loss of volatile I/O owners with durable job/catalog state retained | No torn persistence or destructive disk loss is introduced at this layer. |
+
+Safety checks published/reader readability, destination preservation, distinct
+job outputs, and absence of self-rewrites. The model allows two rewrite kinds to
+share a source and permits a later rewrite of a completed job's destination.
+
+Conditional liveness requires weak fairness for copy, repoint, job completion,
+reader release, and retirement. Under those assumptions, started jobs finish and
+unused vlogs eventually retire. No fairness is imposed on starting a job or on
+allocating unavailable capacity. The finite identities are never reused; this is
+not the unfinished placement-generation/stale-return protocol. Unbounded reader
+holds or unfair maintenance scheduling intentionally defeat reclamation liveness.
+
+`make -C tla maintenance-mutations` checks both positive configurations and seven
+sensitivity cases: omit destination or reader retirement guards, publish without
+both durable copy and its validation, repoint stale source work, or remove finish,
+reader-release, or retirement fairness. Each liveness mutation selects its named
+property; parser errors, safety failures, and timeouts do not count as the expected
+temporal counterexample. Four safety and three temporal counterexamples are
+required. This is a refinement map with explicit omissions, not a proof that all
+runtime maintenance paths implement the abstraction.
