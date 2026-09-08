@@ -240,6 +240,7 @@ CREATE TABLE IF NOT EXISTS chunk (
 			dedup_domain BLOB NOT NULL DEFAULT X'',
             required_shards INTEGER NOT NULL DEFAULT 0 CHECK(required_shards >= 0),
             maintenance_owned INTEGER NOT NULL DEFAULT 0 CHECK(maintenance_owned IN (0,1)),
+			placement_epoch INTEGER NOT NULL DEFAULT 1 CHECK(typeof(placement_epoch)='integer' AND placement_epoch>0),
 			length INTEGER NOT NULL DEFAULT 0,
 			protection_scheme TEXT NOT NULL,
 			data_shards INTEGER NOT NULL,
@@ -402,6 +403,9 @@ CREATE TABLE IF NOT EXISTS chunk (
 		return fmt.Errorf("drop legacy write_op_chunk table: %w", err)
 	}
 	if err := bootstrapCluster(db); err != nil {
+		return err
+	}
+	if err := installPlacementEpochTriggers(db); err != nil {
 		return err
 	}
 	return nil

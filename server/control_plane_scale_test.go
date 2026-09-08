@@ -387,7 +387,11 @@ func (c *virtualScaleCluster) reprotectDisk(diskID uint32) int {
 		if err := c.db.SetPlogLength(ctx, newPlog, lost.Length); err != nil {
 			c.t.Fatal(err)
 		}
-		if err := c.db.ReplaceShardPlog(ctx, lost.VlogID, lost.ShardIndex, lost.PlogID, newPlog); err != nil {
+		info, err := c.db.GetVlog(ctx, lost.VlogID)
+		if err != nil {
+			c.t.Fatal(err)
+		}
+		if err := c.db.ReplaceShardPlog(ctx, lost.VlogID, lost.ShardIndex, lost.PlogID, newPlog, info.PlacementEpoch); err != nil {
 			c.t.Fatal(err)
 		}
 		repaired++

@@ -386,8 +386,11 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	// repoint and remount even if the initiating RPC is canceled after this
 	// admission point, so an ambiguous response cannot strand the live vlog on
 	// the deleted old catalog row.
+	if err := s.maintenanceCheckpoint("repair-before-repoint"); err != nil {
+		return discard(err)
+	}
 	durableCtx := context.WithoutCancel(ctx)
-	if err := s.db.ReplaceShardPlog(durableCtx, vlogID, shardIdx, lostPlogID, newPlogID); err != nil {
+	if err := s.db.ReplaceShardPlog(durableCtx, vlogID, shardIdx, lostPlogID, newPlogID, info.PlacementEpoch); err != nil {
 		return discard(err)
 	}
 	old := s.plogs[lostPlogID]

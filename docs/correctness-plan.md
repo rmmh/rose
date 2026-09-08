@@ -530,8 +530,10 @@ or generation fencing for delayed completions.
    Exposed raw plog/vlog RPCs must obey the same ownership contract as file writes.
    The audited acquisition edges, resource release rules, and prerequisites for
    reducing broad lock scope are now recorded in
-   [concurrency-ownership.md](concurrency-ownership.md). Placement generations and
-   general unlocked-I/O completion fencing remain unfinished.
+   [concurrency-ownership.md](concurrency-ownership.md). Persisted source-vlog
+   generations now fence shard repair's repoint transaction, including changes
+   that return to the same state. Destination generations and general unlocked-I/O
+   completion fencing remain unfinished; broad topology locks remain required.
 
 9. **Distribution and encryption claims need precise boundaries.**
    Nodes currently represent fault domains in one server owning local disk roots,

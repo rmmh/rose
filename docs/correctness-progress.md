@@ -991,6 +991,25 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   clients. Tests verify failed replacements leave rows/mappings intact, and an
   exclusive valid replacement succeeds after the extra source owner is removed.
 - The previous helper accepts the destructive cases. Focused metadata regressions
-  pass under the race detector. Generation/epoch fencing remains separate work.
+  pass under the race detector. Source generation fencing is implemented in the
+  following checkpoint; the complete placement protocol remains unfinished.
+
+- Persisted source-vlog placement generations and repair completion fencing:
+  `vlog.placement_epoch` advances atomically through catalog triggers on mapping,
+  lease, identity, availability, prefix, and protection changes. Repair captures
+  it before reconstruction and requires equality inside the replacement
+  transaction. State changes followed by return to the original state invalidate
+  old work. Failed comparisons retain the old mapping and discard the unpublished
+  destination; fresh attempts succeed. Positive integer constraints reject epoch
+  overflow atomically, and the independent catalog checker reports nonpositive
+  epochs. No legacy catalog migration is provided for this research schema.
+  Regressions cover six change/return schedules, persistence across reopen,
+  transaction rollback, overflow, and an actual repair paused before repointing.
+  Removing the generation comparison causes both metadata and server regressions
+  to fail. Full ordinary and race suites and `go vet ./...` pass.
+  This is a source fence, not permission to release `vlogMu` during repair:
+  unassigned destination disk changes do not invalidate the source epoch, and
+  remote completion generations, other catalog transitions, and complete I/O
+  lifetime holds still need coverage.
 - Full repository tests, focused server repair/reprotection/replacement race tests,
   vet, and whitespace checks passed.

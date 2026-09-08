@@ -109,7 +109,8 @@ type PlogInfo struct {
 }
 
 type VlogInfo struct {
-	MaintenanceOwned bool // persists after the originating job completes
+	PlacementEpoch   int64 // invalidated by placement, availability, or prefix changes
+	MaintenanceOwned bool  // persists after the originating job completes
 	ID               uint32
 	UID              uid.UID
 	DedupDomain      []byte
@@ -169,7 +170,7 @@ func (d *DB) PlogUID(ctx context.Context, plogID uint32) (uid.UID, error) {
 }
 
 func (d *DB) ListVlogs(ctx context.Context) ([]VlogInfo, error) {
-	rows, err := d.db.QueryContext(ctx, "SELECT id, uid, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards, dedup_domain, required_shards, maintenance_owned FROM vlog ORDER BY id")
+	rows, err := d.db.QueryContext(ctx, "SELECT id, uid, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards, dedup_domain, required_shards, maintenance_owned, placement_epoch FROM vlog ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +179,7 @@ func (d *DB) ListVlogs(ctx context.Context) ([]VlogInfo, error) {
 	for rows.Next() {
 		var info VlogInfo
 		var rawUID []byte
-		if err := rows.Scan(&info.ID, &rawUID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards, &info.DedupDomain, &info.RequiredShards, &info.MaintenanceOwned); err != nil {
+		if err := rows.Scan(&info.ID, &rawUID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards, &info.DedupDomain, &info.RequiredShards, &info.MaintenanceOwned, &info.PlacementEpoch); err != nil {
 			return nil, err
 		}
 		if info.UID, err = uid.FromBytes(rawUID); err != nil {
@@ -333,7 +334,9 @@ func (d *DB) MakeAssignedPlog(ctx context.Context, u uid.UID, diskID, vlogID uin
 // double-apply on resume. The source must have exactly this owner; the distinct
 // destination must exist, be unassigned, and not share another shard's disk.
 // These checks also make the caller's subsequent old-file deletion safe.
-func (d *DB) ReplaceShardPlog(ctx context.Context, vlogID uint32, shardIdx int, oldPlogID, newPlogID uint32) error {
+// expectedEpoch must come from the source VlogInfo captured before physical
+// reconstruction, not from a fresh lookup immediately before this call.
+func (d *DB) ReplaceShardPlog(ctx context.Context, vlogID uint32, shardIdx int, oldPlogID, newPlogID uint32, expectedEpoch int64) error {
 	if oldPlogID == 0 || newPlogID == 0 || oldPlogID == newPlogID {
 		return fmt.Errorf("shard replacement requires distinct nonzero plogs")
 	}
@@ -345,13 +348,14 @@ func (d *DB) ReplaceShardPlog(ctx context.Context, vlogID uint32, shardIdx int, 
 
 	res, err := tx.ExecContext(ctx,
 		`UPDATE vlog_plog SET plog_id = ? WHERE vlog_id = ? AND shard_idx = ? AND plog_id = ?
+		AND EXISTS (SELECT 1 FROM vlog WHERE id=? AND placement_epoch=?)
 		AND NOT EXISTS (SELECT 1 FROM vlog_plog WHERE plog_id=? AND (vlog_id<>? OR shard_idx<>?))
 		AND EXISTS (SELECT 1 FROM plog WHERE id=?)
 		AND NOT EXISTS (SELECT 1 FROM vlog_plog WHERE plog_id=?)
 		AND NOT EXISTS (SELECT 1 FROM vlog_plog vp JOIN plog p ON p.id=vp.plog_id
 		    JOIN plog replacement ON replacement.id=?
 		    WHERE vp.vlog_id=? AND vp.shard_idx<>? AND p.disk_id=replacement.disk_id)`,
-		newPlogID, vlogID, shardIdx, oldPlogID, oldPlogID, vlogID, shardIdx, newPlogID, newPlogID, newPlogID, vlogID, shardIdx)
+		newPlogID, vlogID, shardIdx, oldPlogID, vlogID, expectedEpoch, oldPlogID, vlogID, shardIdx, newPlogID, newPlogID, newPlogID, vlogID, shardIdx)
 	if err != nil {
 		return fmt.Errorf("repoint vlog %d shard %d: %w", vlogID, shardIdx, err)
 	}
@@ -360,7 +364,7 @@ func (d *DB) ReplaceShardPlog(ctx context.Context, vlogID uint32, shardIdx int, 
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("repoint vlog %d shard %d: stale/shared source %d or missing, owned, or colocated destination %d", vlogID, shardIdx, oldPlogID, newPlogID)
+		return fmt.Errorf("repoint vlog %d shard %d: stale generation %d, stale/shared source %d, or invalid destination %d", vlogID, shardIdx, expectedEpoch, oldPlogID, newPlogID)
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM plog WHERE id = ?", oldPlogID); err != nil {
 		return fmt.Errorf("delete lost plog %d: %w", oldPlogID, err)

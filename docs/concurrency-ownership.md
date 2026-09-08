@@ -3,7 +3,8 @@
 This describes the current single-server/SQLite implementation and the ownership
 that the shared publication stepper requires. It is an implementation contract
 for changes, not a proof that every interleaving has been explored. Durable
-placement generations and a complete simulated scheduler remain unfinished.
+placement generations now fence shard repair at its catalog commit; destination
+and remote completion fencing and a complete simulated scheduler remain unfinished.
 
 ## Lock order
 
@@ -88,6 +89,19 @@ did so. Handles cache their extents and mtime; removing an expired version row
 does not remove their independent content pins or require taking handle locks.
 
 ## Preconditions for reducing broad lock scope
+
+Each vlog has a durable positive `placement_epoch`. Catalog triggers advance it
+atomically when its mapping, leases, identity, prefix, protection geometry, or
+mapped disk/node identity or availability changes. Returning to a previous state
+does not restore an earlier generation. Overflow fails the mutation transaction.
+Repair captures the epoch before reconstruction and compares it in the same
+transaction that repoints the shard and deletes the old plog row. Rejection
+discards the unpublished destination; a retry captures a fresh source epoch.
+
+This fences changes to the source vlog only. An unassigned destination disk's
+lifecycle does not advance that source epoch. Repair still holds `vlogMu` across
+I/O; destination validation, remote request generations, and complete I/O holds
+are prerequisites for shortening that interval.
 
 Bulk publication sync, repair, compaction, and scrub currently retain topology
 ownership across substantial I/O. Replacing these locks requires all of:

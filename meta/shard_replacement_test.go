@@ -48,7 +48,7 @@ func TestShardReplacementRejectsInvalidDestination(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := db.ReplaceShardPlog(ctx, v, 0, old, dest); err == nil {
+			if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, replacementEpoch(t, db, v)); err == nil {
 				t.Fatalf("accepted %s replacement", kind)
 			}
 			mappings, err := db.ListVlogPlogs(ctx, v)
@@ -89,7 +89,7 @@ func TestShardReplacementPreservesOtherSourceOwners(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ReplaceShardPlog(ctx, v, 0, old, dest); err == nil {
+	if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, replacementEpoch(t, db, v)); err == nil {
 		t.Fatal("accepted shared source replacement")
 	}
 	var exists bool
@@ -105,7 +105,16 @@ func TestShardReplacementPreservesOtherSourceOwners(t *testing.T) {
 	if _, err := db.db.Exec("DELETE FROM vlog_plog WHERE vlog_id=?", other); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ReplaceShardPlog(ctx, v, 0, old, dest); err != nil {
+	if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, replacementEpoch(t, db, v)); err != nil {
 		t.Fatalf("exclusive source replacement failed: %v", err)
 	}
+}
+
+func replacementEpoch(t *testing.T, db *DB, id uint32) int64 {
+	t.Helper()
+	info, err := db.GetVlog(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.PlacementEpoch
 }

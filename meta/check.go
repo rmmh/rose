@@ -134,14 +134,18 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 		scoped   bool
 	}
 	vlogs := map[int64]vlog{}
-	if err := scan("SELECT id,length,required_shards,length(dedup_domain),protection_scheme,data_shards,parity_shards,target_data_shards,target_parity_shards FROM vlog", func(r *sql.Rows) error {
+	if err := scan("SELECT id,length,required_shards,length(dedup_domain),protection_scheme,data_shards,parity_shards,target_data_shards,target_parity_shards,placement_epoch FROM vlog", func(r *sql.Rows) error {
 		var id int64
 		var v vlog
 		var domain int
 		var scheme string
 		var data, parity, targetData, targetParity int64
-		if err := r.Scan(&id, &v.length, &v.required, &domain, &scheme, &data, &parity, &targetData, &targetParity); err != nil {
+		var epoch int64
+		if err := r.Scan(&id, &v.length, &v.required, &domain, &scheme, &data, &parity, &targetData, &targetParity, &epoch); err != nil {
 			return err
+		}
+		if epoch <= 0 {
+			issue("placement_epoch", fmt.Sprintf("vlog/%d", id), "placement generation must be positive")
 		}
 		v.scoped = domain != 0
 		vlogs[id] = v

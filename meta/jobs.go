@@ -469,8 +469,8 @@ func (d *DB) GetVlog(ctx context.Context, vlogID uint32) (VlogInfo, error) {
 	var info VlogInfo
 	var rawUID []byte
 	err := d.db.QueryRowContext(ctx,
-		"SELECT id, uid, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards, dedup_domain, required_shards, maintenance_owned FROM vlog WHERE id = ?", vlogID).
-		Scan(&info.ID, &rawUID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards, &info.DedupDomain, &info.RequiredShards, &info.MaintenanceOwned)
+		"SELECT id, uid, length, protection_scheme, data_shards, parity_shards, target_data_shards, target_parity_shards, dedup_domain, required_shards, maintenance_owned, placement_epoch FROM vlog WHERE id = ?", vlogID).
+		Scan(&info.ID, &rawUID, &info.Length, &info.ProtectionScheme, &info.DataShards, &info.ParityShards, &info.TargetDataShards, &info.TargetParityShards, &info.DedupDomain, &info.RequiredShards, &info.MaintenanceOwned, &info.PlacementEpoch)
 	if err != nil {
 		return VlogInfo{}, err
 	}
