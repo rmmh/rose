@@ -363,6 +363,18 @@ passes, reject direct catalog deletion, resume the original job, and reclaim its
 output after completion. This does not establish placement-generation fencing or
 exclude every interaction between jobs sharing a source.
 
+### B21 — P2: retired sources leave obsolete scrub-repair jobs running
+
+A rewrite can drain and retire a vlog while an interrupted in-place repair job
+still targets it. Repair recovery requires a mounted vlog, so that job would fail
+on every restart and remain running indefinitely even though its source no
+longer needs repair. Source retirement now cancels running scrub-repair jobs in
+the deletion transaction. Cancellation distinguishes superseded work from an
+actual completed repair. A failure to persist cancellation rolls back retirement;
+repeated retirement preserves the terminal result. Metadata fault injection and
+server compaction regressions cover both the atomic boundary and recovery's job
+list. This does not reclaim historical job rows or resolve unrepairable live data.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

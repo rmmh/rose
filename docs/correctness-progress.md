@@ -817,3 +817,15 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   of the running destination.
 - Full repository tests, maintenance/compaction/promotion/reprotection race tests,
   vet, and whitespace checks passed.
+
+### Cancel repair work superseded by source retirement
+
+- Fixed B21: vlog retirement cancels running scrub-repair jobs for that source in
+  the same catalog transaction. Recovery no longer repeatedly schedules repair
+  of a source that compaction has removed. Historical cancelled rows remain.
+- The metadata regression injects cancellation failure and verifies both source
+  preservation and unchanged job state, then verifies successful and repeated
+  retirement. The server regression verifies compaction removes obsolete work
+  from the recovery job list. Both fail against the previous implementation and
+  pass with the race detector after the fix.
+- Full repository tests, vet, and whitespace checks passed.

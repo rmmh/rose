@@ -454,6 +454,13 @@ func retireVlogTx(ctx context.Context, tx *sql.Tx, vlogID uint32) ([]PlogInfo, e
 	if _, err := tx.ExecContext(ctx, "DELETE FROM vlog WHERE id = ?", vlogID); err != nil {
 		return nil, err
 	}
+	// A source rewrite may supersede an interrupted in-place repair. Once the
+	// source is retired there is no shard left to repair; release that work in
+	// this same transaction rather than leaving recovery to retry a missing vlog.
+	if _, err := tx.ExecContext(ctx, "UPDATE job SET state=? WHERE kind=? AND state=? AND target_vlog=?",
+		JobCancelled, JobScrubRepair, JobRunning, vlogID); err != nil {
+		return nil, err
+	}
 	return plogs, nil
 }
 
