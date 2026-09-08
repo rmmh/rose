@@ -16,6 +16,9 @@ func TestShardReplacementRejectsInvalidDestination(t *testing.T) {
 			}
 			defer db.Close()
 			ctx := context.Background()
+			if _, err := db.db.Exec("INSERT INTO node(id,mac,hostname) VALUES(1,'one','one'); INSERT INTO disk(id,node_id,total_bytes,used_bytes) VALUES(1,1,1,0),(2,1,1,0)"); err != nil {
+				t.Fatal(err)
+			}
 			v, err := db.MakeVlog(ctx, uid.New(), "DUPLICATE", 1, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -48,7 +51,13 @@ func TestShardReplacementRejectsInvalidDestination(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, replacementEpoch(t, db, v)); err == nil {
+			var epoch int64 = 1
+			if kind != "zero" && kind != "missing" {
+				if err := db.db.QueryRow("SELECT placement_epoch FROM plog WHERE id=?", dest).Scan(&epoch); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, replacementEpoch(t, db, v), epoch); err == nil {
 				t.Fatalf("accepted %s replacement", kind)
 			}
 			mappings, err := db.ListVlogPlogs(ctx, v)
@@ -70,6 +79,9 @@ func TestShardReplacementPreservesOtherSourceOwners(t *testing.T) {
 	}
 	defer db.Close()
 	ctx := context.Background()
+	if _, err := db.db.Exec("INSERT INTO node(id,mac,hostname) VALUES(1,'one','one'); INSERT INTO disk(id,node_id,total_bytes,used_bytes) VALUES(1,1,1,0),(2,1,1,0)"); err != nil {
+		t.Fatal(err)
+	}
 	v, err := db.MakeVlog(ctx, uid.New(), "NONE", 1, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +101,7 @@ func TestShardReplacementPreservesOtherSourceOwners(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, replacementEpoch(t, db, v)); err == nil {
+	if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, replacementEpoch(t, db, v), 1); err == nil {
 		t.Fatal("accepted shared source replacement")
 	}
 	var exists bool
@@ -105,7 +117,7 @@ func TestShardReplacementPreservesOtherSourceOwners(t *testing.T) {
 	if _, err := db.db.Exec("DELETE FROM vlog_plog WHERE vlog_id=?", other); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, replacementEpoch(t, db, v)); err != nil {
+	if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, replacementEpoch(t, db, v), 1); err != nil {
 		t.Fatalf("exclusive source replacement failed: %v", err)
 	}
 }

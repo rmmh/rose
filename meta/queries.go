@@ -336,7 +336,8 @@ func (d *DB) MakeAssignedPlog(ctx context.Context, u uid.UID, diskID, vlogID uin
 // These checks also make the caller's subsequent old-file deletion safe.
 // expectedEpoch must come from the source VlogInfo captured before physical
 // reconstruction, not from a fresh lookup immediately before this call.
-func (d *DB) ReplaceShardPlog(ctx context.Context, vlogID uint32, shardIdx int, oldPlogID, newPlogID uint32, expectedEpoch int64) error {
+// destinationEpoch must be captured before writing the unassigned destination.
+func (d *DB) ReplaceShardPlog(ctx context.Context, vlogID uint32, shardIdx int, oldPlogID, newPlogID uint32, expectedEpoch, destinationEpoch int64) error {
 	if oldPlogID == 0 || newPlogID == 0 || oldPlogID == newPlogID {
 		return fmt.Errorf("shard replacement requires distinct nonzero plogs")
 	}
@@ -350,12 +351,13 @@ func (d *DB) ReplaceShardPlog(ctx context.Context, vlogID uint32, shardIdx int, 
 		`UPDATE vlog_plog SET plog_id = ? WHERE vlog_id = ? AND shard_idx = ? AND plog_id = ?
 		AND EXISTS (SELECT 1 FROM vlog WHERE id=? AND placement_epoch=?)
 		AND NOT EXISTS (SELECT 1 FROM vlog_plog WHERE plog_id=? AND (vlog_id<>? OR shard_idx<>?))
-		AND EXISTS (SELECT 1 FROM plog WHERE id=?)
+		AND EXISTS (SELECT 1 FROM plog p JOIN disk d ON d.id=p.disk_id JOIN node n ON n.id=d.node_id
+            WHERE p.id=? AND p.placement_epoch=? AND d.state='active' AND n.state='working')
 		AND NOT EXISTS (SELECT 1 FROM vlog_plog WHERE plog_id=?)
 		AND NOT EXISTS (SELECT 1 FROM vlog_plog vp JOIN plog p ON p.id=vp.plog_id
 		    JOIN plog replacement ON replacement.id=?
 		    WHERE vp.vlog_id=? AND vp.shard_idx<>? AND p.disk_id=replacement.disk_id)`,
-		newPlogID, vlogID, shardIdx, oldPlogID, vlogID, expectedEpoch, oldPlogID, vlogID, shardIdx, newPlogID, newPlogID, newPlogID, vlogID, shardIdx)
+		newPlogID, vlogID, shardIdx, oldPlogID, vlogID, expectedEpoch, oldPlogID, vlogID, shardIdx, newPlogID, destinationEpoch, newPlogID, newPlogID, vlogID, shardIdx)
 	if err != nil {
 		return fmt.Errorf("repoint vlog %d shard %d: %w", vlogID, shardIdx, err)
 	}

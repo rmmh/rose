@@ -75,7 +75,7 @@ func TestPlacementEpochFencesReturnedState(t *testing.T) {
 			if current <= captured {
 				t.Fatal("placement changes did not advance generation")
 			}
-			if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, captured); err == nil {
+			if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, captured, destinationEpoch(t, db, dest)); err == nil {
 				t.Fatal("stale completion accepted after state returned")
 			}
 			if got := replacementEpoch(t, db, v); got != current {
@@ -91,7 +91,7 @@ func TestPlacementEpochFencesReturnedState(t *testing.T) {
 			if got := replacementEpoch(t, db, v); got != current {
 				t.Fatalf("restart generation=%d want=%d", got, current)
 			}
-			if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, current); err != nil {
+			if err := db.ReplaceShardPlog(ctx, v, 0, old, dest, current, destinationEpoch(t, db, dest)); err != nil {
 				t.Fatalf("current generation rejected: %v", err)
 			}
 			if got := replacementEpoch(t, db, v); got <= current {
@@ -137,4 +137,13 @@ func TestPlacementEpochRollsBackAndCannotOverflow(t *testing.T) {
 	if err != nil || info.Length != 0 || info.PlacementEpoch != 9223372036854775807 {
 		t.Fatalf("overflow did not roll back: %v %v", info, err)
 	}
+}
+
+func destinationEpoch(t *testing.T, db *DB, id uint32) int64 {
+	t.Helper()
+	epoch, err := db.RepairDestinationEpoch(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return epoch
 }

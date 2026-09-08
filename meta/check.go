@@ -236,6 +236,18 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 			}
 		}
 	}
+	if err := scan("SELECT id,placement_epoch FROM plog", func(r *sql.Rows) error {
+		var id, epoch int64
+		if err := r.Scan(&id, &epoch); err != nil {
+			return err
+		}
+		if epoch <= 0 {
+			issue("placement_epoch", fmt.Sprintf("plog/%d", id), "placement generation must be positive")
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	counts := map[int64]int{}
 	disks := map[int64]map[int64]bool{}
 	if err := scan(`SELECT vp.vlog_id,vp.shard_idx,vp.plog_id,p.disk_id FROM vlog_plog vp LEFT JOIN plog p ON p.id=vp.plog_id ORDER BY vp.vlog_id,vp.shard_idx`, func(r *sql.Rows) error {

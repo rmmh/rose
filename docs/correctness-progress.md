@@ -1013,3 +1013,47 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   lifetime holds still need coverage.
 - Full repository tests, focused server repair/reprotection/replacement race tests,
   vet, and whitespace checks passed.
+
+### Fence the unassigned repair destination
+
+- Added durable `plog.placement_epoch`, advanced atomically on physical identity,
+  location, recorded length, mapping ownership, and disk/node lifecycle changes.
+  It covers unassigned destinations, so a disk/node change and return cannot pass
+  merely because the source vlog generation is unchanged. Plog allocation never
+  reuses IDs. Repair captures the destination epoch before physical writes and
+  compares it together with the source epoch in the repoint transaction, which
+  also requires an active destination disk and working node.
+- Metadata regressions isolate eleven destination lifecycle schedules, including
+  disk/node removal and reinsertion, ownership reuse, unavailable destinations,
+  and persistence across reopen. An overflow regression checks atomic rollback
+  of the underlying disk-state mutation. The catalog checker checks positive
+  generations for unassigned as well as assigned plogs.
+- Real repair regressions inject destination disk/node return before repointing:
+  the source epoch stays unchanged, stale work is rejected, unpublished files
+  and catalog rows are removed, and a fresh repair preserves published bytes.
+  Removing the destination comparison defeats metadata and server regressions;
+  removing the availability predicate permits currently unavailable destinations.
+- Full-suite validation exposed an inconsistent virtual scale fixture: absent
+  roots and mismatched disk identities caused recovery to persist failed disks
+  while the fixture still selected them as active. The fixture now creates
+  matching identity markers and supplies every catalog disk root to recovery.
+  Its instances exercise the current local catalog authority, not independent
+  remote disk ownership. An assertion checks recovered states against the fixture.
+- Broad topology locks remain required. Generations do not roll back physical
+  writes, prevent clients from closing during I/O, or yet fence other maintenance
+  transitions or delayed remote operations. No schema migration is provided.
+
+- Final full repository tests, full race suite, `go vet ./...`, and whitespace
+  checks passed after the fixture correction.
+
+### Requested stopping point
+
+- Stopped the original large `RoseStorageEC.cfg` TLC process on user request;
+  it exited with signal status 143. The final progress sample at 19:32:13 UTC on
+  2026-09-07 reported 2,005,332,770 generated states, 124,736,536 distinct states,
+  16,295,768 queued states, and depth 26. This is incomplete evidence, not a pass.
+  Its existing source/configuration and log remain at `/tmp/rose-impl-tla`.
+- The full correctness plan remains unfinished. Resume from the source and
+  destination repair fences, complete I/O ownership and remote generation work,
+  and the remaining acceptance criteria recorded above; do not infer completion
+  from this checkpoint.

@@ -277,6 +277,7 @@ CREATE TABLE IF NOT EXISTS chunk (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			uid BLOB NOT NULL DEFAULT X'',
 			disk_id INTEGER NOT NULL,
+			placement_epoch INTEGER NOT NULL DEFAULT 1 CHECK(typeof(placement_epoch)='integer' AND placement_epoch>0),
 			length INTEGER NOT NULL DEFAULT 0
 		);
 

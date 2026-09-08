@@ -325,6 +325,10 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 		_ = storage.RemovePlogFiles(s.plogPath(toDisk, newPlogID))
 		return cause
 	}
+	destinationEpoch, err := s.db.RepairDestinationEpoch(ctx, newPlogID)
+	if err != nil {
+		return discard(err)
+	}
 	header, err := s.basePlogHeader(ctx, newPlogID, toDisk, newPlogUID)
 	if err != nil {
 		return discard(err)
@@ -390,7 +394,7 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 		return discard(err)
 	}
 	durableCtx := context.WithoutCancel(ctx)
-	if err := s.db.ReplaceShardPlog(durableCtx, vlogID, shardIdx, lostPlogID, newPlogID, info.PlacementEpoch); err != nil {
+	if err := s.db.ReplaceShardPlog(durableCtx, vlogID, shardIdx, lostPlogID, newPlogID, info.PlacementEpoch, destinationEpoch); err != nil {
 		return discard(err)
 	}
 	old := s.plogs[lostPlogID]

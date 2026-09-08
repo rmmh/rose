@@ -77,28 +77,43 @@ func newVirtualScaleCluster(t testing.TB, nodes, disksPerNode int) *virtualScale
 	t.Cleanup(func() { _ = db.Close() })
 	c := &virtualScaleCluster{t: t, db: db, nodes: nodes, disksPerNode: disksPerNode, diskNode: map[uint32]uint32{}, diskState: map[uint32]string{}, nodeState: map[uint32]string{}}
 	ctx := context.Background()
+	roots := make(map[uint32]string, nodes*disksPerNode)
 	for n := 1; n <= nodes; n++ {
 		if err := db.RegisterNode(ctx, uint32(n)); err != nil {
 			t.Fatal(err)
 		}
 		c.nodeState[uint32(n)] = meta.NodeWorking
-		roots := make(map[uint32]string, disksPerNode)
 		for d := 0; d < disksPerNode; d++ {
 			id := uint32((n-1)*disksPerNode + d + 1)
-			if err := db.RegisterDiskWithCapacity(ctx, id, uint32(n), 8_000_000_000_000, uid.New()); err != nil {
+
+			roots[id] = filepath.Join(dir, fmt.Sprintf("node-%d-disk-%d", n, d))
+			// Virtual data omits plog bytes, but healthy disks still require
+			// a root and the same persistent identity as their catalog entry.
+			diskUID, err := diskUIDForRoot(roots[id])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.RegisterDiskWithCapacity(ctx, id, uint32(n), 8_000_000_000_000, diskUID); err != nil {
 				t.Fatal(err)
 			}
 			c.diskNode[id], c.diskState[id] = uint32(n), meta.DiskActive
-			roots[id] = filepath.Join(dir, fmt.Sprintf("node-%d-disk-%d", n, d))
 		}
-		// These are real independent Server instances sharing the metadata master.
-		// The virtual catalog below supplies their fake disks.
+	}
+	for n := 1; n <= nodes; n++ {
+		// Recovery currently owns all catalog disks in one local server. Each
+		// test instance must see all roots; this fixture does not model remote
+		// disk ownership or independently failing metadata authorities.
 		s := NewServerWithDiskRoots(db, roots)
 		s.SetMaintenanceInterval(0)
 		if err := s.Recover(ctx); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(s.StopMaintenanceDriver)
+		for id, state := range s.DiskStates() {
+			if state != c.diskState[id] {
+				t.Fatalf("virtual disk %d state=%s, catalog recovery=%s", id, c.diskState[id], state)
+			}
+		}
 		c.workers = append(c.workers, s)
 	}
 	return c
@@ -391,7 +406,11 @@ func (c *virtualScaleCluster) reprotectDisk(diskID uint32) int {
 		if err != nil {
 			c.t.Fatal(err)
 		}
-		if err := c.db.ReplaceShardPlog(ctx, lost.VlogID, lost.ShardIndex, lost.PlogID, newPlog, info.PlacementEpoch); err != nil {
+		destinationEpoch, err := c.db.RepairDestinationEpoch(ctx, newPlog)
+		if err != nil {
+			c.t.Fatal(err)
+		}
+		if err := c.db.ReplaceShardPlog(ctx, lost.VlogID, lost.ShardIndex, lost.PlogID, newPlog, info.PlacementEpoch, destinationEpoch); err != nil {
 			c.t.Fatal(err)
 		}
 		repaired++

@@ -107,6 +107,7 @@ func TestCatalogCheckerFindsInjectedCorruption(t *testing.T) {
 		{"missing plog", "DELETE FROM plog", "missing_plog"},
 		{"shard index", "UPDATE vlog_plog SET shard_idx=2", "shard_index"},
 		{"unknown protection", "UPDATE vlog SET protection_scheme='unknown'", "protection_geometry"},
+		{"invalid plog epoch", "PRAGMA ignore_check_constraints=ON; UPDATE plog SET placement_epoch=0", "placement_epoch"},
 		{"invalid epoch", "PRAGMA ignore_check_constraints=ON; UPDATE vlog SET placement_epoch=0", "placement_epoch"},
 		{"mirror geometry", "UPDATE vlog SET protection_scheme='DUPLICATE',data_shards=2", "protection_geometry"},
 		{"EC requirement", "UPDATE vlog SET protection_scheme='EC',data_shards=2,parity_shards=1", "protection_geometry"},
