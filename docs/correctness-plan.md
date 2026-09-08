@@ -410,6 +410,22 @@ material in assertion output. The previous implementation fails this regression.
 This fixes new bootstrap output, not key custody of the catalog itself, historical
 log contents, nonce uniqueness, or record authentication.
 
+### B25 — P1: shard replacement accepts destructive ownership transitions
+
+`ReplaceShardPlog` checked the expected source mapping, but accepted identical old
+and new IDs, then deleted that still-mapped plog row. It also accepted nonexistent
+or already-owned destinations, placement on another shard's disk, and a source
+still mapped by another owner. Production repair normally provisions a fresh
+destination; the catalog mutation did not independently enforce its safety
+preconditions, and repair's later old-file deletion assumes exclusive ownership.
+
+Replacement now rejects zero/self IDs and atomically checks exclusive source
+ownership, destination existence/exclusivity, and distinct disk placement before
+repointing and deleting the old row. Regressions expose the previous accepted
+transitions, verify rejection preserves mappings/rows, and permit replacement
+once a shared source becomes exclusive. This does not implement placement epochs
+or generation fencing for delayed completions.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

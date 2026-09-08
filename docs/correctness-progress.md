@@ -980,3 +980,17 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   mutations produced their expected counterexamples.
 - The public maintenance make target, evidence-parser tests, workflow YAML
   parsing, and whitespace checks passed. No Go implementation changed.
+
+### Enforce shard replacement ownership at the catalog boundary
+
+- Fixed B25: replacement rejects zero/self plog IDs, shared source ownership,
+  absent/owned destinations, and colocation with another shard. Checks occur in
+  the same transaction as repointing and old-row deletion.
+- Shared sources are rejected because subsequent server cleanup closes/removes the
+  old physical file; keeping only a shared catalog row would not preserve its
+  clients. Tests verify failed replacements leave rows/mappings intact, and an
+  exclusive valid replacement succeeds after the extra source owner is removed.
+- The previous helper accepts the destructive cases. Focused metadata regressions
+  pass under the race detector. Generation/epoch fencing remains separate work.
+- Full repository tests, focused server repair/reprotection/replacement race tests,
+  vet, and whitespace checks passed.

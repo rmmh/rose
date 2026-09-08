@@ -330,8 +330,13 @@ func (d *DB) MakeAssignedPlog(ctx context.Context, u uid.UID, diskID, vlogID uin
 // commits the shard still maps to oldPlogID, so a crash mid-reprotect leaves the
 // shard referencing the failed disk and the job resumes from PlogsOnDisk. It
 // fails if the mapping does not currently point at oldPlogID, guarding against a
-// double-apply on resume.
+// double-apply on resume. The source must have exactly this owner; the distinct
+// destination must exist, be unassigned, and not share another shard's disk.
+// These checks also make the caller's subsequent old-file deletion safe.
 func (d *DB) ReplaceShardPlog(ctx context.Context, vlogID uint32, shardIdx int, oldPlogID, newPlogID uint32) error {
+	if oldPlogID == 0 || newPlogID == 0 || oldPlogID == newPlogID {
+		return fmt.Errorf("shard replacement requires distinct nonzero plogs")
+	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -339,8 +344,14 @@ func (d *DB) ReplaceShardPlog(ctx context.Context, vlogID uint32, shardIdx int, 
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx,
-		"UPDATE vlog_plog SET plog_id = ? WHERE vlog_id = ? AND shard_idx = ? AND plog_id = ?",
-		newPlogID, vlogID, shardIdx, oldPlogID)
+		`UPDATE vlog_plog SET plog_id = ? WHERE vlog_id = ? AND shard_idx = ? AND plog_id = ?
+		AND NOT EXISTS (SELECT 1 FROM vlog_plog WHERE plog_id=? AND (vlog_id<>? OR shard_idx<>?))
+		AND EXISTS (SELECT 1 FROM plog WHERE id=?)
+		AND NOT EXISTS (SELECT 1 FROM vlog_plog WHERE plog_id=?)
+		AND NOT EXISTS (SELECT 1 FROM vlog_plog vp JOIN plog p ON p.id=vp.plog_id
+		    JOIN plog replacement ON replacement.id=?
+		    WHERE vp.vlog_id=? AND vp.shard_idx<>? AND p.disk_id=replacement.disk_id)`,
+		newPlogID, vlogID, shardIdx, oldPlogID, oldPlogID, vlogID, shardIdx, newPlogID, newPlogID, newPlogID, vlogID, shardIdx)
 	if err != nil {
 		return fmt.Errorf("repoint vlog %d shard %d: %w", vlogID, shardIdx, err)
 	}
@@ -349,7 +360,7 @@ func (d *DB) ReplaceShardPlog(ctx context.Context, vlogID uint32, shardIdx int, 
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("repoint vlog %d shard %d: not currently mapped to plog %d", vlogID, shardIdx, oldPlogID)
+		return fmt.Errorf("repoint vlog %d shard %d: stale/shared source %d or missing, owned, or colocated destination %d", vlogID, shardIdx, oldPlogID, newPlogID)
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM plog WHERE id = ?", oldPlogID); err != nil {
 		return fmt.Errorf("delete lost plog %d: %w", oldPlogID, err)
