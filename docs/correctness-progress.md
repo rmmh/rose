@@ -917,3 +917,24 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   physical protection under arbitrary disk faults.
 - Full repository tests, focused checker race tests, vet, and whitespace checks
   passed.
+
+### Verify referenced plaintext during read-only physical inspection
+
+- Added a read-only plog reader and reconstruction adapter used by physical
+  inspection without server recovery, journal replay, repair, or writable file
+  opens. Referenced records are read from one catalog snapshot, decrypted with
+  persisted cluster/vlog identity, and checked against header lengths and full
+  120-bit canonical content addresses. Hashing streams payloads in bounded batches.
+- The checker independently implements the scoped hash input and never prints
+  decryption keys. Physical files must still be quiescent for a coherent result.
+  Existing ciphertext integrity, identity, prefix, journal, and catalog checks
+  remain independent evidence.
+- Tests cover single-copy, mirror, and a small EC geometry, verify file bytes do
+  not change, and detect wrong keys plus full-address changes that preserve the
+  64-bit stream selector. The previous checker misses both mismatches.
+- This establishes referenced plaintext readability against the trusted catalog;
+  it is not cross-shard replica/parity equivalence, volatile-owner inspection,
+  adversarial record authentication, or exhaustive destructive-fault coverage.
+- Full repository tests, focused physical-inspection race tests, vet, and
+  whitespace checks passed. The positive EC fixture uses reduced stripe geometry;
+  it does not replace large-layout or exhaustive shard-loss verification.

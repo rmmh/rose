@@ -175,6 +175,9 @@ func CheckStorageFiles(ctx context.Context, path string, roots map[uint32]string
 			}
 		}
 	}
+	if err := checkPlaintextTx(ctx, tx, roots, add); err != nil {
+		return nil, err
+	}
 	sort.Slice(issues, func(i, j int) bool {
 		a, b := issues[i], issues[j]
 		if a.Code != b.Code {
