@@ -147,12 +147,52 @@ func (d *DB) PlogsOnDisk(ctx context.Context, diskID uint32) ([]PlogOnDisk, erro
 	return out, rows.Err()
 }
 
-// MovePlogToDisk repoints a plog at a new disk. The bytes must already be durable
-// at the destination path; this atomic metadata flip is what makes the plog
-// resolve to its new home, so a crash before it leaves the old copy authoritative.
-func (d *DB) MovePlogToDisk(ctx context.Context, plogID, newDiskID uint32) error {
-	_, err := d.db.ExecContext(ctx, "UPDATE plog SET disk_id = ? WHERE id = ?", newDiskID, plogID)
-	return err
+// PlogPlacementEpoch captures a source before relocation I/O. Callers must retain
+// topology/file ownership; this token alone does not protect mounted clients.
+func (d *DB) PlogPlacementEpoch(ctx context.Context, plogID, diskID uint32) (int64, error) {
+	var epoch int64
+	err := d.db.QueryRowContext(ctx, "SELECT placement_epoch FROM plog WHERE id=? AND disk_id=?", plogID, diskID).Scan(&epoch)
+	return epoch, err
+}
+
+// MovePlogToDisk atomically fences the source placement and validates every
+// owning vlog's disk separation. Active or draining destinations are readable;
+// draining is allowed so a failed remount can roll back onto the original disk.
+// Forward placement policy and physical I/O ownership remain server obligations.
+// The returned generation is read after triggers run, within the transaction,
+// and must be used for rollback rather than freshly sampling a changed placement.
+func (d *DB) MovePlogToDisk(ctx context.Context, plogID, oldDiskID, newDiskID uint32, expectedEpoch int64) (int64, error) {
+	if plogID == 0 || oldDiskID == 0 || newDiskID == 0 || oldDiskID == newDiskID {
+		return 0, fmt.Errorf("relocation requires a plog and distinct nonzero disks")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE plog SET disk_id=? WHERE id=? AND disk_id=? AND placement_epoch=?
+ AND EXISTS(SELECT 1 FROM disk d JOIN node n ON n.id=d.node_id
+ WHERE d.id=? AND d.state IN ('active','draining') AND n.state='working')
+ AND NOT EXISTS(SELECT 1 FROM vlog_plog owner JOIN vlog_plog peer ON peer.vlog_id=owner.vlog_id
+ JOIN plog p ON p.id=peer.plog_id WHERE owner.plog_id=? AND peer.plog_id<>? AND p.disk_id=?)`, newDiskID, plogID, oldDiskID, expectedEpoch, newDiskID, plogID, plogID, newDiskID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if n != 1 {
+		return 0, fmt.Errorf("relocate plog %d: stale source or unavailable/colocated destination", plogID)
+	}
+	var epoch int64
+	if err := tx.QueryRowContext(ctx, "SELECT placement_epoch FROM plog WHERE id=?", plogID).Scan(&epoch); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return epoch, nil
 }
 
 // VlogShardDisks lists, per shard index, the disk that stores that shard's plog.

@@ -465,6 +465,29 @@ rejection without byte changes, and makes accidental commit observable by
 closing the protected client. A separate raw plog remains writable/committable.
 Removing the marker predicate exposes both regressions.
 
+### B28 — P1: relocation primitives accept destructive or stale transitions
+
+`MovePlogToDisk` updated by plog ID alone and did not check the affected row
+count. It could report success for a missing source, overwrite changed placement,
+or place another shard on a disk already used by an owning vlog. The server's
+private `migratePlogLocked` also lacked an early same-disk guard: copying and
+cleanup could truncate/remove the source itself. Normal drain/rebalance callers
+attempt to avoid these inputs; this is a primitive-level safety defect, not a
+demonstrated ordinary RPC schedule.
+
+Relocation now rejects same/zero disk IDs before touching files, captures the
+plog placement generation before I/O, and atomically compares source disk and
+generation while checking destination availability and every owner's disk
+separation. Missing/stale rows fail. The returned post-trigger generation fences
+rollback, including rollback to a still-readable draining source disk. Tests
+cover invalid inputs, source return, stale rollback, successful rollback, and
+byte-for-byte source preservation. Removing the early same-disk guard causes the
+physical regression to detect source destruction.
+
+This is not a complete unlocked-I/O protocol: source vlog prefix/lease generations,
+destination lifecycle generations, file holds, and ambiguous cleanup still rely
+on the existing server ownership interval and need further refinement.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

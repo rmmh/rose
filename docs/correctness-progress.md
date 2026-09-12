@@ -1144,3 +1144,22 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   are in `/tmp/rose-repair-recovery-mutations-final/results.json`. Evidence-parser
   tests, workflow YAML parsing, and whitespace checks passed. CI's fast-model
   timeout now covers thirteen bounded checks. No production Go code changed.
+
+### Fence relocation source placement and reject invalid moves (B28)
+
+- `migratePlogLocked` rejects same/zero disk IDs before physical copy and captures
+  the source plog epoch before I/O. The catalog move now compares source disk and
+  epoch, rejects missing rows, checks destination disk/node availability, and
+  prevents colocation with another shard of any owning vlog.
+- The catalog transaction returns its post-trigger epoch. Remount rollback must
+  use that generation, so it cannot silently overwrite an intervening source
+  change. Draining destinations remain allowed for rollback to the original
+  still-readable disk; forward allocation policy stays with the server.
+- Regressions cover missing/stale source, missing/failed destination, failed node,
+  colocation, return to an old source state, and stale/current rollback. A real
+  same-disk relocation test checks unchanged source file bytes and readable
+  published content. Removing the pre-copy guard causes source destruction and
+  fails that regression. The broad topology lock remains required: this does not
+  complete destination generations, source vlog-prefix fencing, or I/O holds.
+- Full repository tests, focused relocation/drain/rebalance/replacement race tests,
+  `go vet ./...`, and whitespace checks passed.
