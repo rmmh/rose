@@ -1259,3 +1259,14 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   destination predicate deletes a protected owner and fails the regression.
 - Full repository tests, focused metadata/server maintenance and GC race tests,
   vet, and whitespace checks passed.
+
+### Specify the remaining relocation outcome protocol
+
+- Audited forward commit cleanup and the combined remount/rollback error path.
+  Recorded their exact preconditions and consequences in the correctness plan,
+  separating source-level findings from fault histories not yet reproduced.
+- Defined outcome reconciliation, write fencing, durable intent, conditional
+  cleanup, and runtime/model acceptance cases. Repair's fresh-ID recovery model
+  does not cover relocation's reuse of a plog ID across physical disks.
+- This checkpoint changes documentation only. Reviewed the cited implementation
+  branches and checked whitespace; no new runtime or model verification claim.

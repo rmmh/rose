@@ -513,6 +513,47 @@ retires a real staging vlog, then replays its stale candidate ID. The previous
 implementation fails that regression; the fix passes it and the focused chaos
 smoke test under the race detector.
 
+## Open relocation outcome audit (2026-09-11)
+
+Source review of `meta/disks.go:MovePlogToDisk` and
+`server/maintenance.go:migratePlogLocked` identifies two unresolved failure
+histories. These are code-path findings requiring fault-injected reproductions;
+the audit has not demonstrated an ambiguous commit with the deployed SQLite
+driver or a normal RPC history reaching the combined remount/rollback failure.
+
+- **Uncertain forward commit:** `MovePlogToDisk` returns transaction commit
+  errors through the same error result as failures before publication. The
+  caller closes and unconditionally removes the destination on every error.
+  If the catalog transaction became durable despite an error being reported,
+  that cleanup would delete the catalog's authoritative file. Establish the
+  driver's actual failure contract and inject an applied-but-error outcome at
+  the metadata boundary; ordinary context cancellation is not sufficient evidence.
+- **Failed remount followed by failed rollback:** the server installs the new
+  `s.plogs` entry before remounting. A failed remount leaves `s.vlogs` unchanged;
+  if the rollback CAS also fails, the function returns without reconciling the
+  old vlog clients with the new plog entry and catalog. Disk generation fencing
+  can correctly reject rollback after the original disk changes. Keeping both
+  files avoids immediate deletion, but does not establish safe subsequent writes.
+
+Implement a relocation outcome protocol before reducing topology lock scope.
+Classify a failed completion as known unpublished, known published, or unresolved
+using authoritative placement, identity, and generation evidence. Preserve both
+physical candidates while unresolved, and fence affected writes until catalog
+placement and mounted clients agree. A failed reconciliation read must preserve
+that fence. Persist enough relocation intent for restart to resolve ownership;
+do not treat an arbitrary current disk-ID match as proof of this attempt's result.
+Cleanup must require positive evidence that its particular file is unowned.
+
+Acceptance requires production-path injections for failure before commit,
+applied-but-error commit, failed reconciliation reads, remount failure, rejected
+rollback after a disk lifecycle change, and process exit between each resolution
+and deletion step. An independent oracle must verify that acknowledged bytes
+remain readable, no authoritative file is deleted, unresolved placement rejects
+writes, and recovery/retry eventually resolves under restored availability.
+Add the same outcome states and independently failing remount/rollback actions
+to the placement model. Existing repair models use fresh destination plog IDs;
+they do not establish this same-plog-ID relocation protocol.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or
