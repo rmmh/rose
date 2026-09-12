@@ -490,9 +490,27 @@ Prefix and lease changes invalidate the vlog token even if the plog token stays
 unchanged; regressions isolate those cases and shared-source rejection. Removing
 the vlog comparison or exclusive-owner predicates exposes the unsafe transitions.
 
-This is not a complete unlocked-I/O protocol: destination lifecycle generations,
-file holds, and ambiguous cleanup still rely
-on the existing server ownership interval and need further refinement.
+Destination lifecycle tokens now use durable disk generations allocated from a
+single monotonic clock. Repoint and rollback compare the destination/original-disk
+token captured before I/O, including disk/node return and deletion/reinsertion.
+The copied header uses the UID captured with the destination token. This is not a
+complete unlocked-I/O protocol: file holds and ambiguous cleanup still rely on
+the existing server ownership interval and need further refinement.
+
+### B29 — P2: overlapping promotion passes fail on an already-retired candidate
+
+The full race suite reproduced `TestChaosClusterSmoke` failing with `promote:
+load vlog ...: sql: no rows in result set`. `PromoteStaging` lists candidates
+before acquiring each vlog's topology lock. Another pass can finish promotion and
+retire that source in between. `PromoteStagingVlog` tolerated absence only when
+it transitioned a still-running job to done, so an already-completed job caused
+the later pass to report an error.
+
+Absent candidates now return no work after attempting to finish any surviving
+intent; errors in that job operation still propagate. A regression promotes and
+retires a real staging vlog, then replays its stale candidate ID. The previous
+implementation fails that regression; the fix passes it and the focused chaos
+smoke test under the race detector.
 
 ## Verification defects found while implementing CI
 

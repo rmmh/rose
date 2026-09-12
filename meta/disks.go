@@ -174,7 +174,7 @@ func (d *DB) CapturePlogRelocation(ctx context.Context, plogID, vlogID, diskID u
 // Forward placement policy and physical I/O ownership remain server obligations.
 // The returned generation is read after triggers run, within the transaction,
 // and must be used for rollback rather than freshly sampling a changed placement.
-func (d *DB) MovePlogToDisk(ctx context.Context, plogID, vlogID, oldDiskID, newDiskID uint32, expected RelocationEpochs) (RelocationEpochs, error) {
+func (d *DB) MovePlogToDisk(ctx context.Context, plogID, vlogID, oldDiskID, newDiskID uint32, expected RelocationEpochs, destinationEpoch int64) (RelocationEpochs, error) {
 	if plogID == 0 || oldDiskID == 0 || newDiskID == 0 || oldDiskID == newDiskID {
 		return RelocationEpochs{}, fmt.Errorf("relocation requires a plog and distinct nonzero disks")
 	}
@@ -188,9 +188,9 @@ func (d *DB) MovePlogToDisk(ctx context.Context, plogID, vlogID, oldDiskID, newD
  WHERE v.id=? AND v.placement_epoch=? AND vp.plog_id=?)
  AND (SELECT count(*) FROM vlog_plog WHERE plog_id=?)=1
  AND EXISTS(SELECT 1 FROM disk d JOIN node n ON n.id=d.node_id
- WHERE d.id=? AND d.state IN ('active','draining') AND n.state='working')
+ WHERE d.id=? AND d.placement_epoch=? AND d.state IN ('active','draining') AND n.state='working')
  AND NOT EXISTS(SELECT 1 FROM vlog_plog owner JOIN vlog_plog peer ON peer.vlog_id=owner.vlog_id
- JOIN plog p ON p.id=peer.plog_id WHERE owner.plog_id=? AND peer.plog_id<>? AND p.disk_id=?)`, newDiskID, plogID, oldDiskID, expected.Plog, vlogID, expected.Vlog, plogID, plogID, newDiskID, plogID, plogID, newDiskID)
+ JOIN plog p ON p.id=peer.plog_id WHERE owner.plog_id=? AND peer.plog_id<>? AND p.disk_id=?)`, newDiskID, plogID, oldDiskID, expected.Plog, vlogID, expected.Vlog, plogID, plogID, newDiskID, destinationEpoch, plogID, plogID, newDiskID)
 	if err != nil {
 		return RelocationEpochs{}, err
 	}

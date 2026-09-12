@@ -248,6 +248,25 @@ func checkCatalogTx(ctx context.Context, tx *sql.Tx) ([]ConsistencyIssue, error)
 	}); err != nil {
 		return nil, err
 	}
+	var diskClock sql.NullInt64
+	if err := scan("SELECT max(epoch) FROM placement_clock", func(r *sql.Rows) error { return r.Scan(&diskClock) }); err != nil {
+		return nil, err
+	}
+	if !diskClock.Valid || diskClock.Int64 <= 0 {
+		issue("placement_clock", "placement_clock", "missing or nonpositive disk generation clock")
+	}
+	if err := scan("SELECT id,placement_epoch FROM disk", func(r *sql.Rows) error {
+		var id, epoch int64
+		if err := r.Scan(&id, &epoch); err != nil {
+			return err
+		}
+		if epoch <= 0 || (diskClock.Valid && epoch > diskClock.Int64) {
+			issue("placement_epoch", fmt.Sprintf("disk/%d", id), "disk generation outside durable clock range")
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	counts := map[int64]int{}
 	disks := map[int64]map[int64]bool{}
 	if err := scan(`SELECT vp.vlog_id,vp.shard_idx,vp.plog_id,p.disk_id FROM vlog_plog vp LEFT JOIN plog p ON p.id=vp.plog_id ORDER BY vp.vlog_id,vp.shard_idx`, func(r *sql.Rows) error {

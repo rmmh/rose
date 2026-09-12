@@ -119,7 +119,17 @@ capture and repoint require exactly one owning shard, because the server remount
 only that vlog before closing the source client. Repoint checks both generations;
 rollback uses the two post-trigger generations returned by that transaction.
 Prefix and lease changes therefore invalidate work independently of physical
-plog changes. Relocation still needs destination lifecycle fencing and I/O holds
+plog changes. It also captures destination and original-disk lifecycle tokens
+before copying. The destination header uses the UID captured with its token;
+repoint and rollback compare the relevant disk generation in their transaction.
+
+Disk generations use a single persistent `placement_clock` row. Disk insertion,
+identity/location/state changes, and node lifecycle changes allocate a newer
+generation atomically. Deletion and reinsertion cannot restore an old generation,
+even with identical disk ID and UID. Counter overflow rolls back the triggering
+mutation. This adds constant catalog space, not one historical row per event.
+The checker validates positive disk generations within the persisted clock range.
+Relocation still needs full I/O lifetime holds and safe ambiguous-result cleanup
 before its broad topology lock can be reduced.
 
 Bulk publication sync, repair, compaction, and scrub currently retain topology

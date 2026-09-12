@@ -67,13 +67,11 @@ func (s *Server) PromoteStagingVlog(ctx context.Context, stagingID uint32) (bool
 
 	info, err := s.db.GetVlog(ctx, stagingID)
 	if errors.Is(err, sql.ErrNoRows) {
-		finished, finishErr := s.db.FinishRunningPromoteJob(ctx, stagingID)
-		if finishErr != nil {
-			return false, finishErr
-		}
-		if finished {
-			return false, nil
-		}
+		// A pass lists candidates before acquiring topology ownership. Another
+		// pass may already have completed or retired this source. Finish any
+		// surviving intent, but absence is a no-op even if its job is done.
+		_, finishErr := s.db.FinishRunningPromoteJob(ctx, stagingID)
+		return false, finishErr
 	}
 	if err != nil {
 		return false, fmt.Errorf("promote: load vlog %d: %w", stagingID, err)

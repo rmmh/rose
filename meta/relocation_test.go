@@ -99,7 +99,7 @@ func TestRelocationFencesSourceAndPlacement(t *testing.T) {
 					t.Fatal("fixture failed to isolate vlog generation")
 				}
 			}
-			next, err := db.MovePlogToDisk(ctx, target, v, source, dest, epoch)
+			next, err := db.MovePlogToDisk(ctx, target, v, source, dest, epoch, diskEpoch(t, db, dest))
 			if kind != "valid rollback" {
 				if err == nil {
 					t.Fatal("invalid relocation accepted")
@@ -112,15 +112,27 @@ func TestRelocationFencesSourceAndPlacement(t *testing.T) {
 			if err != nil || next.Plog <= epoch.Plog || next.Vlog <= epoch.Vlog {
 				t.Fatalf("valid relocation=%v %v", next, err)
 			}
-			if _, err := db.MovePlogToDisk(ctx, id, v, 3, 1, epoch); err == nil {
+			if _, err := db.MovePlogToDisk(ctx, id, v, 3, 1, epoch, diskEpoch(t, db, 1)); err == nil {
 				t.Fatal("stale rollback accepted")
 			}
-			if _, err := db.MovePlogToDisk(ctx, id, v, 3, 1, RelocationEpochs{Plog: next.Plog, Vlog: epoch.Vlog}); err == nil {
+			if _, err := db.MovePlogToDisk(ctx, id, v, 3, 1, RelocationEpochs{Plog: next.Plog, Vlog: epoch.Vlog}, diskEpoch(t, db, 1)); err == nil {
 				t.Fatal("stale vlog rollback accepted")
 			}
-			if _, err := db.MovePlogToDisk(ctx, id, v, 3, 1, next); err != nil {
+			if _, err := db.MovePlogToDisk(ctx, id, v, 3, 1, next, diskEpoch(t, db, 1)); err != nil {
 				t.Fatalf("rollback to draining source: %v", err)
 			}
 		})
 	}
+}
+
+func diskEpoch(t *testing.T, db *DB, id uint32) int64 {
+	t.Helper()
+	if id == 999 {
+		return 0
+	}
+	token, err := db.CaptureDiskPlacement(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token.Epoch
 }

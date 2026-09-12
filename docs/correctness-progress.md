@@ -1180,3 +1180,43 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   ambiguous cleanup outcomes remain required before reducing topology locks.
 - Full repository tests, focused relocation/drain/rebalance/replacement race tests,
   `go vet ./...`, and whitespace checks passed.
+
+### Fence relocation destination and rollback disk lifecycles
+
+- Added `disk.placement_epoch` and a one-row persistent `placement_clock`.
+  Triggers allocate newer generations on disk insertion, identity/location/state
+  changes, and node lifecycle changes. Disk/node deletion and reinsertion cannot
+  recreate an earlier generation even with repeated IDs and UIDs. Integer overflow
+  aborts the underlying mutation; the clock uses constant catalog space.
+- Relocation captures destination and original-disk tokens before copying. The
+  copied header uses the UID captured with the destination generation, and the
+  catalog repoint compares that generation along with source plog/vlog tokens.
+  Rollback uses the original disk token captured before I/O. State change/return
+  cannot silently validate old work on either side of the move.
+- Metadata regressions isolate destination disk/node return, identity return,
+  disk/node deletion and reinsertion, persistence across reopen, overflow rollback,
+  and stale/fresh rollback-disk tokens. A real relocation injects destination
+  return before repoint, checks old placement and rejected-file cleanup, then
+  retries successfully with identical published bytes. Removing the disk comparison
+  defeats both metadata and server regressions.
+- The read-only checker reports a missing/nonpositive clock and disk generations
+  outside its range. No legacy migration is added for this research schema.
+  Broad topology locks remain: complete I/O holds, ambiguous completion cleanup,
+  and model/runtime composition are still outstanding.
+- The initial full race run exposed B29 in `TestChaosClusterSmoke`: another
+  promotion pass had already retired a listed candidate and finished its job.
+  Promotion treated that stale candidate as an error unless it could newly finish
+  a running job. Absent candidates now return no work after attempting intent
+  cleanup, preserving real cleanup errors. A deterministic completed-promotion
+  regression fails against the previous implementation and passes with the fix;
+  the focused chaos smoke test also passes under race.
+- Final full repository tests and vet passed. All non-server packages passed the
+  initial full race run; the complete server race suite passed on rerun after B29
+  was fixed (128.646s). The initial failure remains recorded above.
+- Resumed the previously interrupted EC check from its retained checkpoint at
+  `/tmp/rose-impl-tla/states/26-09-07-15-10-04.733`, using the original snapshot,
+  four workers, fingerprint 65, and seed 8140933882694200072. The snapshot differs
+  from current `RoseStorage.tla` only in an explanatory comment ("refines" versus
+  "models the required"). TLC reported that checkpoint recovery started; its log
+  is `/tmp/rose-impl-tla/ec-resumed.log`. This remains an in-progress check, not
+  verification success; do not start another EC run while it is active.

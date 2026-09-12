@@ -292,10 +292,17 @@ CREATE TABLE IF NOT EXISTS chunk (
 			state TEXT NOT NULL DEFAULT 'working'
 		);
 
-		CREATE TABLE IF NOT EXISTS disk (
+		CREATE TABLE IF NOT EXISTS placement_clock (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            epoch INTEGER NOT NULL CHECK(typeof(epoch)='integer' AND epoch>0)
+        );
+        INSERT OR IGNORE INTO placement_clock(id,epoch) VALUES(1,1);
+
+        CREATE TABLE IF NOT EXISTS disk (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			uid BLOB NOT NULL DEFAULT X'',
 			node_id INTEGER NOT NULL,
+            placement_epoch INTEGER NOT NULL DEFAULT 1 CHECK(typeof(placement_epoch)='integer' AND placement_epoch>0),
 			total_bytes INTEGER NOT NULL,
 			used_bytes INTEGER NOT NULL,
 			-- Lifecycle state mirrors RoseStorage's disk_state: a disk moves
@@ -405,6 +412,9 @@ CREATE TABLE IF NOT EXISTS chunk (
 		return fmt.Errorf("drop legacy write_op_chunk table: %w", err)
 	}
 	if err := bootstrapCluster(db); err != nil {
+		return err
+	}
+	if err := installDiskEpochTriggers(db); err != nil {
 		return err
 	}
 	if err := installPlacementEpochTriggers(db); err != nil {
