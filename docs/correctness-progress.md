@@ -1270,3 +1270,22 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   does not cover relocation's reuse of a plog ID across physical disks.
 - This checkpoint changes documentation only. Reviewed the cited implementation
   branches and checked whitespace; no new runtime or model verification claim.
+
+### Exercise relocation crashes around catalog repoint
+
+- Added a post-repoint fault boundary before mounted-client replacement. An
+  injected returned error after known commit success still completes remount and
+  source cleanup before returning; subprocess exit bypasses both.
+- Real process-crash regressions before/after repoint preserve both physical
+  candidates, restart on the expected catalog disk, and sweep only the unowned
+  disk copy. They verify acknowledged bytes before and after cleanup and repeat
+  the sweep to check idempotence. A separate lost-response regression verifies
+  remount completion and source removal.
+- A mutation treating a plog ID on disk 3 as ownership on every disk fails the
+  post-repoint stray-sweep assertion. The production source was restored.
+- Full repository tests, relocation tests under race, vet, and whitespace checks
+  passed. Ambiguous SQLite outcomes and combined remount/rollback failures remain
+  open; these process exits do not emulate power loss.
+- Polled the original resumed EC process (session 16491), which remains live.
+  The last observed log sample has 119,548,885 distinct states and 17,306,629
+  queued states at depth 26. This is incomplete exploration, not a proof result.

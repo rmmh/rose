@@ -554,6 +554,16 @@ Add the same outcome states and independently failing remount/rollback actions
 to the placement model. Existing repair models use fresh destination plog IDs;
 they do not establish this same-plog-ID relocation protocol.
 
+`TestRelocationProcessCrashRecovery` now exercises process exit immediately
+before and after a successful catalog repoint. Both physical candidates survive
+the child, restart selects the expected disk, and the stray sweep deletes only
+the other disk's file despite the shared plog ID. A repeated sweep is empty and
+acknowledged bytes remain readable before and after sweeping.
+`TestRelocationPostRepointErrorCompletesRemount` verifies that an injected error
+after a known successful commit is returned only after remount and source
+cleanup. These tests do not simulate SQLite commit uncertainty, failed remount
+rollback, or power loss; those acceptance cases remain open.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

@@ -1300,6 +1300,9 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 		_ = storage.RemovePlogFiles(newPath)
 		return fmt.Errorf("drain: move plog %d to disk %d: %w", plogID, toDisk, err)
 	}
+	// A lost response after a known successful commit must not skip remounting.
+	// Process-crash tests exit here, before any mounted client is changed.
+	completionErr := s.maintenanceCheckpoint("relocation-after-repoint")
 	old := s.plogs[plogID]
 	s.plogs[plogID] = reopened
 
@@ -1325,7 +1328,7 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 		_ = old.Close()
 	}
 	_ = storage.RemovePlogFiles(oldPath)
-	return nil
+	return completionErr
 }
 
 // remountVlogLocked rebuilds a vlog's in-memory client set from current

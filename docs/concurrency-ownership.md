@@ -139,6 +139,12 @@ The checker validates positive disk generations within the persisted clock range
 Relocation still needs full I/O lifetime holds and safe ambiguous-result cleanup
 before its broad topology lock can be reduced.
 
+The `relocation-after-repoint` fault boundary follows a known successful catalog
+commit and precedes mounted-client replacement. A returned hook error is retained
+until normal remount and cleanup finish; process exit instead leaves both copies
+for recovery and the disk-and-plog-keyed stray sweep. This boundary does not
+classify errors returned by the catalog commit itself.
+
 Bulk publication sync, repair, compaction, and scrub currently retain topology
 ownership across substantial I/O. Replacing these locks requires all of:
 
