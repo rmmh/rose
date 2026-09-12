@@ -368,6 +368,11 @@ func (s *Server) Recover(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("retire interrupted repair: %w", err)
 	}
+	if len(abandoned) > 0 {
+		if err := s.maintenanceCheckpoint("repair-catalog-retired"); err != nil {
+			return err
+		}
+	}
 	for _, p := range abandoned {
 		if s.diskReachableLocked(p.DiskID) {
 			_ = storage.RemovePlogFiles(s.plogPath(p.DiskID, p.ID))

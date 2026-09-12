@@ -1220,3 +1220,23 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   "models the required"). TLC reported that checkpoint recovery started; its log
   is `/tmp/rose-impl-tla/ec-resumed.log`. This remains an in-progress check, not
   verification success; do not start another EC run while it is active.
+
+### Exercise a second crash during repair recovery
+
+- Added the `repair-catalog-retired` checkpoint after the recovery deletion
+  transaction commits and before any retired file is unlinked. A returned hook
+  error stops recovery at that boundary; a subprocess exit bypasses all cleanup.
+- The process regression first crashes repair before repointing, then crashes the
+  recovering process after catalog retirement. It independently confirms that
+  the row is absent while the physical file remains. Restart and the real stray
+  sweep remove that file, a repeated sweep removes nothing, and published/raw
+  bytes and their catalog files remain intact. This connects the companion
+  recovery model's retirement/unlink crash witness to a concrete runtime history.
+- The existing EC process successfully recovered 114,924,097 distinct states and
+  17,733,754 queued states and resumed exploration. Recovery inputs/tool hashes,
+  Java version, seed, fingerprint, and source-comment difference are recorded in
+  `/tmp/rose-impl-tla/ec-resume-manifest.json`. Its generated-state counter after
+  recovery is not the original run's cumulative generated count. The check is
+  still incomplete; continue polling the same process rather than duplicating it.
+- Full repository tests, the repair subprocess-crash suite under race, vet, and
+  whitespace checks passed.

@@ -271,7 +271,7 @@ not a mechanically proved composition of the repair models.
 | `Copy` | Verified reconstruction plus destination write/commit | Durable bytes are atomic; no unsynced data is modeled as recoverable here. |
 | `Publish` / `mapped` | `ReplaceShardPlog` replaces the mapping and deletes the old source row | Successful epoch/placement admission is assumed from the companion model and runtime checks. Physical source deletion has not yet happened. |
 | `Reject` / `Cleanup` | Rejected completion, then `DiscardUnassignedPlog` | Catalog retirement only. The model has no caller-held raw destination; its raw plog is unrelated to the repair. |
-| `Crash` / `Recover` | Process exit, then `RetireUnassignedRepairPlogs` before mounting/resuming work | Catalog ownership survives; recovery removes only owned unassigned rows. Pre/post-repoint subprocess regressions check these boundaries. |
+| `Crash` / `Recover` | Process exit, then `RetireUnassignedRepairPlogs` before mounting/resuming work | Catalog ownership survives; recovery removes only owned unassigned rows. Subprocess regressions cover pre/post-repoint and a second crash at `repair-catalog-retired` before physical deletion. |
 | `Sweep` | Catalog-first `RemovePlogFiles`, or `SweepStrayPlogFiles` after interruption | Each physical deletion is separate from catalog retirement and consults current ownership. Data and undo-journal ordering remains a lower-layer obligation. |
 | `Fail` / `Return` | Unreachable disk/node and subsequent return | Temporary unavailability only; no destructive media loss. |
 

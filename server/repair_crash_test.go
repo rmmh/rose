@@ -18,6 +18,22 @@ func TestRepairCrashChild(t *testing.T) {
 	if stage == "" {
 		return
 	}
+	if stage == "repair-catalog-retired" {
+		dir := os.Getenv("ROSE_REPAIR_CRASH_DIR")
+		db, err := meta.Open(filepath.Join(dir, "meta.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := NewServerWithDiskRoots(db, map[uint32]string{1: filepath.Join(dir, "disk-1"), 2: filepath.Join(dir, "disk-2")})
+		s.maintenanceFault = func(at string) error {
+			if at == stage {
+				os.Exit(73)
+			}
+			return nil
+		}
+		err = s.Recover(context.Background())
+		t.Fatalf("recovery crash hook not reached: %v", err)
+	}
 	s, _ := openPublicationCrashServer(t, os.Getenv("ROSE_REPAIR_CRASH_DIR"), 2)
 	placement := auditPlacement(t, s, "file")
 	shards, err := s.db.VlogShardDisks(context.Background(), placement.VlogID)
@@ -37,7 +53,7 @@ func TestRepairCrashChild(t *testing.T) {
 }
 
 func TestRepairProcessCrashRecovery(t *testing.T) {
-	for _, stage := range []string{"repair-destination-created", "repair-before-repoint", "repair-after-repoint"} {
+	for _, stage := range []string{"repair-destination-created", "repair-before-repoint", "repair-after-repoint", "repair-catalog-retired"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx := context.Background()
 			dir := t.TempDir()
@@ -76,8 +92,12 @@ func TestRepairProcessCrashRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			closeServer()
+			childStage := stage
+			if stage == "repair-catalog-retired" {
+				childStage = "repair-before-repoint"
+			}
 			cmd := exec.Command(os.Args[0], "-test.run=^TestRepairCrashChild$")
-			cmd.Env = append(os.Environ(), "ROSE_REPAIR_CRASH_STAGE="+stage, "ROSE_REPAIR_CRASH_DIR="+dir)
+			cmd.Env = append(os.Environ(), "ROSE_REPAIR_CRASH_STAGE="+childStage, "ROSE_REPAIR_CRASH_DIR="+dir)
 			output, err := cmd.CombinedOutput()
 			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 73 {
 				path := filepath.Join(dir, "child.log")
@@ -96,11 +116,42 @@ func TestRepairProcessCrashRecovery(t *testing.T) {
 			}
 			catalog.Close()
 			repairPath := s.plogPath(before[0].DiskID, repairID)
+			if stage == "repair-catalog-retired" {
+				cmd := exec.Command(os.Args[0], "-test.run=^TestRepairCrashChild$")
+				cmd.Env = append(os.Environ(), "ROSE_REPAIR_CRASH_STAGE="+stage, "ROSE_REPAIR_CRASH_DIR="+dir)
+				output, err := cmd.CombinedOutput()
+				if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 73 {
+					log := filepath.Join(dir, "recovery-child.log")
+					_ = os.WriteFile(log, output, 0600)
+					t.Fatalf("recovery child did not retire catalog: %v; details in %s", err, log)
+				}
+				if _, err := os.Stat(repairPath); err != nil {
+					t.Fatalf("fixture did not preserve file until crash: %v", err)
+				}
+				catalog, err := meta.Open(filepath.Join(dir, "meta.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var n int
+				err = catalog.GetDB().QueryRow("SELECT count(*) FROM plog WHERE id=?", repairID).Scan(&n)
+				catalog.Close()
+				if err != nil || n != 0 {
+					t.Fatalf("retired catalog row survived: %d %v", n, err)
+				}
+			}
 			dbs, finish := openPublicationCrashServer(t, dir, 2)
 			defer finish()
 			var orphans int
 			if err := dbs.db.GetDB().QueryRow("SELECT count(*) FROM plog WHERE repair_owned=1 AND NOT EXISTS(SELECT 1 FROM vlog_plog WHERE plog_id=plog.id)").Scan(&orphans); err != nil || orphans != 0 {
 				t.Fatalf("repair orphan after recovery=%d %v", orphans, err)
+			}
+			if stage == "repair-catalog-retired" {
+				if removed, err := dbs.SweepStrayPlogFiles(ctx); err != nil || removed != 1 {
+					t.Fatalf("retired repair sweep=%d %v", removed, err)
+				}
+				if removed, err := dbs.SweepStrayPlogFiles(ctx); err != nil || removed != 0 {
+					t.Fatalf("repeat repair sweep=%d %v", removed, err)
+				}
 			}
 			_, fileErr := os.Stat(repairPath)
 			if stage == "repair-after-repoint" {
