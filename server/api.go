@@ -1891,12 +1891,12 @@ func (s *Server) WritePlog(ctx context.Context, req *pb.WritePlogRequest) (*pb.W
 	if !ok {
 		return nil, fmt.Errorf("plog not found")
 	}
-	owners, err := s.db.VlogsForPlog(ctx, req.GetPlogId())
+	writable, err := s.db.RawPlogWritable(ctx, req.GetPlogId())
 	if err != nil {
 		return nil, err
 	}
-	if len(owners) != 0 {
-		return nil, fmt.Errorf("plog %d is owned by vlog %d", req.GetPlogId(), owners[0])
+	if !writable {
+		return nil, fmt.Errorf("plog %d is owned by a vlog or repair", req.GetPlogId())
 	}
 	length := plog.LogicalLength()
 	if length > math.MaxUint32 || int64(len(req.GetBuffer())) > MaxVlogBytes-length {
@@ -1931,11 +1931,11 @@ func (s *Server) CommitPlog(ctx context.Context, req *pb.CommitPlogRequest) (*pb
 	s.vlogMu.Lock()
 	defer s.vlogMu.Unlock()
 	for id, plog := range s.plogs {
-		owners, err := s.db.VlogsForPlog(ctx, id)
+		writable, err := s.db.RawPlogWritable(ctx, id)
 		if err != nil {
 			return nil, err
 		}
-		if len(owners) != 0 {
+		if !writable {
 			continue
 		}
 		if err := plog.Commit(); err != nil {

@@ -1105,3 +1105,19 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   live-process completion, not a power-loss or process-recovery refinement.
 - Full repository tests, full race suite, the additional post-repoint error and
   subprocess regressions, `go vet ./...`, and whitespace checks passed.
+
+### Keep failed repair destinations out of raw RPC admission (B27)
+
+- Auditing B26's durable marker exposed a follow-on admission gap: rejected repair
+  plus failed catalog cleanup retains an unassigned mounted destination, and raw
+  write/commit previously considered absence of a vlog mapping sufficient. Raw
+  bytes acknowledged there would later be reclaimed as abandoned repair data.
+- Both raw mutation RPCs now use `RawPlogWritable` under their existing topology
+  lock. Admission requires an existing row, no vlog mapping, and no repair marker.
+  Repair-owned and missing catalog rows remain excluded even without a mapping.
+- The regression runs the real repair path with rejection and cleanup failure,
+  checks raw write rejection and unchanged length, and closes the protected plog
+  to detect an accidental raw commit. An ordinary raw plog still writes, commits,
+  and verifies. Removing the marker predicate triggers both negative assertions.
+- Full repository tests, focused metadata/server repair and raw-operation race
+  tests, `go vet ./...`, and whitespace checks passed.

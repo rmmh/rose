@@ -449,6 +449,22 @@ and raw bytes. Removing the allocation marker reproduces the leak. Interrupted
 or failed physical deletion remains the existing stray-file sweep's responsibility;
 this does not establish power-loss behavior for SQLite or the filesystem.
 
+### B27 — P1: raw RPCs admit a repair destination after failed cleanup
+
+If repair fails before repointing and its cleanup transaction also fails, the
+unassigned destination remains mounted for safe later recovery. `WritePlog` and
+`CommitPlog` checked only vlog mappings, so both treated that internal destination
+as a raw plog. A raw write could acknowledge bytes that B26's recovery cleanup
+would later discard. Broad topology locking does not close this gap: the raw
+request arrives after the failed repair releases its lock.
+
+Both RPCs now use `RawPlogWritable`, which requires an existing catalog row with
+no repair marker and no vlog mapping under topology ownership. A regression
+injects repair rejection plus a failing cleanup transaction, checks write
+rejection without byte changes, and makes accidental commit observable by
+closing the protected client. A separate raw plog remains writable/committable.
+Removing the marker predicate exposes both regressions.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

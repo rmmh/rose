@@ -61,6 +61,9 @@ error injection are supported uses.
 | Snapshot data | Durable snapshot entries and their reference multiplicities | Snapshot deletion/expiry removes refs; open snapshot readers retain their own pins |
 
 A pin protects content from reclamation; it does not freeze a physical address.
+Raw plog write/commit admission requires an existing, unassigned catalog row with
+no repair ownership marker. Failed repair cleanup can retain an unassigned mounted
+client after releasing topology ownership; it remains internal repair state.
 Readers resolve the current canonical location under topology ownership and then
 hold the mounted I/O resource. A running destination hold similarly prevents
 rewrite/retirement, but permits shard repair in place. Scrub now retains `vlogMu`

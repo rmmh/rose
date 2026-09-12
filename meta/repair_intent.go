@@ -56,3 +56,13 @@ func (d *DB) RetireUnassignedRepairPlogs(ctx context.Context) ([]PlogInfo, error
 	}
 	return out, nil
 }
+
+// RawPlogWritable is checked while the server retains topology ownership. A
+// repair marker excludes destinations even if cleanup failed before assignment.
+func (d *DB) RawPlogWritable(ctx context.Context, plogID uint32) (bool, error) {
+	var writable bool
+	err := d.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM plog p
+ WHERE p.id=? AND p.repair_owned=0
+ AND NOT EXISTS(SELECT 1 FROM vlog_plog WHERE plog_id=p.id))`, plogID).Scan(&writable)
+	return writable, err
+}
