@@ -10,7 +10,8 @@ This checks prefix safety, conditional prefix liveness, both transaction
 configurations, the small snapshot/owner-pin configuration, and retry-retention
 safety and conditional liveness, and maintenance ownership safety and conditional
 job/retirement liveness, repair generation safety and attempt termination, and
-repair recovery safety and conditional reclamation (thirteen configurations total).
+repair recovery safety and conditional reclamation, and relocation outcome safety
+and conditional recovery/reclamation (fifteen configurations total).
 It also tests the
 evidence parser. It does not run the large placement or retention state spaces,
 Go tests, or the separate mutation and coverage checks.
@@ -31,6 +32,16 @@ plog must survive; a published destination must remain cataloged and stored.
 Conditional reclamation assumes finitely many crashes/outages, eventual media
 return, and fair recovery/sweeping. It does not model SQLite/VFS torn persistence,
 permanent disk loss, or compose all repair-generation actions into one state graph.
+
+`make -C tla relocation-mutations` checks relocation outcomes, eleven fault
+mutations, and six reachability witnesses. Catalog placement, mounted clients,
+and per-disk files are separate. It covers uncertain forward/rollback outcomes,
+generation-sensitive resolution, quarantine, recovery, and physical cleanup.
+Independent freshness history checks resolution even if an epoch increment is
+removed. Conditional progress assumes fair recovery and sweeping after finitely
+many crashes and lifecycle changes. This is one serialized attempt over complete
+durable copies; byte-level failures, active I/O, online retry, and multiple
+interacting jobs still need additional coverage.
 
 For an explicit artifact directory and time limit per configuration:
 

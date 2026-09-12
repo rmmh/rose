@@ -283,17 +283,41 @@ sweeping. No liveness claim applies to permanent outage or unfair scheduling.
 Witnesses reach crashes before physical copy, after publication, after catalog
 retirement but before unlink, and successful cleanup following restart.
 
-## Relocation outcome gap
+## Relocation outcomes (`RoseRelocationOutcome.tla`)
 
-The runtime now classifies relocation commit errors separately, reconciles exact
-source/destination generations on a clean catalog session, and quarantines the
-mounted vlog when reconciliation or remount rollback cannot establish a safe
-outcome. Recovery reconstructs catalog placement before resuming access. Tests
-cover rejected commits, applied-but-error completion, failed resolution reads,
-stale generations, failed remount rollback, access fencing, and restart reads.
+This companion model separates catalog disk placement, mounted clients, and the
+physical disk copies of one plog ID. `mounted = 2` means no mounted client; disks
+are 0 and 1. One serialized relocation attempt runs under topology ownership,
+with at most two lifecycle events and two process crashes. Copy abstracts fully
+verified, synced bytes of the acknowledged prefix. Independent freshness flags
+record lifecycle events; they do not control admission, and detect stale
+resolution even when a mutation removes the epoch increment itself.
 
-The repair models above use fresh destination plog IDs and do not model this
-same-ID relocation outcome protocol. A placement extension must represent catalog
-placement separately from mounted clients, an unknown caller outcome, independent
-remount and rollback failures, quarantine, recovery, and per-disk candidate files.
-Checking those models does not currently prove B30's runtime recovery protocol.
+| Action/state | Runtime correspondence | Boundary |
+| --- | --- | --- |
+| `Copy` / `files` | `copyFile`, destination verification, `RebindDiskUID` | Complete durable copy is atomic; no short writes, torn sectors, or UID/crypto representation. |
+| `Commit` / `catalog`, `after` | `MovePlogToDisk` and attempted post-trigger generations | Applied and rejected transactions can both return uncertain outcomes. Atomic persistence is assumed; driver/VFS internals are omitted. |
+| `Change` / `epoch`, `rollbackFresh` | Source/vlog and destination disk generation fences | Original-disk changes after repoint can invalidate rollback without changing the moved plog epoch. Physical bytes survive these events. |
+| `Resolve`, `ResolveFailure` | Clean-session `ResolvePlogRelocation`, or failed reads | Exact source/destination generations resolve; stale/failed resolution quarantines. Session cleanup is a runtime assumption, covered in part by deferred-constraint tests. |
+| `Remount`, `Rollback` | Client replacement, `remountVlogLocked`, fenced reverse `MovePlogToDisk` | Either can fail independently. An uncertain rollback can have applied or not. Partial remount changes within storage clients are not represented. |
+| `quarantine` / mounted sentinel | `quarantineRelocationLocked` | No mounted access. A running invocation excludes outside I/O until cleanup or quarantine; reader holds are not modeled. |
+| `Cleanup`, `Sweep` | Conditional candidate removal and `SweepStrayPlogFiles` | Per-disk ownership matters despite a shared plog ID. Sweep cannot interleave with an invocation holding topology ownership. |
+| `Crash`, `Recover` | Process exit; quiescent `Recover` reconstructs authoritative mounts | Catalog and files persist; mounted clients disappear. Recovery is atomic here, and physical cleanup remains a separate action. |
+
+Safety checks authoritative-file preservation, coherent accessible mounts,
+quarantine fencing, served-file presence, and freshness of every resolved result.
+Conditional liveness requires eventual recovered access and reclamation under
+weak fairness for protocol steps, recovery, and sweeping, with finite crashes
+and lifecycle changes. It does not promise availability during failed recovery.
+
+Eleven mutations cover missing copy, unconditional destination deletion, skipped
+remount, missing source/destination epoch checks or increments, missing fences,
+unsafe sweeping, and unfair recovery/sweep. Six witnesses cover applied/rejected
+uncertain commits, stale destination quarantine, independently invalidated rollback
+tokens, applied-but-uncertain rollback, and recovery followed by stray cleanup.
+
+This is a bounded protocol check for B30, not a mechanical refinement proof or
+composition with the repair/maintenance models. Runtime tests cover the major
+forward-result paths, rejected rollback, and restart, but applied-but-error
+rollback, partial remount failures, every resolution/deletion crash boundary,
+active I/O, online retry, and low-level persistence failures remain incomplete.

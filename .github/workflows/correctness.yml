@@ -42,7 +42,7 @@ jobs:
 
   fast-models:
     runs-on: ubuntu-24.04
-    timeout-minutes: 70
+    timeout-minutes: 80
     env:
       PYTHONDONTWRITEBYTECODE: '1'
     steps:

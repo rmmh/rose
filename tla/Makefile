@@ -84,3 +84,12 @@ test-repair-recovery:
 
 repair-recovery-mutations: test-repair-recovery
 	python3 check_repair_recovery_mutations.py
+
+.PHONY: test-relocation-outcomes relocation-mutations
+
+test-relocation-outcomes:
+	java -Xmx512m -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RoseRelocationOutcome.cfg RoseRelocationOutcome.tla
+	java -Xmx512m -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RoseRelocationOutcomeLive.cfg RoseRelocationOutcome.tla
+
+relocation-mutations: test-relocation-outcomes
+	python3 check_relocation_mutations.py

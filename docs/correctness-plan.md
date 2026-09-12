@@ -584,8 +584,11 @@ and server deferred-constraint tests exercise an actual rejected SQLite commit,
 resolution to the durable source, and successful retry. The pinned modernc.org/
 sqlite v1.46.1 driver attempts rollback on commit failure; the connection discard
 also covers uncertainty about that rollback. Power loss, rollback I/O failure,
-all resolution/deletion crash boundaries, and matching placement-model states
-remain open.
+and all runtime resolution/deletion crash boundaries remain open. The bounded
+`RoseRelocationOutcome` companion now separates mounted clients from catalog
+placement, checks generation-sensitive resolution and quarantine, and verifies
+conditional recovery/reclamation. It does not yet compose active I/O, online
+retry, or interacting maintenance jobs into the placement state graph.
 
 ### B31 — P1: replacement catalog connections lose foreign-key enforcement
 

@@ -1322,3 +1322,31 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   checks. An added same-server CloseStorage/Recover regression also passed under
   race and verifies that recovery clears the existing quarantine before reads
   resume, followed by another restart and safe stray sweep.
+
+### Model relocation outcome reconciliation and quarantine
+
+- Added `RoseRelocationOutcome` safety and conditional-liveness configurations.
+  They separate catalog placement, mounted clients, and the two disk copies of
+  one plog ID. Outcomes include rejected/applied uncertain commits, independent
+  remount/rollback failures, changed rollback tokens, quarantine, process exit,
+  recovery, and disk-specific cleanup. Stale admission fails before commit.
+- Independent freshness history detects both missing generation comparisons and
+  missing generation increments. Access invariants apply when topology ownership
+  is released; no reads/writes interleave with an invocation's internal remount.
+- Eleven fault mutations and six witnesses cover copy, cleanup, remount, source/
+  destination generations, quarantine, recovery fairness, and sweep fairness.
+  Witnesses include both forward uncertain outcomes and applied-but-uncertain
+  rollback, so those histories cannot disappear unnoticed from the state graph.
+- Added both configurations to the fast tier and `make relocation-mutations`.
+  The fast CI timeout is now 80 minutes for fifteen 300-second configuration
+  limits plus setup. All fifteen fast configurations completed successfully;
+  evidence and exact checked source hashes are in `/tmp/rose-relocation-fast-final`.
+- Both new configurations completed with 1,057 generated states, 372 distinct
+  states, zero queued states, and depth 11. All seventeen mutation/witness checks
+  detected their intended violations; logs are in
+  `/tmp/rose-relocation-mutations-final-checked`. Evidence-parser tests, workflow
+  YAML parsing, and whitespace checks passed. No Go runtime code changed here.
+- This is one serialized attempt with finite crashes/lifecycle changes and atomic
+  durable-copy/catalog actions. Online retry, active I/O, interacting jobs, partial
+  remount side effects, and low-level persistence failures remain open. The
+  correspondence table records these limits and current runtime witness gaps.
