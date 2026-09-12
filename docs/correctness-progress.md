@@ -1057,3 +1057,27 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   destination repair fences, complete I/O ownership and remote generation work,
   and the remaining acceptance criteria recorded above; do not infer completion
   from this checkpoint.
+
+### Resume: model the actual repair generation boundary
+
+- Added `RoseRepairEpoch` safety and conditional attempt-termination configurations
+  for source/destination capture, durable copy, generation-checked repoint,
+  cancellation/ambiguous response, and conditional cleanup. Two lifecycle events
+  permit change/return histories; two fresh destination identities permit retry.
+  Independent freshness history detects missing epoch increments as well as
+  missing comparisons, avoiding an oracle that merely repeats implementation
+  counters. A missing availability admission pair, skipped sync, destructive or
+  leaking cleanup, and unfair cleanup also produce counterexamples.
+- Both positive configurations completed: 1,250 generated / 597 distinct states,
+  depth 12, empty queue. All eleven fast configurations completed with source/tool
+  hashes in `/tmp/rose-repair-fast-final/results.json`. Nine mutations and four
+  reachability witnesses passed in `/tmp/rose-repair-mutation-final/results.json`.
+  Evidence-parser tests passed. The public make target runs positive checks before
+  sensitivity checks. CI's fast-model budget now covers eleven per-model timeouts.
+- The model covers serialized live-process completion, not physical power loss or
+  process-crash cleanup. Tracing that distinction exposed B26: repair allocation
+  leaves an unassigned destination indistinguishable from a raw plog if process
+  exit bypasses its local cleanup. A temporary diagnostic unwound at the real
+  pre-repoint hook, closed storage, and recovered; one unassigned destination
+  remained. Durable repair allocation ownership and subprocess regressions remain
+  required. No production Go code changed in this checkpoint.

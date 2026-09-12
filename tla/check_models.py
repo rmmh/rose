@@ -20,6 +20,8 @@ FAST = [
     ("RoseRetryRetention", "RoseRetryRetentionLive"),
     ("RoseMaintenance", "RoseMaintenance"),
     ("RoseMaintenance", "RoseMaintenanceLive"),
+    ("RoseRepairEpoch", "RoseRepairEpoch"),
+    ("RoseRepairEpoch", "RoseRepairEpochLive"),
 ]
 LARGE = [
     ("RoseMetadata", "RoseMetadata"),

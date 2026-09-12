@@ -232,3 +232,27 @@ property; parser errors, safety failures, and timeouts do not count as the expec
 temporal counterexample. Four safety and three temporal counterexamples are
 required. This is a refinement map with explicit omissions, not a proof that all
 runtime maintenance paths implement the abstraction.
+
+## Repair generations and completion
+
+`RoseRepairEpoch` models one serialized repair with at most two fresh destination
+identities and two lifecycle events. Generations do not wrap; each new attempt
+allocates a different plog. It checks the catalog completion boundary, not a
+byte-level refinement or a license to release `vlogMu` during physical I/O.
+
+| Action / state | Runtime correspondence | Abstraction boundary |
+| --- | --- | --- |
+| `Begin` / `capturedSource` | `regenerateShardLocked` reads `GetVlog.PlacementEpoch`, then allocates its destination | Reconstruction and allocation are abstracted; raw/source ownership and actual bytes remain runtime prerequisites. |
+| `Capture` / `capturedDest` | `RepairDestinationEpoch` checks an unassigned plog on an active disk and working node before writes | A single destination with exclusive ownership; general placement geometry is checked separately by runtime tests. |
+| `SourceChange` / `DestinationChange` | `installPlacementEpochTriggers` advances epochs on source/destination identity, ownership, or lifecycle changes | Two events may represent outage and return, or identity changes with unchanged availability. Ghost freshness flags independently record invalidation; they are not runtime fields. |
+| `Write` / `durable` | Destination `Write`, `Commit`, and verified source reconstruction | Successful durable bytes are atomic here; torn persistence, corruption, and ENOSPC are outside this model. |
+| `Commit` | `ReplaceShardPlog` compares captured source/destination epochs and rechecks availability in the repoint transaction | `acceptedSafely` records completion-time validity independently of the guards. Later failures must not retroactively invalidate a historically valid completion. |
+| `Interrupt` | Cancellation/error before publication or an ambiguous response after it | A live invocation reaches cleanup. This is not process exit followed by recovery; B26 records the missing durable orphan owner. |
+| `Cleanup` | `DiscardUnassignedPlog` protects a committed mapping before removing unpublished destination files | SQL and physical cleanup are combined here. No guarantee of cleanup after a crash or failed deletion is inferred. |
+
+Safety forbids stale or unsynced publication, removal of a published destination,
+loss of the old source on rejection, and destination leaks at idle/terminal
+boundaries. Weak fairness for capture, write, commit, and cleanup makes each
+started attempt terminate. This does not promise successful repair under outage,
+unlimited retries, concurrent repairs, remote completion, or eventual cleanup
+after a process crash. Separate runtime tests cover epoch overflow and reopen.

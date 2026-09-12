@@ -426,6 +426,25 @@ transitions, verify rejection preserves mappings/rows, and permit replacement
 once a shared source becomes exclusive. This does not implement placement epochs
 or generation fencing for delayed completions.
 
+### B26 — P2: interrupted repair leaves an indistinguishable raw plog
+
+`regenerateShardLocked` allocates its destination with `MakePlog` before writing
+and repointing it. A process exit before `ReplaceShardPlog` bypasses the local
+`discard` closure. The unassigned row has no durable repair owner, so recovery
+cannot distinguish it from a legitimate raw plog and retains it indefinitely.
+Repeated interruptions can consume catalog rows and disk space.
+
+A focused experiment interrupted the real repair at `repair-before-repoint` by
+unwinding past its cleanup, closed storage, and ran `Recover`: one unassigned
+repair destination remained. This demonstrates recovery's ownership gap, not
+power-loss persistence behavior. The temporary diagnostic test was removed.
+
+Persist repair destination intent atomically with allocation. Recovery may then
+retire only explicitly owned, still-unassigned destinations, checking the mapping
+in the same catalog transaction before physical deletion. Preserve raw plogs and
+destinations whose repoint committed despite a lost response. Add subprocess
+crash/restart regressions before and after repointing. This bug remains open.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

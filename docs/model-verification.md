@@ -9,9 +9,19 @@ make -C tla check-fast
 This checks prefix safety, conditional prefix liveness, both transaction
 configurations, the small snapshot/owner-pin configuration, and retry-retention
 safety and conditional liveness, and maintenance ownership safety and conditional
-job/retirement liveness. It also tests the
+job/retirement liveness, and repair generation safety and attempt termination
+(eleven configurations total). It also tests the
 evidence parser. It does not run the large placement or retention state spaces,
 Go tests, or the separate mutation and coverage checks.
+
+`make -C tla repair-mutations` runs the positive repair configurations, nine
+fault mutations, and four reachability witnesses. It checks both generation
+comparisons and increments, availability admission, durable copy, cleanup, and
+cleanup fairness. Independent event-history flags detect stale acceptance even
+when a mutation disables the generation increment itself. Witnesses ensure
+successful repair, fresh retry success, and source/destination return rejection
+are reachable. This protocol model does not claim process-crash orphan cleanup;
+the outstanding runtime gap is B26 in the correctness plan.
 
 For an explicit artifact directory and time limit per configuration:
 

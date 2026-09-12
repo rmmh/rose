@@ -66,3 +66,12 @@ test-maintenance:
 
 maintenance-mutations: test-maintenance
 	python3 check_maintenance_mutations.py
+
+.PHONY: test-repair-epochs repair-mutations
+
+test-repair-epochs:
+	java -Xmx512m -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RoseRepairEpoch.cfg RoseRepairEpoch.tla
+	java -Xmx512m -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RoseRepairEpochLive.cfg RoseRepairEpoch.tla
+
+repair-mutations: test-repair-epochs
+	python3 check_repair_mutations.py
