@@ -1,6 +1,10 @@
 package server
 
-import "github.com/rmmh/rose/storage"
+import (
+	"errors"
+
+	"github.com/rmmh/rose/storage"
+)
 
 // quarantineRelocationLocked retains both physical candidates but removes every
 // route to the affected mounted vlog. Relocation admission excludes active I/O;
@@ -8,7 +12,7 @@ import "github.com/rmmh/rose/storage"
 // this plog because CapturePlogRelocation requires exclusive ownership.
 // Quiescent Recover reopens the authoritative catalog placement and clears the
 // fence only after all vlogs mount. No retry may copy over either candidate first.
-func (s *Server) quarantineRelocationLocked(vlogID, plogID uint32, old, replacement *storage.Plog, cause error) {
+func (s *Server) quarantineRelocationLocked(vlogID, plogID uint32, old, replacement *storage.Plog, cause error) error {
 	if s.quarantinedVlogs == nil {
 		s.quarantinedVlogs = make(map[uint32]error)
 	}
@@ -23,4 +27,5 @@ func (s *Server) quarantineRelocationLocked(vlogID, plogID uint32, old, replacem
 	if replacement != nil && replacement != old {
 		_ = replacement.Close()
 	}
+	return errors.Join(cause, s.maintenanceCheckpoint("relocation-quarantined"))
 }

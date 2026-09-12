@@ -155,6 +155,12 @@ retry cannot bypass the quarantine. Quiescent recovery reconstructs mounts from
 the catalog and physical headers; only after mounting all vlogs does it clear
 the fence. Online reconciliation without recovery is not implemented.
 
+`relocation-rollback-result` follows a successful reverse catalog update but
+precedes source-client restoration. An injected uncertain result takes the same
+quarantine path as a real rollback error. `relocation-quarantined` follows client
+closure and removal from mounted maps; neither candidate file has been deleted.
+Both boundaries support process-exit tests independently of ordinary error unwinding.
+
 Bulk publication sync, repair, compaction, and scrub currently retain topology
 ownership across substantial I/O. Replacing these locks requires all of:
 

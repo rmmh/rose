@@ -12,7 +12,7 @@ import (
 )
 
 func TestRelocationUncertainOutcome(t *testing.T) {
-	for _, fault := range []string{"applied", "reconciliation read fails", "destination returned", "remount and rollback fail"} {
+	for _, fault := range []string{"applied", "reconciliation read fails", "destination returned", "remount and rollback fail", "rollback applied but uncertain"} {
 		t.Run(fault, func(t *testing.T) {
 			ctx := context.Background()
 			dir := t.TempDir()
@@ -31,6 +31,12 @@ func TestRelocationUncertainOutcome(t *testing.T) {
 			}
 			injected := errors.New("injected relocation outcome failure")
 			s.maintenanceFault = func(at string) error {
+				if fault == "rollback applied but uncertain" {
+					if at == "relocation-before-remount" || at == "relocation-rollback-result" {
+						return injected
+					}
+					return nil
+				}
 				if at == "relocation-commit-result" && fault != "remount and rollback fail" {
 					if fault == "destination returned" {
 						if _, err := s.db.GetDB().Exec("UPDATE disk SET state='failed' WHERE id=3; UPDATE disk SET state='active' WHERE id=3"); err != nil {
@@ -61,12 +67,17 @@ func TestRelocationUncertainOutcome(t *testing.T) {
 			if !errors.Is(err, injected) {
 				t.Fatalf("outcome error = %v", err)
 			}
-			if got := diskOf(t, s, placement.VlogID, source.ShardIndex); got != 3 {
+			expectedDisk := uint32(3)
+			if fault == "rollback applied but uncertain" {
+				expectedDisk = source.DiskID
+			}
+			if got := diskOf(t, s, placement.VlogID, source.ShardIndex); got != expectedDisk {
 				t.Fatalf("catalog disk=%d", got)
 			}
 			oldPath, newPath := s.plogPath(source.DiskID, source.PlogID), s.plogPath(3, source.PlogID)
-			if _, err := os.Stat(newPath); err != nil {
-				t.Fatalf("authoritative destination removed after error: %v", err)
+			authoritativePath := s.plogPath(expectedDisk, source.PlogID)
+			if _, err := os.Stat(authoritativePath); err != nil {
+				t.Fatalf("authoritative file removed after error: %v", err)
 			}
 			if fault == "applied" {
 				if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
@@ -120,8 +131,8 @@ func TestRelocationUncertainOutcome(t *testing.T) {
 			if removed, err := recovered.SweepStrayPlogFiles(ctx); err != nil || removed != 1 {
 				t.Fatalf("recovery sweep=%d %v", removed, err)
 			}
-			if _, err := os.Stat(newPath); err != nil {
-				t.Fatalf("authoritative destination lost: %v", err)
+			if _, err := os.Stat(authoritativePath); err != nil {
+				t.Fatalf("authoritative file lost: %v", err)
 			}
 		})
 	}

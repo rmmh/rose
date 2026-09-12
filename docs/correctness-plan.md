@@ -590,6 +590,14 @@ placement, checks generation-sensitive resolution and quarantine, and verifies
 conditional recovery/reclamation. It does not yet compose active I/O, online
 retry, or interacting maintenance jobs into the placement state graph.
 
+The runtime outcome matrix also injects a successful rollback whose result is
+reported as uncertain. It verifies source catalog placement, preservation of both
+files, access fencing, same-server recovery, restart, and safe stray cleanup.
+Subprocess crashes at `relocation-rollback-result` and `relocation-quarantined`
+verify restart before rollback restores clients and after quarantine closes them.
+These connect the model's uncertain-rollback and recovery histories to concrete
+storage operations; low-level rollback I/O errors are still not simulated.
+
 ### B31 — P1: replacement catalog connections lose foreign-key enforcement
 
 `meta.open` originally enabled foreign keys only in `initSchema`. That configures

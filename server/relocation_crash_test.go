@@ -25,6 +25,12 @@ func TestRelocationCrashChild(t *testing.T) {
 		if at == stage {
 			os.Exit(73)
 		}
+		if stage == "relocation-rollback-result" && at == "relocation-before-remount" {
+			return errors.New("injected remount failure before rollback crash")
+		}
+		if stage == "relocation-quarantined" && (at == "relocation-commit-result" || at == "relocation-reconcile") {
+			return errors.New("injected unknown outcome before quarantine crash")
+		}
 		return nil
 	}
 	s.vlogMu.Lock()
@@ -34,7 +40,7 @@ func TestRelocationCrashChild(t *testing.T) {
 }
 
 func TestRelocationProcessCrashRecovery(t *testing.T) {
-	for _, stage := range []string{"relocation-before-repoint", "relocation-after-repoint"} {
+	for _, stage := range []string{"relocation-before-repoint", "relocation-after-repoint", "relocation-rollback-result", "relocation-quarantined"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx := context.Background()
 			dir := t.TempDir()
@@ -69,7 +75,7 @@ func TestRelocationProcessCrashRecovery(t *testing.T) {
 			recovered, finish := openPublicationCrashServer(t, dir, 3)
 			defer finish()
 			expectedDisk, strayPath, authoritativePath := source.DiskID, newPath, oldPath
-			if stage == "relocation-after-repoint" {
+			if stage == "relocation-after-repoint" || stage == "relocation-quarantined" {
 				expectedDisk, strayPath, authoritativePath = 3, oldPath, newPath
 			}
 			if got := diskOf(t, recovered, placement.VlogID, source.ShardIndex); got != expectedDisk {

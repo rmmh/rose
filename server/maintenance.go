@@ -1322,8 +1322,7 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 		}
 		if resolveErr != nil {
 			failure := errors.Join(err, resolveErr)
-			s.quarantineRelocationLocked(vlogID, plogID, s.plogs[plogID], reopened, failure)
-			return failure
+			return s.quarantineRelocationLocked(vlogID, plogID, s.plogs[plogID], reopened, failure)
 		}
 		if resolved == fromDisk {
 			_ = reopened.Close()
@@ -1348,10 +1347,15 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 	if err := remountErr; err != nil {
 		// The source is still intact, so put the catalog and mounted plog back on
 		// it rather than returning with a half-published relocation.
-		if _, rollbackErr := s.db.MovePlogToDisk(durableCtx, plogID, vlogID, toDisk, fromDisk, movedEpoch, rollbackDisk.Epoch); rollbackErr != nil {
+		_, rollbackErr := s.db.MovePlogToDisk(durableCtx, plogID, vlogID, toDisk, fromDisk, movedEpoch, rollbackDisk.Epoch)
+		if rollbackErr == nil {
+			if fault := s.maintenanceCheckpoint("relocation-rollback-result"); fault != nil {
+				rollbackErr = &meta.RelocationCommitError{Err: fault}
+			}
+		}
+		if rollbackErr != nil {
 			failure := errors.Join(err, fmt.Errorf("drain: roll back plog %d placement: %w", plogID, rollbackErr))
-			s.quarantineRelocationLocked(vlogID, plogID, old, reopened, failure)
-			return failure
+			return s.quarantineRelocationLocked(vlogID, plogID, old, reopened, failure)
 		}
 		if old != nil {
 			s.plogs[plogID] = old

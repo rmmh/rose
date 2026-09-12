@@ -318,6 +318,8 @@ tokens, applied-but-uncertain rollback, and recovery followed by stray cleanup.
 
 This is a bounded protocol check for B30, not a mechanical refinement proof or
 composition with the repair/maintenance models. Runtime tests cover the major
-forward-result paths, rejected rollback, and restart, but applied-but-error
-rollback, partial remount failures, every resolution/deletion crash boundary,
+forward-result paths, rejected and applied-but-error rollback, quarantine, and
+restart. Subprocess exits cover committed rollback before client restoration and
+quarantine after candidate clients close. Partial remount failures, every remaining
+resolution/deletion crash boundary,
 active I/O, online retry, and low-level persistence failures remain incomplete.

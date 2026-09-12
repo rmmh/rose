@@ -1350,3 +1350,25 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   durable-copy/catalog actions. Online retry, active I/O, interacting jobs, partial
   remount side effects, and low-level persistence failures remain open. The
   correspondence table records these limits and current runtime witness gaps.
+
+### Connect uncertain rollback and quarantine to runtime crash histories
+
+- Added `relocation-rollback-result` after the reverse catalog update and before
+  source-client restoration. Returned fault errors enter the existing uncertain
+  rollback quarantine path. Added `relocation-quarantined` after candidate clients
+  close; returned hook errors preserve the fence and are joined with the cause.
+- Extended the runtime outcome matrix with applied-but-uncertain rollback. It
+  checks source catalog placement, both candidate files, access/remount/retry
+  fencing, same-server recovery, another restart, and safe physical cleanup.
+- Extended subprocess coverage with crashes at committed rollback and completed
+  quarantine. Both leave two physical candidates. Restart chooses the expected
+  catalog disk; sweeping deletes only its peer and remains idempotent, with
+  acknowledged bytes readable before and after cleanup.
+- These witnesses cover the corresponding companion-model histories. They do
+  not inject rollback VFS failures or partial remount mutations.
+- Full repository tests, relocation race tests, vet, and whitespace checks passed.
+  Removing quarantine after an uncertain rollback leaves inconsistent mounted
+  clients and fails the new regression; the production source was restored.
+- The original resumed EC session remains live. Its last observed sample reached
+  depth 27 with 128,065,083 distinct states and 15,652,359 queued states. This is
+  continued incomplete exploration, not verification success.
