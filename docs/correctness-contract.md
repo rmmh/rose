@@ -179,6 +179,13 @@ In-process `ListSnapshots` discovers retained snapshot IDs, newest first.
 
 Retention, session expiry, terminal retry records, obsolete file versions, operation
 locks, and maintenance jobs each need a bounded lifetime or explicit retained root.
+Automatic compaction, promotion, and scrub job rows may be collected after they
+become terminal and their destination no longer exists. Their IDs are not durable
+status handles returned by the public disk-operation RPCs. A live destination
+retains its terminal owner row to prevent reuse; running jobs always remain.
+GC deletes at most 1,000 eligible internal job rows per pass. Drain, replacement,
+reprotection, and rebalance records retain their public retry/status semantics;
+bounding those records still requires a client-visible retention contract.
 A read-only consistency checker must independently traverse metadata and compare
 references, extent bounds, placement, protection, ownership, and disk identity.
 

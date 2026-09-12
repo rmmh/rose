@@ -578,8 +578,11 @@ smoke test under the race detector.
    rows per pass, preserving heads, snapshots, retry roots, and versions needed
    by prepared/committed operation rows. Open handles cache their version metadata
    and retain content pins independently, so expired unowned rows can be collected
-   while those readers remain open. Terminal `write_op` rows and maintenance
-   history still survive indefinitely. Legacy committed operations without retry
+   while those readers remain open. GC also deletes up to 1,000 terminal internal
+   compaction/promotion/scrub job rows per pass when their destinations are absent.
+   Running jobs and live-destination owner rows remain. Public disk-job retry/status
+   records and terminal `write_op` rows still survive indefinitely.
+   Legacy committed operations without retry
    deadlines conservatively retain version rows; bounded operation generations,
    tombstones, and a complete legacy retirement policy remain unfinished.
 

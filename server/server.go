@@ -1108,6 +1108,9 @@ func (s *Server) gcLocked(ctx context.Context) (int, error) {
 	if _, err := s.db.GCFileVersions(ctx, 1000); err != nil {
 		return len(collected), err
 	}
+	if _, err := s.db.GCTerminalVlogJobs(ctx, 1000); err != nil {
+		return len(collected), err
+	}
 	return len(collected), nil
 }
 

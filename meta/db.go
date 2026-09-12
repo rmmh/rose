@@ -328,6 +328,10 @@ CREATE TABLE IF NOT EXISTS chunk (
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_job_running_vlog
 			ON job(kind,target_vlog)
 			WHERE state='running' AND kind IN ('compact','promote','scrubrepair');
+        CREATE INDEX IF NOT EXISTS idx_job_gc_candidates ON job(id,dest_vlog)
+            WHERE state IN ('done','cancelled')
+            AND kind IN ('compact','promote','scrubrepair')
+            AND target_disk=0 AND dest_disk=0;
 
 		-- Reverse lookups for the control plane: a plog -> the vlog shard it backs,
 		-- and a disk -> the plogs it holds.  Without these, PlogsOnDisk and the

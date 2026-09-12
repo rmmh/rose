@@ -1240,3 +1240,22 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   still incomplete; continue polling the same process rather than duplicating it.
 - Full repository tests, the repair subprocess-crash suite under race, vet, and
   whitespace checks passed.
+
+### Bound terminal internal maintenance history
+
+- Added `GCTerminalVlogJobs` to regular GC with a 1,000-row deletion limit and an
+  index over eligible terminal internal jobs. It removes completed/cancelled
+  compaction, promotion, and scrub history only when no destination vlog exists.
+  The single SQL deletion rechecks terminal state and destination ownership.
+- Live destinations retain their terminal owner record because `SetJobDest` uses
+  it to prevent output reuse. Running jobs and public drain/replacement/reprotect/
+  rebalance records remain. Terminal source IDs alone do not retain internal
+  history: later automatic work creates a new job and recovery resumes running
+  work. Public job retention and expired write-key tombstones remain unfinished.
+- Tests cover retained destination owners, running/public jobs, bounded batches,
+  collection after destination retirement, failed-transaction rollback, and fresh
+  non-reused IDs. The server regression checks that GC's chunk count remains
+  unchanged and a public terminal job status remains available. Removing the live
+  destination predicate deletes a protected owner and fails the regression.
+- Full repository tests, focused metadata/server maintenance and GC race tests,
+  vet, and whitespace checks passed.

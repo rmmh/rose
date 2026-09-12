@@ -93,6 +93,13 @@ operation references. It does not change chunk refcounts: root removal already
 did so. Handles cache their extents and mtime; removing an expired version row
 does not remove their independent content pins or require taking handle locks.
 
+The same GC pass collects at most 1,000 terminal automatic vlog-job rows whose
+destinations are absent. The atomic deletion excludes running jobs and public
+disk-operation records. A live destination keeps its terminal owner row, which
+`SetJobDest` needs to prevent another job from reusing that output. Source identity
+alone does not retain terminal internal history: subsequent work creates a fresh
+job, and recovery consults running jobs. Collection never deletes physical data.
+
 ## Preconditions for reducing broad lock scope
 
 Each vlog has a durable positive `placement_epoch`. Catalog triggers advance it
