@@ -56,6 +56,7 @@ error injection are supported uses.
 | Append cursor | Durable `vlog_lease` for a prepared operation; raw appends obey separate ownership checks | Publication/cancellation/abandonment removes leases; committed prefix remains catalog authority |
 | In-flight file I/O | `resolveVlog` chooses canonical placement and increments `activeVlogOps` under `vlogMu` | `readChunksAt` calls `endVlogOp` after the read, including errors; maintenance defers relocation while active |
 | Rewrite destination | Durable running job's destination ID; `maintenance_owned` prevents file allocation | Running destination hold ends when job becomes terminal; ordinary retirement still requires reference/pin checks |
+| Repair destination | `plog.repair_owned` is set atomically at allocation; the live repair retains topology ownership | Local failure discards only an unassigned plog. Quiescent recovery transactionally removes marked unassigned rows before file deletion; published mappings protect their destinations. Raw unassigned plogs have no marker and survive. |
 | Retry result | Durable `write_result_root` with exclusive deadline and exact reference multiplicity | Expiry transaction releases refs and marks the operation expired; existing reader pins remain independent |
 | Snapshot data | Durable snapshot entries and their reference multiplicities | Snapshot deletion/expiry removes refs; open snapshot readers retain their own pins |
 

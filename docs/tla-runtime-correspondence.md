@@ -247,7 +247,7 @@ byte-level refinement or a license to release `vlogMu` during physical I/O.
 | `SourceChange` / `DestinationChange` | `installPlacementEpochTriggers` advances epochs on source/destination identity, ownership, or lifecycle changes | Two events may represent outage and return, or identity changes with unchanged availability. Ghost freshness flags independently record invalidation; they are not runtime fields. |
 | `Write` / `durable` | Destination `Write`, `Commit`, and verified source reconstruction | Successful durable bytes are atomic here; torn persistence, corruption, and ENOSPC are outside this model. |
 | `Commit` | `ReplaceShardPlog` compares captured source/destination epochs and rechecks availability in the repoint transaction | `acceptedSafely` records completion-time validity independently of the guards. Later failures must not retroactively invalidate a historically valid completion. |
-| `Interrupt` | Cancellation/error before publication or an ambiguous response after it | A live invocation reaches cleanup. This is not process exit followed by recovery; B26 records the missing durable orphan owner. |
+| `Interrupt` | Cancellation/error before publication or an ambiguous response after it | A live invocation reaches cleanup. Process exit and recovery use durable `repair_owned` intent and are checked separately by B26's subprocess regressions. |
 | `Cleanup` | `DiscardUnassignedPlog` protects a committed mapping before removing unpublished destination files | SQL and physical cleanup are combined here. No guarantee of cleanup after a crash or failed deletion is inferred. |
 
 Safety forbids stale or unsynced publication, removal of a published destination,

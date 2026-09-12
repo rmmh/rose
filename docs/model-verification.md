@@ -20,8 +20,8 @@ comparisons and increments, availability admission, durable copy, cleanup, and
 cleanup fairness. Independent event-history flags detect stale acceptance even
 when a mutation disables the generation increment itself. Witnesses ensure
 successful repair, fresh retry success, and source/destination return rejection
-are reachable. This protocol model does not claim process-crash orphan cleanup;
-the outstanding runtime gap is B26 in the correctness plan.
+are reachable. This protocol model does not cover process-crash orphan cleanup;
+B26's runtime fix is checked separately by repair subprocess-crash regressions.
 
 For an explicit artifact directory and time limit per configuration:
 

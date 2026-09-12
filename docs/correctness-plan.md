@@ -439,11 +439,15 @@ unwinding past its cleanup, closed storage, and ran `Recover`: one unassigned
 repair destination remained. This demonstrates recovery's ownership gap, not
 power-loss persistence behavior. The temporary diagnostic test was removed.
 
-Persist repair destination intent atomically with allocation. Recovery may then
-retire only explicitly owned, still-unassigned destinations, checking the mapping
-in the same catalog transaction before physical deletion. Preserve raw plogs and
-destinations whose repoint committed despite a lost response. Add subprocess
-crash/restart regressions before and after repointing. This bug remains open.
+Repair allocation now persists `repair_owned` in the allocation statement.
+Quiescent recovery retires only marked, still-unassigned destinations, checking
+the mapping in the same catalog transaction before physical deletion. Raw plogs
+and destinations whose repoint committed despite a lost response are preserved.
+Subprocess regressions exit after allocation, before repointing, and after
+repointing; they check catalog ownership, file removal/preservation, and published
+and raw bytes. Removing the allocation marker reproduces the leak. Interrupted
+or failed physical deletion remains the existing stray-file sweep's responsibility;
+this does not establish power-loss behavior for SQLite or the filesystem.
 
 ## Verification defects found while implementing CI
 

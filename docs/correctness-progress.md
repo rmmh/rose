@@ -1081,3 +1081,27 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   pre-repoint hook, closed storage, and recovered; one unassigned destination
   remained. Durable repair allocation ownership and subprocess regressions remain
   required. No production Go code changed in this checkpoint.
+
+### Recover interrupted repair destinations (B26)
+
+- `MakeRepairPlog` records `repair_owned` in the allocation statement, eliminating
+  the crash window between allocation and a separately recorded owner. Published
+  destinations keep this marker; their vlog mapping prevents reclamation.
+- Before mounting plogs or resuming maintenance, quiescent recovery deletes marked
+  unassigned rows with a transactional `DELETE ... RETURNING`. It returns physical
+  cleanup candidates only after commit. Raw unassigned plogs are preserved.
+  A failed deletion transaction returns no candidates and leaves the row intact;
+  repeated successful retirement is idempotent. Physical deletion follows catalog
+  retirement; failed/unreachable or interrupted deletion uses the existing stray
+  sweep. No legacy schema migration is provided for this research catalog.
+- Added subprocess exits after destination allocation, before repointing, and
+  after repointing. Recovery removes unpublished catalog rows and files, retains
+  the committed replacement and original file contents, and preserves an unrelated
+  raw plog byte-for-byte. Removing the durable allocation marker reproduces the
+  leaked row/file. Metadata rollback and focused repair tests pass under race.
+- The post-repoint fault hook preserves the existing cancellation boundary:
+  an ordinary hook error still completes remounting before returning; process exit
+  recovers the already-committed mapping. `RoseRepairEpoch` remains a model of
+  live-process completion, not a power-loss or process-recovery refinement.
+- Full repository tests, full race suite, the additional post-repoint error and
+  subprocess regressions, `go vet ./...`, and whitespace checks passed.

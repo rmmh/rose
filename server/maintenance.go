@@ -306,7 +306,7 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	// shard mapping, so a crash before the flip leaves the old (lost) mapping and
 	// the step re-runs rather than exposing a half-written shard.
 	newPlogUID := uid.New()
-	newPlogID, err := s.db.MakePlog(ctx, newPlogUID, toDisk)
+	newPlogID, err := s.db.MakeRepairPlog(ctx, newPlogUID, toDisk)
 	if err != nil {
 		return err
 	}
@@ -324,6 +324,9 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 		delete(s.plogs, newPlogID)
 		_ = storage.RemovePlogFiles(s.plogPath(toDisk, newPlogID))
 		return cause
+	}
+	if err := s.maintenanceCheckpoint("repair-destination-created"); err != nil {
+		return discard(err)
 	}
 	destinationEpoch, err := s.db.RepairDestinationEpoch(ctx, newPlogID)
 	if err != nil {
@@ -397,6 +400,7 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	if err := s.db.ReplaceShardPlog(durableCtx, vlogID, shardIdx, lostPlogID, newPlogID, info.PlacementEpoch, destinationEpoch); err != nil {
 		return discard(err)
 	}
+	completionErr := s.maintenanceCheckpoint("repair-after-repoint")
 	old := s.plogs[lostPlogID]
 	delete(s.plogs, lostPlogID)
 	delete(s.offlinePlogs, lostPlogID)
@@ -407,7 +411,7 @@ func (s *Server) regenerateShardLocked(ctx context.Context, vlogID uint32, shard
 	if old != nil {
 		_ = old.Close()
 	}
-	return nil
+	return completionErr
 }
 
 // readSurvivingCopyLocked returns the full logical bytes of any surviving mirror

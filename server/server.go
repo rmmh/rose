@@ -361,6 +361,19 @@ func (s *Server) Recover(ctx context.Context) error {
 		}
 	}
 
+	// Only repair-owned, unassigned plogs are abandoned provisioning. Raw plogs
+	// have no vlog mapping too, and must survive recovery. Retire catalog rows
+	// first; interruption or failed unlink leaves files for the stray sweep.
+	abandoned, err := s.db.RetireUnassignedRepairPlogs(ctx)
+	if err != nil {
+		return fmt.Errorf("retire interrupted repair: %w", err)
+	}
+	for _, p := range abandoned {
+		if s.diskReachableLocked(p.DiskID) {
+			_ = storage.RemovePlogFiles(s.plogPath(p.DiskID, p.ID))
+		}
+	}
+
 	plogInfos, err := s.db.ListPlogs(ctx)
 	if err != nil {
 		return err
