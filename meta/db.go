@@ -32,13 +32,19 @@ func OpenEphemeral() (*DB, error) {
 }
 
 func open(path string, durable bool) (*DB, error) {
-	dsn := path + "?_pragma=busy_timeout(10000)"
+	// Connection-local safety settings must survive pool replacement after a
+	// failed transaction; initSchema alone configures only the first session.
+	pragmas := "_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)"
+	if durable {
+		pragmas += "&_pragma=synchronous(FULL)"
+	}
+	dsn := path + "?" + pragmas
 	if durable {
 		absolute, err := filepath.Abs(path)
 		if err != nil {
 			return nil, err
 		}
-		u := url.URL{Scheme: "file", Path: absolute, RawQuery: "_pragma=busy_timeout(10000)"}
+		u := url.URL{Scheme: "file", Path: absolute, RawQuery: pragmas}
 		dsn = u.String()
 	}
 	db, err := sql.Open("sqlite", dsn)

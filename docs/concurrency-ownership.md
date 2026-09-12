@@ -136,14 +136,24 @@ generation atomically. Deletion and reinsertion cannot restore an old generation
 even with identical disk ID and UID. Counter overflow rolls back the triggering
 mutation. This adds constant catalog space, not one historical row per event.
 The checker validates positive disk generations within the persisted clock range.
-Relocation still needs full I/O lifetime holds and safe ambiguous-result cleanup
-before its broad topology lock can be reduced.
+Relocation still needs full I/O lifetime holds and online outcome recovery before
+its broad topology lock can be reduced.
 
 The `relocation-after-repoint` fault boundary follows a known successful catalog
 commit and precedes mounted-client replacement. A returned hook error is retained
 until normal remount and cleanup finish; process exit instead leaves both copies
 for recovery and the disk-and-plog-keyed stray sweep. This boundary does not
 classify errors returned by the catalog commit itself.
+
+Commit errors now retain attempted placement generations and discard the failed
+transaction connection. Reconciliation on a fresh session accepts only the exact
+source or destination generations while retaining topology ownership. Failed
+reads, changed generations, or failed remount rollback quarantine the vlog:
+both candidate files remain, their clients close, and the vlog/plog leave the
+mounted maps. Active I/O prevents relocation admission. Remount and relocation
+retry cannot bypass the quarantine. Quiescent recovery reconstructs mounts from
+the catalog and physical headers; only after mounting all vlogs does it clear
+the fence. Online reconciliation without recovery is not implemented.
 
 Bulk publication sync, repair, compaction, and scrub currently retain topology
 ownership across substantial I/O. Replacing these locks requires all of:

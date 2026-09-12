@@ -123,6 +123,7 @@ type Server struct {
 	pinnedChunks     map[int64]map[string]struct{}
 	publicationFault func(string) error // installed before requests by fault tests
 	maintenanceFault func(string) error // installed before maintenance by fault tests
+	quarantinedVlogs map[uint32]error   // vlogMu; cleared only by successful quiescent remount in Recover
 }
 
 // MaxVlogBytes is the 32-bit byte-addressable virtual-log boundary described
@@ -511,6 +512,7 @@ func (s *Server) Recover(ctx context.Context) error {
 		vlogs[info.ID] = vlog
 	}
 	s.vlogs = vlogs
+	s.quarantinedVlogs = nil
 
 	// A write operation left prepared by a crash needs no server-side recovery:
 	// its chunk bytes were either never made durable (so the client replays them

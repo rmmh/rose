@@ -3,6 +3,7 @@ package meta
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 
 	"github.com/rmmh/rose/uid"
@@ -178,7 +179,12 @@ func (d *DB) MovePlogToDisk(ctx context.Context, plogID, vlogID, oldDiskID, newD
 	if plogID == 0 || oldDiskID == 0 || newDiskID == 0 || oldDiskID == newDiskID {
 		return RelocationEpochs{}, fmt.Errorf("relocation requires a plog and distinct nonzero disks")
 	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return RelocationEpochs{}, err
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return RelocationEpochs{}, err
 	}
@@ -206,7 +212,14 @@ func (d *DB) MovePlogToDisk(ctx context.Context, plogID, vlogID, oldDiskID, newD
 		return RelocationEpochs{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return RelocationEpochs{}, err
+		// Commit can return early on cancellation before marking the sql.Tx
+		// done. Release its connection hold before discarding the session.
+		_ = tx.Rollback()
+		// Reconciliation must observe durable state from a new session. The
+		// driver attempts rollback after failed commit but ignores rollback errors;
+		// never risk reading this transaction's uncommitted update as publication.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return epoch, &RelocationCommitError{Err: err}
 	}
 	return epoch, nil
 }

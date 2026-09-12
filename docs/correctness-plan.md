@@ -513,30 +513,46 @@ retires a real staging vlog, then replays its stale candidate ID. The previous
 implementation fails that regression; the fix passes it and the focused chaos
 smoke test under the race detector.
 
-## Open relocation outcome audit (2026-09-11)
+### B30 — P1: relocation errors can leave unsafe cleanup or mounted placement
 
 Source review of `meta/disks.go:MovePlogToDisk` and
-`server/maintenance.go:migratePlogLocked` identifies two unresolved failure
-histories. These are code-path findings requiring fault-injected reproductions;
-the audit has not demonstrated an ambiguous commit with the deployed SQLite
-driver or a normal RPC history reaching the combined remount/rollback failure.
+`server/maintenance.go:migratePlogLocked` identified two failure histories.
+Production-boundary fault injections now cover applied-but-error outcomes and
+remount failure followed by a rejected rollback. An ambiguous disk/VFS commit
+with the deployed SQLite driver has not been demonstrated.
 
-- **Uncertain forward commit:** `MovePlogToDisk` returns transaction commit
-  errors through the same error result as failures before publication. The
-  caller closes and unconditionally removes the destination on every error.
+- **Uncertain forward commit:** `MovePlogToDisk` previously returned transaction
+  commit errors through the same error result as failures before publication.
+  The caller closed and unconditionally removed the destination on every error.
   If the catalog transaction became durable despite an error being reported,
   that cleanup would delete the catalog's authoritative file. Establish the
   driver's actual failure contract and inject an applied-but-error outcome at
   the metadata boundary; ordinary context cancellation is not sufficient evidence.
 - **Failed remount followed by failed rollback:** the server installs the new
   `s.plogs` entry before remounting. A failed remount leaves `s.vlogs` unchanged;
-  if the rollback CAS also fails, the function returns without reconciling the
+  if the rollback CAS also failed, the function returned without reconciling the
   old vlog clients with the new plog entry and catalog. Disk generation fencing
   can correctly reject rollback after the original disk changes. Keeping both
   files avoids immediate deletion, but does not establish safe subsequent writes.
 
-Implement a relocation outcome protocol before reducing topology lock scope.
-Classify a failed completion as known unpublished, known published, or unresolved
+The initial outcome protocol is implemented under the existing topology lock.
+Commit errors carry attempted post-update generations. The failed transaction
+connection is discarded before reconciliation so a rollback failure cannot leave
+an uncommitted session view masquerading as durable state. A single query accepts
+only unchanged source generations or exact destination generations. Known source
+retains its mount and discards the unpublished copy; known destination completes
+remount before returning the original error.
+
+Failed reconciliation or failed remount rollback removes the affected mounted
+vlog and plog clients, closes both candidate handles, and fences remount and
+relocation retries. Both files remain. Recovery uses persisted catalog placement
+and validated disk/plog headers to reconstruct the authoritative mount; the
+existing disk-and-plog-keyed sweep can then retire the other candidate. This
+provides restart recovery without a separate intent row for the two complete
+copies. Automatic online quarantine resolution and a durable attempt record for
+an eventual unlocked-I/O protocol remain unfinished.
+
+Further protocol work must classify a failed completion as known unpublished, known published, or unresolved
 using authoritative placement, identity, and generation evidence. Preserve both
 physical candidates while unresolved, and fence affected writes until catalog
 placement and mounted clients agree. A failed reconciliation read must preserve
@@ -561,8 +577,29 @@ the other disk's file despite the shared plog ID. A repeated sweep is empty and
 acknowledged bytes remain readable before and after sweeping.
 `TestRelocationPostRepointErrorCompletesRemount` verifies that an injected error
 after a known successful commit is returned only after remount and source
-cleanup. These tests do not simulate SQLite commit uncertainty, failed remount
-rollback, or power loss; those acceptance cases remain open.
+cleanup. `TestRelocationUncertainOutcome` now covers applied-but-error completion,
+failed reconciliation reads, destination generation changes, rejected remount
+rollback, access fencing, and restart with readable acknowledged bytes. Metadata
+and server deferred-constraint tests exercise an actual rejected SQLite commit,
+resolution to the durable source, and successful retry. The pinned modernc.org/
+sqlite v1.46.1 driver attempts rollback on commit failure; the connection discard
+also covers uncertainty about that rollback. Power loss, rollback I/O failure,
+all resolution/deletion crash boundaries, and matching placement-model states
+remain open.
+
+### B31 — P1: replacement catalog connections lose foreign-key enforcement
+
+`meta.open` originally enabled foreign keys only in `initSchema`. That configures
+one SQLite connection; replacing the pooled connection does not rerun schema
+initialization. Relocation outcome recovery now deliberately discards uncertain
+sessions, exposing this dependency. A mutation removing the new connection-level
+setting allows an invalid foreign-key insertion after a failed relocation commit.
+
+The DSN now enables foreign keys on every connection and sets `synchronous=FULL`
+on each durable connection. The failed-commit regression checks actual constraint
+enforcement and the synchronous setting after replacement, then verifies that
+relocation can retry successfully. Ephemeral catalogs remain non-durable and must
+not be used to test persistence across a discarded in-memory connection.
 
 ## Verification defects found while implementing CI
 

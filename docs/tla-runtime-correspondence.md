@@ -282,3 +282,18 @@ agreement under weak fairness for the protocol, recovery, media return, and
 sweeping. No liveness claim applies to permanent outage or unfair scheduling.
 Witnesses reach crashes before physical copy, after publication, after catalog
 retirement but before unlink, and successful cleanup following restart.
+
+## Relocation outcome gap
+
+The runtime now classifies relocation commit errors separately, reconciles exact
+source/destination generations on a clean catalog session, and quarantines the
+mounted vlog when reconciliation or remount rollback cannot establish a safe
+outcome. Recovery reconstructs catalog placement before resuming access. Tests
+cover rejected commits, applied-but-error completion, failed resolution reads,
+stale generations, failed remount rollback, access fencing, and restart reads.
+
+The repair models above use fresh destination plog IDs and do not model this
+same-ID relocation outcome protocol. A placement extension must represent catalog
+placement separately from mounted clients, an unknown caller outcome, independent
+remount and rollback failures, quarantine, recovery, and per-disk candidate files.
+Checking those models does not currently prove B30's runtime recovery protocol.

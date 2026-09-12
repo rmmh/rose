@@ -1289,3 +1289,36 @@ implementation and does not replace or reduce the plan's acceptance criteria.
 - Polled the original resumed EC process (session 16491), which remains live.
   The last observed log sample has 119,548,885 distinct states and 17,306,629
   queued states at depth 26. This is incomplete exploration, not a proof result.
+
+### Reconcile relocation outcomes and fence unresolved mounts
+
+- `MovePlogToDisk` distinguishes commit uncertainty from errors before publication
+  and retains attempted post-update generations. It releases the transaction and
+  discards the session on commit errors before reading durable placement again.
+  The pinned SQLite driver attempts rollback after commit failure but ignores
+  rollback errors; the new session avoids relying on an uncertain session view.
+- A single reconciliation query accepts only the unchanged source or exact
+  destination generations. Known source preserves its mount and discards only
+  the unpublished copy; known destination completes remount and cleanup before
+  returning the original error.
+- Unresolved reads/generations and failed remount rollback close candidate
+  clients, remove the affected mounted vlog/plog, and retain both physical files.
+  Remount and relocation retry are fenced until quiescent recovery reconstructs
+  authoritative mounts. Relocation rejects active I/O before touching files.
+- Real deferred-constraint commit failures verify source resolution and retry.
+  Fault injections cover applied-but-error completion, failed resolution reads,
+  returned destination generations, and remount failure with rejected rollback.
+  Tests verify access fencing, retained candidates, restart reads, and stray sweep.
+  Removing generation validation, quarantine, or conditional error cleanup fails
+  the intended regressions; unconditional cleanup deletes the authoritative file.
+- Found and fixed B31: pooled connection replacement previously lost foreign-key
+  enforcement. DSN pragmas now apply foreign keys and durable synchronous settings
+  to every session. Removing the foreign-key pragma permits an invalid insertion
+  in the replacement-session regression.
+- This implements B30's runtime safety and restart path. Online quarantine
+  resolution, the matching placement model, all resolution/deletion crash points,
+  and low-level rollback/VFS/power-loss injections remain unfinished.
+- Full repository tests and the full race suite passed, as did vet and whitespace
+  checks. An added same-server CloseStorage/Recover regression also passed under
+  race and verifies that recovery clears the existing quarantine before reads
+  resume, followed by another restart and safe stray sweep.

@@ -1202,6 +1202,12 @@ func (s *Server) pickDrainDestinationLocked(ctx context.Context, vlogID, fromDis
 // repoints its placement, then re-mounts the owning vlog so in-memory clients
 // resolve to the relocated file. The caller must hold vlogMu.
 func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk, toDisk uint32) error {
+	if err := s.quarantinedVlogs[vlogID]; err != nil {
+		return fmt.Errorf("relocation requires recovery of vlog %d: %w", vlogID, err)
+	}
+	if s.activeVlogOps[vlogID] != 0 {
+		return fmt.Errorf("relocation vlog %d has active I/O", vlogID)
+	}
 	if fromDisk == 0 || toDisk == 0 || fromDisk == toDisk {
 		return fmt.Errorf("relocation requires distinct nonzero disks")
 	}
@@ -1295,25 +1301,57 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 		return err
 	}
 	movedEpoch, err := s.db.MovePlogToDisk(durableCtx, plogID, vlogID, fromDisk, toDisk, sourceEpoch, destination.Epoch)
+	// Model an applied-but-error metadata response separately from a known
+	// successful commit followed by a lost RPC response.
+	if err == nil {
+		if fault := s.maintenanceCheckpoint("relocation-commit-result"); fault != nil {
+			err = &meta.RelocationCommitError{Err: fault}
+		}
+	}
+	var completionErr error
 	if err != nil {
-		_ = reopened.Close()
-		_ = storage.RemovePlogFiles(newPath)
-		return fmt.Errorf("drain: move plog %d to disk %d: %w", plogID, toDisk, err)
+		var uncertain *meta.RelocationCommitError
+		if !errors.As(err, &uncertain) {
+			_ = reopened.Close()
+			_ = storage.RemovePlogFiles(newPath)
+			return fmt.Errorf("drain: move plog %d to disk %d: %w", plogID, toDisk, err)
+		}
+		resolved, resolveErr := uint32(0), s.maintenanceCheckpoint("relocation-reconcile")
+		if resolveErr == nil {
+			resolved, resolveErr = s.db.ResolvePlogRelocation(durableCtx, plogID, vlogID, fromDisk, toDisk, sourceEpoch, movedEpoch)
+		}
+		if resolveErr != nil {
+			failure := errors.Join(err, resolveErr)
+			s.quarantineRelocationLocked(vlogID, plogID, s.plogs[plogID], reopened, failure)
+			return failure
+		}
+		if resolved == fromDisk {
+			_ = reopened.Close()
+			_ = storage.RemovePlogFiles(newPath)
+			return err
+		}
+		completionErr = err
 	}
 	// A lost response after a known successful commit must not skip remounting.
 	// Process-crash tests exit here, before any mounted client is changed.
-	completionErr := s.maintenanceCheckpoint("relocation-after-repoint")
+	completionErr = errors.Join(completionErr, s.maintenanceCheckpoint("relocation-after-repoint"))
 	old := s.plogs[plogID]
 	s.plogs[plogID] = reopened
 
 	// The active vlog must not stay pinned to a relocated shard mid-write; force
 	// a fresh active vlog for subsequent writes, as compaction does.
 	s.clearActiveVlogLocked(vlogID)
-	if err := s.remountVlogLocked(durableCtx, vlogID); err != nil {
+	remountErr := s.maintenanceCheckpoint("relocation-before-remount")
+	if remountErr == nil {
+		remountErr = s.remountVlogLocked(durableCtx, vlogID)
+	}
+	if err := remountErr; err != nil {
 		// The source is still intact, so put the catalog and mounted plog back on
 		// it rather than returning with a half-published relocation.
 		if _, rollbackErr := s.db.MovePlogToDisk(durableCtx, plogID, vlogID, toDisk, fromDisk, movedEpoch, rollbackDisk.Epoch); rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("drain: roll back plog %d placement: %w", plogID, rollbackErr))
+			failure := errors.Join(err, fmt.Errorf("drain: roll back plog %d placement: %w", plogID, rollbackErr))
+			s.quarantineRelocationLocked(vlogID, plogID, old, reopened, failure)
+			return failure
 		}
 		if old != nil {
 			s.plogs[plogID] = old
@@ -1335,6 +1373,9 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 // placement metadata, used after a shard's backing plog moves. The caller must
 // hold vlogMu.
 func (s *Server) remountVlogLocked(ctx context.Context, vlogID uint32) error {
+	if err := s.quarantinedVlogs[vlogID]; err != nil {
+		return fmt.Errorf("vlog %d requires recovery: %w", vlogID, err)
+	}
 	info, err := s.db.GetVlog(ctx, vlogID)
 	if err != nil {
 		return err

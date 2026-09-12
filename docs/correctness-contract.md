@@ -121,6 +121,12 @@ of an unreferenced, obsolete location.
 
 Relocation copies and verifies a destination, syncs it, then repoints metadata.
 It retires source storage only after references and active I/O ownership permit it.
+An uncertain catalog result is not permission to delete either candidate. Resolve
+the exact source/destination generations using a clean catalog session. If that
+fails, or remount and rollback both fail, retain both files and remove the affected
+mounted clients from service until quiescent recovery reconstructs authoritative
+placement. Current quarantine recovery requires recovery/restart; automatic online
+resolution is not yet provided.
 Raw storage RPCs have a separate ownership boundary: raw plog commits cover only
 unmapped plogs; raw vlog writes/commits cover only unleased, unscoped vlogs. They
 cannot append to or advance file-owned storage. File ownership survives lease
