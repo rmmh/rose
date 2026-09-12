@@ -1163,3 +1163,20 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   complete destination generations, source vlog-prefix fencing, or I/O holds.
 - Full repository tests, focused relocation/drain/rebalance/replacement race tests,
   `go vet ./...`, and whitespace checks passed.
+
+### Include logical owner generation in relocation admission
+
+- `CapturePlogRelocation` captures the plog and vlog generations in one query and
+  requires exactly one owning shard before I/O. `MovePlogToDisk` repeats membership
+  and exclusive ownership checks in the repoint transaction. The server remounts
+  one owning vlog before closing the old client, so shared sources are rejected.
+- Source-prefix and lease changes invalidate relocation even when the physical
+  plog generation stays unchanged. The successful move returns both post-trigger
+  generations; rollback must use both instead of sampling an intervening state.
+- Regressions isolate prefix change/return, lease acquisition/release, shared-source
+  admission, and rollback with a fresh plog but stale vlog token. Removing either
+  the vlog comparison or exclusive-owner predicates produces expected failures.
+  Destination lifecycle fencing, physical I/O holds, and safe handling of all
+  ambiguous cleanup outcomes remain required before reducing topology locks.
+- Full repository tests, focused relocation/drain/rebalance/replacement race tests,
+  `go vet ./...`, and whitespace checks passed.

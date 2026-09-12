@@ -155,42 +155,58 @@ func (d *DB) PlogPlacementEpoch(ctx context.Context, plogID, diskID uint32) (int
 	return epoch, err
 }
 
-// MovePlogToDisk atomically fences the source placement and validates every
-// owning vlog's disk separation. Active or draining destinations are readable;
+// RelocationEpochs fences both the physical source and its logical owner.
+type RelocationEpochs struct{ Plog, Vlog int64 }
+
+// CapturePlogRelocation checks exclusive ownership before any physical work.
+func (d *DB) CapturePlogRelocation(ctx context.Context, plogID, vlogID, diskID uint32) (RelocationEpochs, error) {
+	var epoch RelocationEpochs
+	err := d.db.QueryRowContext(ctx, `SELECT p.placement_epoch,v.placement_epoch
+ FROM plog p JOIN vlog_plog vp ON vp.plog_id=p.id JOIN vlog v ON v.id=vp.vlog_id
+ WHERE p.id=? AND v.id=? AND p.disk_id=?
+ AND (SELECT count(*) FROM vlog_plog WHERE plog_id=p.id)=1`, plogID, vlogID, diskID).Scan(&epoch.Plog, &epoch.Vlog)
+	return epoch, err
+}
+
+// MovePlogToDisk atomically fences the source placement and validates exclusive
+// vlog ownership and disk separation. Active or draining destinations are readable;
 // draining is allowed so a failed remount can roll back onto the original disk.
 // Forward placement policy and physical I/O ownership remain server obligations.
 // The returned generation is read after triggers run, within the transaction,
 // and must be used for rollback rather than freshly sampling a changed placement.
-func (d *DB) MovePlogToDisk(ctx context.Context, plogID, oldDiskID, newDiskID uint32, expectedEpoch int64) (int64, error) {
+func (d *DB) MovePlogToDisk(ctx context.Context, plogID, vlogID, oldDiskID, newDiskID uint32, expected RelocationEpochs) (RelocationEpochs, error) {
 	if plogID == 0 || oldDiskID == 0 || newDiskID == 0 || oldDiskID == newDiskID {
-		return 0, fmt.Errorf("relocation requires a plog and distinct nonzero disks")
+		return RelocationEpochs{}, fmt.Errorf("relocation requires a plog and distinct nonzero disks")
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return RelocationEpochs{}, err
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx, `UPDATE plog SET disk_id=? WHERE id=? AND disk_id=? AND placement_epoch=?
+ AND EXISTS(SELECT 1 FROM vlog v JOIN vlog_plog vp ON vp.vlog_id=v.id
+ WHERE v.id=? AND v.placement_epoch=? AND vp.plog_id=?)
+ AND (SELECT count(*) FROM vlog_plog WHERE plog_id=?)=1
  AND EXISTS(SELECT 1 FROM disk d JOIN node n ON n.id=d.node_id
  WHERE d.id=? AND d.state IN ('active','draining') AND n.state='working')
  AND NOT EXISTS(SELECT 1 FROM vlog_plog owner JOIN vlog_plog peer ON peer.vlog_id=owner.vlog_id
- JOIN plog p ON p.id=peer.plog_id WHERE owner.plog_id=? AND peer.plog_id<>? AND p.disk_id=?)`, newDiskID, plogID, oldDiskID, expectedEpoch, newDiskID, plogID, plogID, newDiskID)
+ JOIN plog p ON p.id=peer.plog_id WHERE owner.plog_id=? AND peer.plog_id<>? AND p.disk_id=?)`, newDiskID, plogID, oldDiskID, expected.Plog, vlogID, expected.Vlog, plogID, plogID, newDiskID, plogID, plogID, newDiskID)
 	if err != nil {
-		return 0, err
+		return RelocationEpochs{}, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, err
+		return RelocationEpochs{}, err
 	}
 	if n != 1 {
-		return 0, fmt.Errorf("relocate plog %d: stale source or unavailable/colocated destination", plogID)
+		return RelocationEpochs{}, fmt.Errorf("relocate plog %d: stale source or unavailable/colocated destination", plogID)
 	}
-	var epoch int64
-	if err := tx.QueryRowContext(ctx, "SELECT placement_epoch FROM plog WHERE id=?", plogID).Scan(&epoch); err != nil {
-		return 0, err
+	var epoch RelocationEpochs
+	if err := tx.QueryRowContext(ctx, "SELECT p.placement_epoch,v.placement_epoch FROM plog p JOIN vlog v ON v.id=? WHERE p.id=?", vlogID, plogID).Scan(&epoch.Plog, &epoch.Vlog); err != nil {
+		return RelocationEpochs{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return RelocationEpochs{}, err
 	}
 	return epoch, nil
 }

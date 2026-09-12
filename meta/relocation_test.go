@@ -7,7 +7,7 @@ import (
 )
 
 func TestRelocationFencesSourceAndPlacement(t *testing.T) {
-	for _, kind := range []string{"missing source", "same disk", "wrong source", "missing disk", "failed disk", "failed node", "colocated", "returned source", "valid rollback"} {
+	for _, kind := range []string{"missing source", "same disk", "wrong source", "missing disk", "failed disk", "failed node", "colocated", "returned source", "valid rollback", "vlog prefix", "vlog lease", "shared source"} {
 		t.Run(kind, func(t *testing.T) {
 			db, err := OpenEphemeral()
 			if err != nil {
@@ -33,7 +33,7 @@ func TestRelocationFencesSourceAndPlacement(t *testing.T) {
 			if _, err := db.MakeAssignedPlog(ctx, uid.New(), 2, v, 1); err != nil {
 				t.Fatal(err)
 			}
-			epoch, err := db.PlogPlacementEpoch(ctx, id, 1)
+			epoch, err := db.CapturePlogRelocation(ctx, id, v, 1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -57,14 +57,49 @@ func TestRelocationFencesSourceAndPlacement(t *testing.T) {
 			case "returned source":
 				exec("UPDATE disk SET state='failed' WHERE id=1")
 				exec("UPDATE disk SET state='active' WHERE id=1")
+			case "vlog prefix":
+				exec("UPDATE vlog SET length=1 WHERE id=?", v)
+				exec("UPDATE vlog SET length=0 WHERE id=?", v)
+			case "vlog lease":
+				op, err := db.CreateWriteOp(ctx, "relocation-op", "file")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := db.ClaimVlogLease(ctx, v, op.ID, 0); err != nil {
+					t.Fatal(err)
+				}
+				exec("DELETE FROM vlog_lease WHERE vlog_id=?", v)
+			case "shared source":
+				other, err := db.MakeVlog(ctx, uid.New(), "NONE", 1, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := db.AssignPlogToVlog(ctx, other, 0, id); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.CapturePlogRelocation(ctx, id, v, 1); err == nil {
+					t.Error("captured shared relocation source")
+				}
+				// Isolate the commit-time ownership check from stale epochs.
+				epoch.Plog, err = db.PlogPlacementEpoch(ctx, id, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				epoch.Vlog = replacementEpoch(t, db, v)
 			case "valid rollback":
 				exec("UPDATE disk SET state='draining' WHERE id=1")
-				epoch, err = db.PlogPlacementEpoch(ctx, id, 1)
+				epoch, err = db.CapturePlogRelocation(ctx, id, v, 1)
 				if err != nil {
 					t.Fatal(err)
 				}
 			}
-			next, err := db.MovePlogToDisk(ctx, target, source, dest, epoch)
+			if kind == "vlog prefix" || kind == "vlog lease" {
+				current, err := db.PlogPlacementEpoch(ctx, id, 1)
+				if err != nil || current != epoch.Plog {
+					t.Fatal("fixture failed to isolate vlog generation")
+				}
+			}
+			next, err := db.MovePlogToDisk(ctx, target, v, source, dest, epoch)
 			if kind != "valid rollback" {
 				if err == nil {
 					t.Fatal("invalid relocation accepted")
@@ -74,13 +109,16 @@ func TestRelocationFencesSourceAndPlacement(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || next <= epoch {
-				t.Fatalf("valid relocation=%d %v", next, err)
+			if err != nil || next.Plog <= epoch.Plog || next.Vlog <= epoch.Vlog {
+				t.Fatalf("valid relocation=%v %v", next, err)
 			}
-			if _, err := db.MovePlogToDisk(ctx, id, 3, 1, epoch); err == nil {
+			if _, err := db.MovePlogToDisk(ctx, id, v, 3, 1, epoch); err == nil {
 				t.Fatal("stale rollback accepted")
 			}
-			if _, err := db.MovePlogToDisk(ctx, id, 3, 1, next); err != nil {
+			if _, err := db.MovePlogToDisk(ctx, id, v, 3, 1, RelocationEpochs{Plog: next.Plog, Vlog: epoch.Vlog}); err == nil {
+				t.Fatal("stale vlog rollback accepted")
+			}
+			if _, err := db.MovePlogToDisk(ctx, id, v, 3, 1, next); err != nil {
 				t.Fatalf("rollback to draining source: %v", err)
 			}
 		})

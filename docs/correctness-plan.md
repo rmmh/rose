@@ -475,17 +475,23 @@ cleanup could truncate/remove the source itself. Normal drain/rebalance callers
 attempt to avoid these inputs; this is a primitive-level safety defect, not a
 demonstrated ordinary RPC schedule.
 
-Relocation now rejects same/zero disk IDs before touching files, captures the
-plog placement generation before I/O, and atomically compares source disk and
-generation while checking destination availability and every owner's disk
-separation. Missing/stale rows fail. The returned post-trigger generation fences
+Relocation now rejects same/zero disk IDs before touching files and captures both
+plog and owning-vlog generations in one query. Capture and commit require exactly
+one owning shard: the server remounts that vlog before closing the old client,
+which would otherwise invalidate a shared owner's client. The commit atomically
+compares source disk and both generations while checking destination availability
+and disk separation. Missing/stale rows fail. The returned post-trigger generations fence
 rollback, including rollback to a still-readable draining source disk. Tests
 cover invalid inputs, source return, stale rollback, successful rollback, and
 byte-for-byte source preservation. Removing the early same-disk guard causes the
 physical regression to detect source destruction.
 
-This is not a complete unlocked-I/O protocol: source vlog prefix/lease generations,
-destination lifecycle generations, file holds, and ambiguous cleanup still rely
+Prefix and lease changes invalidate the vlog token even if the plog token stays
+unchanged; regressions isolate those cases and shared-source rejection. Removing
+the vlog comparison or exclusive-owner predicates exposes the unsafe transitions.
+
+This is not a complete unlocked-I/O protocol: destination lifecycle generations,
+file holds, and ambiguous cleanup still rely
 on the existing server ownership interval and need further refinement.
 
 ## Verification defects found while implementing CI

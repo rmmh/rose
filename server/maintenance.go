@@ -1205,7 +1205,7 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 	if fromDisk == 0 || toDisk == 0 || fromDisk == toDisk {
 		return fmt.Errorf("relocation requires distinct nonzero disks")
 	}
-	sourceEpoch, err := s.db.PlogPlacementEpoch(ctx, plogID, fromDisk)
+	sourceEpoch, err := s.db.CapturePlogRelocation(ctx, plogID, vlogID, fromDisk)
 	if err != nil {
 		return fmt.Errorf("capture relocation source: %w", err)
 	}
@@ -1287,7 +1287,7 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 	// initiating RPC is canceled. Returning between those steps would strand the
 	// mounted vlog on a source the catalog no longer knows it must retain.
 	durableCtx := context.WithoutCancel(ctx)
-	movedEpoch, err := s.db.MovePlogToDisk(durableCtx, plogID, fromDisk, toDisk, sourceEpoch)
+	movedEpoch, err := s.db.MovePlogToDisk(durableCtx, plogID, vlogID, fromDisk, toDisk, sourceEpoch)
 	if err != nil {
 		_ = reopened.Close()
 		_ = storage.RemovePlogFiles(newPath)
@@ -1302,7 +1302,7 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 	if err := s.remountVlogLocked(durableCtx, vlogID); err != nil {
 		// The source is still intact, so put the catalog and mounted plog back on
 		// it rather than returning with a half-published relocation.
-		if _, rollbackErr := s.db.MovePlogToDisk(durableCtx, plogID, toDisk, fromDisk, movedEpoch); rollbackErr != nil {
+		if _, rollbackErr := s.db.MovePlogToDisk(durableCtx, plogID, vlogID, toDisk, fromDisk, movedEpoch); rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("drain: roll back plog %d placement: %w", plogID, rollbackErr))
 		}
 		if old != nil {

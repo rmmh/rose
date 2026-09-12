@@ -114,6 +114,14 @@ Repair still holds `vlogMu` across I/O: remote request generations and complete 
 holds are prerequisites for shortening that interval. The fence does not undo
 physical writes or protect clients from being closed during reconstruction.
 
+Relocation captures plog and owning-vlog generations together before I/O. Both
+capture and repoint require exactly one owning shard, because the server remounts
+only that vlog before closing the source client. Repoint checks both generations;
+rollback uses the two post-trigger generations returned by that transaction.
+Prefix and lease changes therefore invalidate work independently of physical
+plog changes. Relocation still needs destination lifecycle fencing and I/O holds
+before its broad topology lock can be reduced.
+
 Bulk publication sync, repair, compaction, and scrub currently retain topology
 ownership across substantial I/O. Replacing these locks requires all of:
 

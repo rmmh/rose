@@ -479,11 +479,11 @@ func (c *virtualScaleCluster) rebalance(maxMoves int, minSkew int64) int {
 			if occupied || p.Length > usage[src]-usage[dst] {
 				continue
 			}
-			epoch, err := c.db.PlogPlacementEpoch(ctx, p.PlogID, src)
+			epoch, err := c.db.CapturePlogRelocation(ctx, p.PlogID, p.VlogID, src)
 			if err != nil {
 				c.t.Fatal(err)
 			}
-			if _, err := c.db.MovePlogToDisk(ctx, p.PlogID, src, dst, epoch); err != nil {
+			if _, err := c.db.MovePlogToDisk(ctx, p.PlogID, p.VlogID, src, dst, epoch); err != nil {
 				c.t.Fatal(err)
 			}
 			usage[src] -= p.Length
