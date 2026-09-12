@@ -75,3 +75,12 @@ test-repair-epochs:
 
 repair-mutations: test-repair-epochs
 	python3 check_repair_mutations.py
+
+.PHONY: test-repair-recovery repair-recovery-mutations
+
+test-repair-recovery:
+	java -Xmx512m -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RoseRepairRecovery.cfg RoseRepairRecovery.tla
+	java -Xmx512m -cp ../tla2tools.jar tlc2.TLC -workers 2 -deadlock -config RoseRepairRecoveryLive.cfg RoseRepairRecovery.tla
+
+repair-recovery-mutations: test-repair-recovery
+	python3 check_repair_recovery_mutations.py

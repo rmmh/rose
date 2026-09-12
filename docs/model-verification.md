@@ -9,8 +9,9 @@ make -C tla check-fast
 This checks prefix safety, conditional prefix liveness, both transaction
 configurations, the small snapshot/owner-pin configuration, and retry-retention
 safety and conditional liveness, and maintenance ownership safety and conditional
-job/retirement liveness, and repair generation safety and attempt termination
-(eleven configurations total). It also tests the
+job/retirement liveness, repair generation safety and attempt termination, and
+repair recovery safety and conditional reclamation (thirteen configurations total).
+It also tests the
 evidence parser. It does not run the large placement or retention state spaces,
 Go tests, or the separate mutation and coverage checks.
 
@@ -22,6 +23,14 @@ when a mutation disables the generation increment itself. Witnesses ensure
 successful repair, fresh retry success, and source/destination return rejection
 are reachable. This protocol model does not cover process-crash orphan cleanup;
 B26's runtime fix is checked separately by repair subprocess-crash regressions.
+
+`make -C tla repair-recovery-mutations` checks the companion recovery model and
+seven fault mutations plus four crash/recovery witnesses. It separates durable
+allocation ownership, atomic catalog retirement, and physical deletion. A raw
+plog must survive; a published destination must remain cataloged and stored.
+Conditional reclamation assumes finitely many crashes/outages, eventual media
+return, and fair recovery/sweeping. It does not model SQLite/VFS torn persistence,
+permanent disk loss, or compose all repair-generation actions into one state graph.
 
 For an explicit artifact directory and time limit per configuration:
 

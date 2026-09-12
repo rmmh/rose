@@ -1121,3 +1121,26 @@ implementation and does not replace or reduce the plan's acceptance criteria.
   and verifies. Removing the marker predicate triggers both negative assertions.
 - Full repository tests, focused metadata/server repair and raw-operation race
   tests, `go vet ./...`, and whitespace checks passed.
+
+### Model repair recovery separately from generation admission
+
+- Added `RoseRepairRecovery`: one source, one raw plog, and one repair destination;
+  separate catalog/file sets; atomic ownership at allocation; pre/post-publication
+  crash recovery; and catalog retirement before physical deletion. It admits two
+  crashes and two temporary outages. The existing generation model remains a
+  separate bounded layer, without claiming a mechanically proved composition.
+- Safety preserves published and raw plogs and excludes terminal abandoned repair
+  rows. Conditional liveness requires finite crashes/outages and weak fairness for
+  recovery, media return, and sweeping. It checks eventual completion and eventual
+  catalog/file agreement; permanent loss and torn SQLite/filesystem persistence
+  remain outside this layer.
+- Both new configurations completed with 359 generated / 155 distinct states,
+  depth 12. Seven fault mutations and four reachability witnesses are detected;
+  these include missing allocation ownership, removal of raw/published data,
+  unsafe sweeping, unfair recovery/sweep/return, and a crash between retirement
+  and unlink. The public make target includes positive checks before sensitivity.
+- All thirteen fast configurations passed with archived tool/source evidence in
+  `/tmp/rose-repair-recovery-fast/results.json`; final mutation/witness results
+  are in `/tmp/rose-repair-recovery-mutations-final/results.json`. Evidence-parser
+  tests, workflow YAML parsing, and whitespace checks passed. CI's fast-model
+  timeout now covers thirteen bounded checks. No production Go code changed.

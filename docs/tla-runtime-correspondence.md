@@ -256,3 +256,29 @@ boundaries. Weak fairness for capture, write, commit, and cleanup makes each
 started attempt terminate. This does not promise successful repair under outage,
 unlimited retries, concurrent repairs, remote completion, or eventual cleanup
 after a process crash. Separate runtime tests cover epoch overflow and reopen.
+
+## Repair process recovery and physical reclamation
+
+`RoseRepairRecovery` complements `RoseRepairEpoch` with a source plog, a legitimate
+unassigned raw plog, and a fresh repair destination. The catalog set and physical
+file set are distinct. At most two process crashes and two transient outages are
+allowed; identities are never reused. This checks another bounded protocol layer,
+not a mechanically proved composition of the repair models.
+
+| Action / state | Runtime correspondence | Abstraction boundary |
+| --- | --- | --- |
+| `Allocate` / `owned` | `MakeRepairPlog` inserts the row and `repair_owned` together | Atomic SQLite statement; a separate late owner update would violate recovery's assumptions. |
+| `Copy` | Verified reconstruction plus destination write/commit | Durable bytes are atomic; no unsynced data is modeled as recoverable here. |
+| `Publish` / `mapped` | `ReplaceShardPlog` replaces the mapping and deletes the old source row | Successful epoch/placement admission is assumed from the companion model and runtime checks. Physical source deletion has not yet happened. |
+| `Reject` / `Cleanup` | Rejected completion, then `DiscardUnassignedPlog` | Catalog retirement only. The model has no caller-held raw destination; its raw plog is unrelated to the repair. |
+| `Crash` / `Recover` | Process exit, then `RetireUnassignedRepairPlogs` before mounting/resuming work | Catalog ownership survives; recovery removes only owned unassigned rows. Pre/post-repoint subprocess regressions check these boundaries. |
+| `Sweep` | Catalog-first `RemovePlogFiles`, or `SweepStrayPlogFiles` after interruption | Each physical deletion is separate from catalog retirement and consults current ownership. Data and undo-journal ordering remains a lower-layer obligation. |
+| `Fail` / `Return` | Unreachable disk/node and subsequent return | Temporary unavailability only; no destructive media loss. |
+
+Safety preserves published catalog/file membership, preserves the unrelated raw
+plog, and forbids an abandoned repair catalog row after recovery/cleanup finishes.
+Conditional liveness checks eventual termination and eventual catalog/file
+agreement under weak fairness for the protocol, recovery, media return, and
+sweeping. No liveness claim applies to permanent outage or unfair scheduling.
+Witnesses reach crashes before physical copy, after publication, after catalog
+retirement but before unlink, and successful cleanup following restart.
