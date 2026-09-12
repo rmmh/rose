@@ -612,6 +612,24 @@ enforcement and the synchronous setting after replacement, then verifies that
 relocation can retry successfully. Ephemeral catalogs remain non-durable and must
 not be used to test persistence across a discarded in-memory connection.
 
+### B32 — P1: successful placement rollback does not validate changed shard clients
+
+`ReconcileShardLengths` can trim one backing file before another shard returns an
+I/O error. Relocation then rolled placement back and reinstated the old mounted
+vlog without rechecking the changed clients. `TestRelocationPartialRemountRollbackRequiresRecovery`
+reproduces this with real files: the first candidate's unpublished tail is trimmed,
+a later closed descriptor causes reconciliation to fail, the catalog returns to
+the source, and the old code retains an unchecked mounted vlog. This demonstrates
+an incomplete recovery path, not acknowledged-byte corruption.
+
+After successful catalog rollback, relocation now rebuilds the vlog from restored
+placement. If that remount fails, it quarantines access and retains both candidates
+for recovery. The regression verifies actual partial progress, the restored source
+mapping, quarantine, candidate preservation, and readable acknowledged bytes after
+quiescent recovery and stray cleanup. The companion model now separates catalog
+rollback from restored-client validation; skipping validation violates the new
+accessible-client invariant.
+
 ## Verification defects found while implementing CI
 
 - The FUSE helper passed macFUSE-only options to Linux and skipped all mount or

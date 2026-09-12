@@ -5,18 +5,19 @@ EXTENDS Naturals, FiniteSets, TLC
 \* acknowledged prefix. Catalog placement and mounted clients are independent.
 \* One relocation attempt, two lifecycle events, and two process crashes.
 VARIABLES catalog, files, mounted, phase, epoch, after, rollbackFresh,
-          changes, crashes, sourceFresh, destFresh, resolutionSafe
+          changes, crashes, sourceFresh, destFresh, resolutionSafe, clientsReady
 vars == <<catalog, files, mounted, phase, epoch, after, rollbackFresh,
-          changes, crashes, sourceFresh, destFresh, resolutionSafe>>
+          changes, crashes, sourceFresh, destFresh, resolutionSafe, clientsReady>>
 Init ==
     /\ catalog = 0 /\ files = {0} /\ mounted = 0 /\ phase = "copy"
     /\ epoch = 0 /\ after = 0 /\ rollbackFresh = TRUE
     /\ changes = 0 /\ crashes = 0
     /\ sourceFresh = TRUE /\ destFresh = FALSE /\ resolutionSafe = TRUE
+    /\ clientsReady = TRUE
 Copy ==
     /\ phase = "copy"
     /\ files' = files \cup {1} /\ phase' = "commit"
-    /\ UNCHANGED <<catalog, mounted, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe>>
+    /\ UNCHANGED <<catalog, mounted, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe, clientsReady>>
 \* A rejected commit and an applied-but-error commit have the same caller
 \* outcome. The attempted post-update token is available in either case.
 Commit ==
@@ -28,7 +29,7 @@ Commit ==
         /\ epoch' = IF applied /\ epoch = 0 THEN epoch + 1 ELSE epoch
         /\ phase' = IF uncertain /\ epoch = 0 THEN "resolve"
                      ELSE IF applied /\ epoch = 0 THEN "remount" ELSE "cleanup"
-    /\ UNCHANGED <<files, mounted, rollbackFresh, changes, crashes, sourceFresh, resolutionSafe>>
+    /\ UNCHANGED <<files, mounted, rollbackFresh, changes, crashes, sourceFresh, resolutionSafe, clientsReady>>
 Resolve ==
     /\ phase = "resolve"
     /\ LET sourceOK == catalog = 0 /\ epoch = 0
@@ -38,14 +39,15 @@ Resolve ==
           /\ mounted' = IF sourceOK \/ destOK THEN mounted ELSE 2
           /\ resolutionSafe' = (resolutionSafe /\
                  (phase' = "quarantine" \/ (catalog = 0 /\ sourceFresh) \/ (catalog = 1 /\ destFresh)))
-    /\ UNCHANGED <<catalog, files, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh>>
+    /\ UNCHANGED <<catalog, files, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, clientsReady>>
 ResolveFailure ==
     /\ phase = "resolve"
     /\ phase' = "quarantine" /\ mounted' = 2
-    /\ UNCHANGED <<catalog, files, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe>>
+    /\ UNCHANGED <<catalog, files, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe, clientsReady>>
 Remount ==
     /\ phase = "remount"
     /\ \E success \in BOOLEAN :
+        /\ clientsReady' = success
         /\ mounted' = IF success THEN catalog ELSE mounted
         /\ phase' = IF success THEN "cleanup" ELSE "rollback"
     /\ UNCHANGED <<catalog, files, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe>>
@@ -55,13 +57,22 @@ Rollback ==
         /\ LET succeeds == applied /\ rollbackFresh /\ epoch = after
            IN /\ catalog' = IF succeeds THEN 0 ELSE catalog
               /\ epoch' = IF succeeds THEN epoch + 1 ELSE epoch
-              /\ phase' = IF succeeds /\ ~uncertain THEN "cleanup" ELSE "quarantine"
+              /\ phase' = IF succeeds /\ ~uncertain THEN "restore" ELSE "quarantine"
               /\ mounted' = IF succeeds /\ ~uncertain THEN 0 ELSE 2
-    /\ UNCHANGED <<files, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe>>
+    /\ UNCHANGED <<files, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe, clientsReady>>
+\* A rollback does not undo partial reconciliation of the shard clients.
+Restore ==
+    /\ phase = "restore"
+    /\ \E success \in BOOLEAN :
+        /\ clientsReady' = success
+        /\ mounted' = IF success THEN catalog ELSE 2
+        /\ phase' = IF success THEN "cleanup" ELSE "quarantine"
+    /\ UNCHANGED <<catalog, files, epoch, after, rollbackFresh, changes, crashes,
+                   sourceFresh, destFresh, resolutionSafe>>
 Cleanup ==
     /\ phase = "cleanup"
     /\ files' = files \ {1 - catalog} /\ phase' = "done"
-    /\ UNCHANGED <<catalog, mounted, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe>>
+    /\ UNCHANGED <<catalog, mounted, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe, clientsReady>>
 \* A source-disk lifecycle change after repoint invalidates the rollback token
 \* independently of the moved plog's generation. Events preserve physical bytes.
 Change(disk) ==
@@ -71,15 +82,17 @@ Change(disk) ==
     /\ destFresh' = (destFresh /\ ~(disk = 1 /\ catalog = 1))
     /\ epoch' = IF disk = catalog THEN epoch + 1 ELSE epoch
     /\ rollbackFresh' = (rollbackFresh /\ disk # 0)
-    /\ UNCHANGED <<catalog, files, mounted, phase, after, crashes, resolutionSafe>>
+    /\ UNCHANGED <<catalog, files, mounted, phase, after, crashes, resolutionSafe, clientsReady>>
 Crash ==
     /\ crashes < 2
     /\ crashes' = crashes + 1 /\ phase' = "recover" /\ mounted' = 2
+    /\ clientsReady' = FALSE
     /\ UNCHANGED <<catalog, files, epoch, after, rollbackFresh, changes, sourceFresh, destFresh, resolutionSafe>>
 Recover ==
     /\ phase \in {"recover", "quarantine"}
     /\ catalog \in files
     /\ mounted' = catalog /\ phase' = "done"
+    /\ clientsReady' = TRUE
     /\ UNCHANGED <<catalog, files, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe>>
 \* No sweeper can interleave with the invocation's topology ownership. After
 \* quarantine/restart it must distinguish disk locations of the same plog ID.
@@ -87,17 +100,19 @@ Sweep(disk) ==
     /\ phase \in {"done", "recover", "quarantine"}
     /\ disk \in files /\ disk # catalog
     /\ files' = files \ {disk}
-    /\ UNCHANGED <<catalog, mounted, phase, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe>>
+    /\ UNCHANGED <<catalog, mounted, phase, epoch, after, rollbackFresh, changes, crashes, sourceFresh, destFresh, resolutionSafe, clientsReady>>
 Next == Copy \/ Commit \/ Resolve \/ ResolveFailure \/ Remount \/ Rollback
-    \/ Cleanup \/ Crash \/ Recover
+    \/ Restore \/ Cleanup \/ Crash \/ Recover
     \/ (\E disk \in {0,1} : Change(disk) \/ Sweep(disk))
 TypeOK ==
     /\ catalog \in {0,1} /\ files \subseteq {0,1}
+    /\ clientsReady \in BOOLEAN
     /\ sourceFresh \in BOOLEAN /\ destFresh \in BOOLEAN /\ resolutionSafe \in BOOLEAN
     /\ mounted \in {0,1,2} /\ rollbackFresh \in BOOLEAN
     /\ phase \in {"copy","commit","resolve","remount","rollback",
-                   "cleanup","done","quarantine","recover"}
+                   "restore","cleanup","done","quarantine","recover"}
     /\ epoch \in 0..4 /\ after \in 0..3 /\ changes \in 0..2 /\ crashes \in 0..2
+AccessibleClientsValidated == phase = "done" => clientsReady
 ResolutionFresh == resolutionSafe
 PublishedPreserved == catalog \in files
 AccessCoherent == phase \in {"done","quarantine"} => (mounted = 2 \/ mounted = catalog)
@@ -105,7 +120,7 @@ QuarantineFenced == phase = "quarantine" => mounted = 2
 ServedFilePresent == phase = "done" => mounted \in files
 Spec == Init /\ [][Next]_vars
 LiveSpec == Spec /\ WF_vars(Copy) /\ WF_vars(Commit) /\ WF_vars(Resolve)
-    /\ WF_vars(Remount) /\ WF_vars(Rollback) /\ WF_vars(Cleanup) /\ WF_vars(Recover)
+    /\ WF_vars(Remount) /\ WF_vars(Rollback) /\ WF_vars(Restore) /\ WF_vars(Cleanup) /\ WF_vars(Recover)
     /\ \A disk \in {0,1} : WF_vars(Sweep(disk))
 EventuallyRecovered == <>[](phase = "done" /\ mounted = catalog)
 EventuallyReclaimed == <>[](files = {catalog})

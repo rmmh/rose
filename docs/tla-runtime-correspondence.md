@@ -299,27 +299,33 @@ resolution even when a mutation removes the epoch increment itself.
 | `Commit` / `catalog`, `after` | `MovePlogToDisk` and attempted post-trigger generations | Applied and rejected transactions can both return uncertain outcomes. Atomic persistence is assumed; driver/VFS internals are omitted. |
 | `Change` / `epoch`, `rollbackFresh` | Source/vlog and destination disk generation fences | Original-disk changes after repoint can invalidate rollback without changing the moved plog epoch. Physical bytes survive these events. |
 | `Resolve`, `ResolveFailure` | Clean-session `ResolvePlogRelocation`, or failed reads | Exact source/destination generations resolve; stale/failed resolution quarantines. Session cleanup is a runtime assumption, covered in part by deferred-constraint tests. |
-| `Remount`, `Rollback` | Client replacement, `remountVlogLocked`, fenced reverse `MovePlogToDisk` | Either can fail independently. An uncertain rollback can have applied or not. Partial remount changes within storage clients are not represented. |
+| `Remount`, `Rollback` | Client replacement, `remountVlogLocked`, fenced reverse `MovePlogToDisk` | Either can fail independently. An uncertain rollback can have applied or not. A failed remount invalidates client readiness; individual file mutations remain abstract. |
+| `Restore` / `clientsReady` | `remountVlogLocked` after successful rollback | Restored clients must validate before access; another failure quarantines. |
 | `quarantine` / mounted sentinel | `quarantineRelocationLocked` | No mounted access. A running invocation excludes outside I/O until cleanup or quarantine; reader holds are not modeled. |
 | `Cleanup`, `Sweep` | Conditional candidate removal and `SweepStrayPlogFiles` | Per-disk ownership matters despite a shared plog ID. Sweep cannot interleave with an invocation holding topology ownership. |
 | `Crash`, `Recover` | Process exit; quiescent `Recover` reconstructs authoritative mounts | Catalog and files persist; mounted clients disappear. Recovery is atomic here, and physical cleanup remains a separate action. |
 
 Safety checks authoritative-file preservation, coherent accessible mounts,
-quarantine fencing, served-file presence, and freshness of every resolved result.
+quarantine fencing, served-file presence, validated accessible clients, and
+freshness of every resolved result.
 Conditional liveness requires eventual recovered access and reclamation under
 weak fairness for protocol steps, recovery, and sweeping, with finite crashes
 and lifecycle changes. It does not promise availability during failed recovery.
 
-Eleven mutations cover missing copy, unconditional destination deletion, skipped
+Twelve mutations cover missing copy, unconditional destination deletion, skipped
 remount, missing source/destination epoch checks or increments, missing fences,
-unsafe sweeping, and unfair recovery/sweep. Six witnesses cover applied/rejected
+unsafe sweeping, missing rollback validation, and unfair recovery/sweep. Seven
+witnesses cover applied/rejected
 uncertain commits, stale destination quarantine, independently invalidated rollback
-tokens, applied-but-uncertain rollback, and recovery followed by stray cleanup.
+tokens, applied-but-uncertain rollback, rollback awaiting client validation, and
+recovery followed by stray cleanup.
 
 This is a bounded protocol check for B30, not a mechanical refinement proof or
 composition with the repair/maintenance models. Runtime tests cover the major
 forward-result paths, rejected and applied-but-error rollback, quarantine, and
 restart. Subprocess exits cover committed rollback before client restoration and
-quarantine after candidate clients close. Partial remount failures, every remaining
-resolution/deletion crash boundary,
-active I/O, online retry, and low-level persistence failures remain incomplete.
+quarantine after candidate clients close. B32 adds a real successful shard trim
+followed by a closed-descriptor I/O failure and failed rollback remount, then
+checks recovery of acknowledged bytes. Other partial remount schedules, remaining
+resolution/deletion crash boundaries, active I/O, online retry, and low-level
+persistence failures remain incomplete.

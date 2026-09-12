@@ -33,14 +33,16 @@ Conditional reclamation assumes finitely many crashes/outages, eventual media
 return, and fair recovery/sweeping. It does not model SQLite/VFS torn persistence,
 permanent disk loss, or compose all repair-generation actions into one state graph.
 
-`make -C tla relocation-mutations` checks relocation outcomes, eleven fault
-mutations, and six reachability witnesses. Catalog placement, mounted clients,
+`make -C tla relocation-mutations` checks relocation outcomes, twelve fault
+mutations, and seven reachability witnesses. Catalog placement, mounted clients,
 and per-disk files are separate. It covers uncertain forward/rollback outcomes,
 generation-sensitive resolution, quarantine, recovery, and physical cleanup.
 Independent freshness history checks resolution even if an epoch increment is
 removed. Conditional progress assumes fair recovery and sweeping after finitely
 many crashes and lifecycle changes. This is one serialized attempt over complete
-durable copies; byte-level failures, active I/O, online retry, and multiple
+durable copies. A failed remount invalidates client readiness, and a successful
+rollback must validate restored clients before resuming access. Byte-level
+failures, active I/O, online retry, and multiple
 interacting jobs still need additional coverage.
 
 For an explicit artifact directory and time limit per configuration:

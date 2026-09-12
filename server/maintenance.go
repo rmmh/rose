@@ -1362,6 +1362,13 @@ func (s *Server) migratePlogLocked(ctx context.Context, plogID, vlogID, fromDisk
 		} else {
 			delete(s.plogs, plogID)
 		}
+		// The failed remount may already have reconciled earlier shard files.
+		// Restoring catalog placement alone does not validate the old vlog's
+		// clients or cursor. Rebuild it from the restored placement before serving.
+		if restoreErr := s.remountVlogLocked(durableCtx, vlogID); restoreErr != nil {
+			failure := errors.Join(err, fmt.Errorf("drain: remount rolled-back vlog %d: %w", vlogID, restoreErr))
+			return s.quarantineRelocationLocked(vlogID, plogID, old, reopened, failure)
+		}
 		_ = reopened.Close()
 		_ = storage.RemovePlogFiles(newPath)
 		return err

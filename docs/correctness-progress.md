@@ -1372,3 +1372,27 @@ implementation and does not replace or reduce the plan's acceptance criteria.
 - The original resumed EC session remains live. Its last observed sample reached
   depth 27 with 128,065,083 distinct states and 15,652,359 queued states. This is
   continued incomplete exploration, not verification success.
+
+### Validate restored clients after partial remount failure
+
+- Reproduced B32 using a real successful trim followed by a later shard's closed-
+  descriptor I/O failure. Catalog rollback succeeded, but the old implementation
+  retained an unchecked mounted vlog. The original regression fails explicitly
+  on that state; it does not claim acknowledged-byte corruption.
+- Successful relocation rollback now remounts the restored placement. A second
+  reconciliation failure quarantines clients and retains both candidates. The
+  regression checks the partial physical progress, source mapping, quarantine,
+  candidate files, and acknowledged bytes after quiescent recovery and sweeping.
+- Extended `RoseRelocationOutcome` with restored-client validation and a readiness
+  invariant. Both configurations complete with 1,142 generated states, 396 distinct
+  states, zero queued states, and depth 11. All fifteen fast configurations passed
+  (`/tmp/rose-partial-remount-fast`); all twelve mutations and seven witnesses were
+  detected (`/tmp/rose-partial-remount-mutations`).
+- Full repository tests, focused relocation/drain/rebalance race tests, vet, and
+  whitespace checks passed. Other partial I/O schedules and online recovery remain
+  unfinished.
+- User requested stopping after this commit. Stopped EC session 16491 with SIGTERM;
+  exit 143 is confirmed. Its last sample reached 129,708,463 distinct states with
+  15,297,461 queued at depth 27. The completed checkpoint from 2026-09-11 23:55:49
+  remains at `/tmp/rose-impl-tla/states/26-09-07-15-10-04.733`; the resume manifest
+  records the stop. This check is incomplete and must not be reported as passing.

@@ -26,6 +26,7 @@ def main():
         ("omit_durable_copy", [("files' = files \\cup {1}", "files' = files")], "PublishedPreserved"),
         ("delete_destination_on_error", [("files' = files \\ {1 - catalog}", "files' = files \\ {1}")], "PublishedPreserved"),
         ("skip_remount", [("mounted' = IF success THEN catalog ELSE mounted", "mounted' = mounted")], "AccessCoherent"),
+        ("skip_rollback_validation", [("phase' = IF succeeds /\\ ~uncertain THEN \"restore\" ELSE \"quarantine\"", "phase' = IF succeeds /\\ ~uncertain THEN \"cleanup\" ELSE \"quarantine\"")], "AccessibleClientsValidated"),
         ("ignore_source_epoch", [("sourceOK == catalog = 0 /\\ epoch = 0", "sourceOK == catalog = 0")], "ResolutionFresh"),
         ("ignore_destination_epoch", [("destOK == catalog = 1 /\\ epoch = after", "destOK == catalog = 1")], "ResolutionFresh"),
         ("omit_epoch_increment", [("epoch' = IF disk = catalog THEN epoch + 1 ELSE epoch", "epoch' = epoch")], "ResolutionFresh"),
@@ -41,6 +42,7 @@ def main():
         ("stale_destination_quarantine", 'phase = "quarantine" /\\ catalog = 1 /\\ ~destFresh'),
         ("rollback_token_changed", 'phase = "rollback" /\\ epoch = after /\\ ~rollbackFresh'),
         ("applied_uncertain_rollback", 'phase = "quarantine" /\\ catalog = 0 /\\ epoch = after + 1 /\\ changes = 0'),
+        ("rollback_requires_validation", 'phase = "restore" /\\ catalog = 0 /\\ ~clientsReady'),
         ("recovered_stray_cleanup", 'phase = "done" /\\ crashes > 0 /\\ catalog = 1 /\\ files = {1}'),
     ]:
         marker = "ResolutionFresh == resolutionSafe"

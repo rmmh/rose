@@ -161,6 +161,10 @@ quarantine path as a real rollback error. `relocation-quarantined` follows clien
 closure and removal from mounted maps; neither candidate file has been deleted.
 Both boundaries support process-exit tests independently of ordinary error unwinding.
 
+Successful catalog rollback also requires a fresh remount before access resumes:
+the original failed remount may already have trimmed some shard tails. Failure to
+validate the restored clients enters quarantine while preserving both candidates.
+
 Bulk publication sync, repair, compaction, and scrub currently retain topology
 ownership across substantial I/O. Replacing these locks requires all of:
 
